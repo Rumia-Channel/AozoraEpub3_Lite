@@ -125,6 +125,7 @@ pub struct AozoraConfig {
     pub suffix_notes: BTreeMap<String, SuffixNoteRule>,
     pub gaiji: BTreeMap<String, String>,
     pub gaiji_alternatives: BTreeMap<String, String>,
+    pub latin_replacements: BTreeMap<String, String>,
     pub page_break_notes: BTreeSet<String>,
     pub split_page_breaks: bool,
 }
@@ -167,6 +168,7 @@ impl Default for AozoraConfig {
             suffix_notes: BTreeMap::new(),
             gaiji: BTreeMap::new(),
             gaiji_alternatives: BTreeMap::new(),
+            latin_replacements: BTreeMap::new(),
             page_break_notes: BTreeSet::from(["改ページ".to_owned()]),
             split_page_breaks: true,
         }
@@ -202,6 +204,7 @@ impl AozoraConfig {
             config.load_optional_file(directory.join("chuki_utf.txt"), Self::load_utf_text)?;
             config.load_optional_file(directory.join("chuki_ivs.txt"), Self::load_ivs_text)?;
             config.load_optional_file(directory.join("chuki_alt.txt"), Self::load_alt_text)?;
+            config.load_optional_file(directory.join("chuki_latin.txt"), Self::load_latin_text)?;
         }
 
         Ok(config)
@@ -292,6 +295,32 @@ impl AozoraConfig {
         load_gaiji_rows(&mut self.gaiji_alternatives, input);
     }
 
+    pub fn load_latin_text(&mut self, input: &str) {
+        for line in input.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let fields = line.split('\t').collect::<Vec<_>>();
+            let Some(pattern) = fields
+                .first()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            let Some(replacement) = fields
+                .get(1)
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            self.latin_replacements
+                .insert(pattern.to_owned(), replacement.to_owned());
+        }
+    }
+
     fn load_optional_file(
         &mut self,
         path: impl AsRef<Path>,
@@ -366,5 +395,13 @@ mod tests {
             config.gaiji_alternatives.get("※［＃感嘆符三つ］"),
             Some(&"［＃縦中横］!!!［＃縦中横終わり］".to_owned())
         );
+    }
+
+    #[test]
+    fn loads_latin_replacement_rows() {
+        let mut config = AozoraConfig::default();
+        config.load_latin_text("A`\tÀ\t164\t8883\nAE&\tÆ\n");
+        assert_eq!(config.latin_replacements.get("A`"), Some(&"À".to_owned()));
+        assert_eq!(config.latin_replacements.get("AE&"), Some(&"Æ".to_owned()));
     }
 }

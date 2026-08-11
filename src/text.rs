@@ -306,6 +306,19 @@ fn convert_inline(input: &str, config: &AozoraConfig) -> String {
             index = end;
             continue;
         }
+        if chars[index] == '〔'
+            && let Some(close) = find_closing_latin_bracket(&chars, index)
+        {
+            let inner = &chars[index + 1..close];
+            if inner.iter().copied().all(is_half_space) {
+                let separated = inner.iter().collect::<String>();
+                let replacement = convert_latin(&separated, config);
+                output.push_str(&escape_html(&replacement));
+                index = close + 1;
+                continue;
+            }
+        }
+
         if chars[index] == '｜'
             && let Some((open, close)) = find_ruby_bounds(&chars, index + 1)
         {
@@ -660,6 +673,61 @@ fn find_closing_ruby(chars: &[char], open: usize) -> Option<usize> {
         .find_map(|(index, character)| (*character == '》').then_some(index))
 }
 
+fn find_closing_latin_bracket(chars: &[char], open: usize) -> Option<usize> {
+    chars
+        .iter()
+        .enumerate()
+        .skip(open + 1)
+        .find_map(|(index, character)| (*character == '〕').then_some(index))
+}
+
+fn convert_latin(input: &str, config: &AozoraConfig) -> String {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+
+    while index < chars.len() {
+        if let Some(replacement) =
+            find_latin_replacement(&chars, index, 2, &config.latin_replacements)
+        {
+            output.push_str(replacement);
+            index += 2;
+            continue;
+        }
+        if let Some(replacement) =
+            find_latin_replacement(&chars, index, 3, &config.latin_replacements)
+        {
+            output.push_str(replacement);
+            index += 3;
+            continue;
+        }
+
+        output.push(chars[index]);
+        index += 1;
+    }
+
+    output
+}
+
+fn find_latin_replacement<'a>(
+    chars: &[char],
+    index: usize,
+    length: usize,
+    replacements: &'a std::collections::BTreeMap<String, String>,
+) -> Option<&'a str> {
+    let candidate = chars.get(index..index + length)?;
+    replacements.iter().find_map(|(pattern, replacement)| {
+        pattern
+            .chars()
+            .eq(candidate.iter().copied())
+            .then_some(replacement.as_str())
+    })
+}
+
+fn is_half_space(character: char) -> bool {
+    (0x20..=0x02af).contains(&(character as u32))
+}
+
 fn is_ruby_base(character: char) -> bool {
     matches!(
         character as u32,
@@ -840,6 +908,15 @@ mod tests {
         assert!(output.contains("<span class=\"tcy\">!!!</span>"));
         assert!(output.contains("<span class=\"kogaki\">こ</span>"));
         assert!(!output.contains("※［＃"));
+    }
+
+    #[test]
+    fn converts_external_latin_decomposition_inside_brackets() {
+        let mut config = AozoraConfig::default();
+        config.load_latin_text("A`\tÀ\nAE&\tÆ\n");
+        let output =
+            super::plain_text_to_xhtml_with_config("〔A` AE&〕 〔漢字〕", &config).unwrap();
+        assert!(output.contains("<p>À Æ 〔漢字〕</p>"));
     }
 
     #[test]
