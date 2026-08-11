@@ -38,3 +38,36 @@ fn writes_epub3_layout_with_uncompressed_mimetype_first() {
     assert!(package.contains("<dc:title>試験 &lt;作品&gt;</dc:title>"));
     assert!(package.contains("<dc:creator id=\"creator\">著者 &amp; 共著</dc:creator>"));
 }
+
+#[test]
+fn writes_all_sections_to_manifest_spine_and_navigation() {
+    let book = EpubBook::from_sections(
+        EpubMetadata::new("分割", "urn:test:sections"),
+        ["    <p>一</p>\n", "    <p>二</p>\n"],
+    );
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+
+    assert!(archive.by_name("item/xhtml/0001.xhtml").is_ok());
+    assert!(archive.by_name("item/xhtml/0002.xhtml").is_ok());
+
+    let mut package = String::new();
+    archive
+        .by_name("item/standard.opf")
+        .unwrap()
+        .read_to_string(&mut package)
+        .unwrap();
+    assert!(package.contains("id=\"section-0001\""));
+    assert!(package.contains("id=\"section-0002\""));
+    assert!(package.contains("idref=\"section-0001\""));
+    assert!(package.contains("idref=\"section-0002\""));
+
+    let mut nav = String::new();
+    archive
+        .by_name("item/nav.xhtml")
+        .unwrap()
+        .read_to_string(&mut nav)
+        .unwrap();
+    assert!(nav.contains("xhtml/0001.xhtml"));
+    assert!(nav.contains("xhtml/0002.xhtml"));
+}

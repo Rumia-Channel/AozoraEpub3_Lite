@@ -109,17 +109,44 @@ impl EpubMetadata {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EpubSection {
+    pub body_fragment: String,
+}
+
+impl EpubSection {
+    pub fn new(body_fragment: impl Into<String>) -> Self {
+        Self {
+            body_fragment: body_fragment.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EpubBook {
     pub metadata: EpubMetadata,
-    pub body_fragment: String,
+    pub sections: Vec<EpubSection>,
 }
 
 impl EpubBook {
     pub fn new(metadata: EpubMetadata, body_fragment: impl Into<String>) -> Self {
-        Self {
-            metadata,
-            body_fragment: body_fragment.into(),
-        }
+        Self::from_sections(metadata, [body_fragment.into()])
+    }
+
+    pub fn from_sections<I, S>(metadata: EpubMetadata, sections: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let sections = sections
+            .into_iter()
+            .map(EpubSection::new)
+            .collect::<Vec<_>>();
+        let sections = if sections.is_empty() {
+            vec![EpubSection::new("")]
+        } else {
+            sections
+        };
+        Self { metadata, sections }
     }
 
     pub fn write_to<W: Write + Seek>(&self, output: W) -> Result<W, EpubError> {
@@ -141,19 +168,19 @@ impl EpubBook {
         write_entry(
             &mut archive,
             "item/standard.opf",
-            render_package(&self.metadata).as_bytes(),
+            render_package(&self.metadata, self.sections.len()).as_bytes(),
             CompressionMethod::Deflated,
         )?;
         write_entry(
             &mut archive,
             "item/nav.xhtml",
-            render_nav(&self.metadata).as_bytes(),
+            render_nav(&self.metadata, self.sections.len()).as_bytes(),
             CompressionMethod::Deflated,
         )?;
         write_entry(
             &mut archive,
             "item/toc.ncx",
-            render_ncx(&self.metadata).as_bytes(),
+            render_ncx(&self.metadata, self.sections.len()).as_bytes(),
             CompressionMethod::Deflated,
         )?;
         write_entry(
@@ -162,12 +189,15 @@ impl EpubBook {
             BOOK_STYLE_CSS.as_bytes(),
             CompressionMethod::Deflated,
         )?;
-        write_entry(
-            &mut archive,
-            "item/xhtml/0001.xhtml",
-            render_section(&self.metadata, &self.body_fragment).as_bytes(),
-            CompressionMethod::Deflated,
-        )?;
+        for (index, section) in self.sections.iter().enumerate() {
+            let path = format!("item/xhtml/{:04}.xhtml", index + 1);
+            write_entry(
+                &mut archive,
+                &path,
+                render_section(&self.metadata, &section.body_fragment).as_bytes(),
+                CompressionMethod::Deflated,
+            )?;
+        }
 
         Ok(archive.finish()?)
     }
@@ -201,7 +231,7 @@ fn write_entry<W: Write + Seek>(
     Ok(())
 }
 
-fn render_package(metadata: &EpubMetadata) -> String {
+fn render_package(metadata: &EpubMetadata, section_count: usize) -> String {
     let creator = metadata
         .creator
         .as_deref()
@@ -212,6 +242,15 @@ fn render_package(metadata: &EpubMetadata) -> String {
             )
         })
         .unwrap_or_default();
+    let mut manifest_sections = String::new();
+    let mut spine_sections = String::new();
+    for index in 0..section_count {
+        let number = index + 1;
+        manifest_sections.push_str(&format!(
+            "    <item id=\"section-{number:04}\" href=\"xhtml/{number:04}.xhtml\" media-type=\"application/xhtml+xml\"/>\n"
+        ));
+        spine_sections.push_str(&format!("    <itemref idref=\"section-{number:04}\"/>\n"));
+    }
 
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -225,12 +264,10 @@ fn render_package(metadata: &EpubMetadata) -> String {
   <manifest>
     <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
     <item id="style" href="style/book-style.css" media-type="text/css"/>
-    <item id="section-0001" href="xhtml/0001.xhtml" media-type="application/xhtml+xml"/>
-    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+{}    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
   </manifest>
   <spine page-progression-direction="rtl" toc="ncx">
-    <itemref idref="section-0001"/>
-  </spine>
+{}  </spine>
 </package>
 "#,
         xml_escape(&metadata.title),
@@ -238,10 +275,26 @@ fn render_package(metadata: &EpubMetadata) -> String {
         xml_escape(&metadata.language),
         xml_escape(&metadata.identifier),
         xml_escape(&metadata.modified),
+        manifest_sections,
+        spine_sections,
     )
 }
 
-fn render_nav(metadata: &EpubMetadata) -> String {
+fn render_nav(metadata: &EpubMetadata, section_count: usize) -> String {
+    let mut nav_items = String::new();
+    for index in 0..section_count {
+        let number = index + 1;
+        let label = if section_count == 1 {
+            "本文".to_owned()
+        } else {
+            format!("本文 {number}")
+        };
+        nav_items.push_str(&format!(
+            "      <li><a href=\"xhtml/{number:04}.xhtml\">{}</a></li>\n",
+            xml_escape(&label)
+        ));
+    }
+
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
@@ -254,18 +307,35 @@ fn render_nav(metadata: &EpubMetadata) -> String {
   <nav epub:type="toc" id="toc">
     <h1>目次</h1>
     <ol>
-      <li><a href="xhtml/0001.xhtml">本文</a></li>
-    </ol>
+{items}    </ol>
   </nav>
 </body>
 </html>
 "#,
         language = xml_escape(&metadata.language),
         title = xml_escape(&metadata.title),
+        items = nav_items,
     )
 }
 
-fn render_ncx(metadata: &EpubMetadata) -> String {
+fn render_ncx(metadata: &EpubMetadata, section_count: usize) -> String {
+    let mut nav_points = String::new();
+    for index in 0..section_count {
+        let number = index + 1;
+        let label = if section_count == 1 {
+            "本文".to_owned()
+        } else {
+            format!("本文 {number}")
+        };
+        nav_points.push_str(&format!(
+            "    <navPoint id=\"navpoint-{number}\" playOrder=\"{number}\">\n\
+      <navLabel><text>{}</text></navLabel>\n\
+      <content src=\"xhtml/{number:04}.xhtml\"/>\n\
+    </navPoint>\n",
+            xml_escape(&label)
+        ));
+    }
+
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">
@@ -275,15 +345,12 @@ fn render_ncx(metadata: &EpubMetadata) -> String {
   </head>
   <docTitle><text>{title}</text></docTitle>
   <navMap>
-    <navPoint id="navpoint-1" playOrder="1">
-      <navLabel><text>本文</text></navLabel>
-      <content src="xhtml/0001.xhtml"/>
-    </navPoint>
-  </navMap>
+{nav_points}  </navMap>
 </ncx>
 "#,
         identifier = xml_escape(&metadata.identifier),
         title = xml_escape(&metadata.title),
+        nav_points = nav_points,
     )
 }
 
