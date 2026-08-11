@@ -1,3 +1,5 @@
 pub mod epub;
+pub mod text;
 
 pub use epub::{EpubBook, EpubError, EpubMetadata};
+pub use text::{TextError, escape_html, plain_text_to_xhtml};
