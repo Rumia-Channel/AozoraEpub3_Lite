@@ -103,10 +103,26 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
     let mut has_line = false;
     let mut block: Option<HeadingSpec> = None;
     let mut pending_heading: Option<HeadingSpec> = None;
+    let mut configured_block: Option<String> = None;
+    let mut pending_config_heading: Option<(String, String)> = None;
 
     for line in lines {
         has_line = true;
         let trimmed = line.trim();
+
+        if configured_block.is_some() {
+            if let Some(note) = page_break_note(trimmed)
+                && let Some(close_tag) = config.block_close_tags.get(note)
+            {
+                fragment.push_str(close_tag);
+                fragment.push('\n');
+                configured_block = None;
+            } else {
+                fragment.push_str(&convert_inline(line, config));
+                fragment.push('\n');
+            }
+            continue;
+        }
 
         if let Some(spec) = block {
             if trimmed == format!("［＃{}］", spec.close_note) {
@@ -121,8 +137,23 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
             continue;
         }
 
+        if let Some((open_tag, close_tag)) = pending_config_heading.take() {
+            fragment.push_str(&open_tag);
+            fragment.push_str(&convert_inline(line, config));
+            fragment.push_str(&close_tag);
+            fragment.push('\n');
+            continue;
+        }
+
         if let Some(spec) = pending_heading.take() {
             append_heading(&mut fragment, spec, line, config);
+            continue;
+        }
+        if let Some(note) = page_break_note(trimmed)
+            && let Some(close_tag) = config.block_close_tags.get(note)
+        {
+            fragment.push_str(close_tag);
+            fragment.push('\n');
             continue;
         }
 
@@ -148,6 +179,34 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
                 block = Some(spec);
                 continue;
             }
+            if let Some(tag) = config.block_single_tags.get(note) {
+                fragment.push_str(tag);
+                if !rest.trim().is_empty() {
+                    fragment.push_str(&convert_inline(rest.trim_start(), config));
+                }
+                fragment.push('\n');
+                continue;
+            }
+            if let Some((open_tag, close_tag)) = config.block_inline_tags.get(note) {
+                if rest.trim().is_empty() {
+                    pending_config_heading = Some((open_tag.clone(), close_tag.clone()));
+                } else {
+                    fragment.push_str(open_tag);
+                    fragment.push_str(&convert_inline(rest.trim_start(), config));
+                    fragment.push_str(close_tag);
+                    fragment.push('\n');
+                }
+                continue;
+            }
+            if let Some(open_tag) = config.block_open_tags.get(note) {
+                fragment.push_str(open_tag);
+                if !rest.trim().is_empty() {
+                    fragment.push_str(&convert_inline(rest.trim_start(), config));
+                    fragment.push('\n');
+                }
+                configured_block = Some(fallback_close_tag(open_tag));
+                continue;
+            }
         }
 
         append_line(&mut fragment, line, config);
@@ -157,6 +216,13 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
         fragment.push_str("</");
         fragment.push_str(spec.element);
         fragment.push_str(">\n");
+    } else if let Some(close_tag) = configured_block {
+        fragment.push_str(&close_tag);
+        fragment.push('\n');
+    } else if let Some((open_tag, close_tag)) = pending_config_heading {
+        fragment.push_str(&open_tag);
+        fragment.push_str(&close_tag);
+        fragment.push('\n');
     } else if let Some(spec) = pending_heading {
         append_heading(&mut fragment, spec, "", config);
     }
@@ -245,6 +311,19 @@ fn block_heading_spec(note: &str) -> Option<HeadingSpec> {
         }),
         _ => None,
     }
+}
+
+fn fallback_close_tag(open_tag: &str) -> String {
+    let tag_name = open_tag
+        .strip_prefix('<')
+        .and_then(|value| {
+            value
+                .split(|character| character == ' ' || character == '>')
+                .next()
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or("div");
+    format!("</{tag_name}>")
 }
 
 fn append_heading(fragment: &mut String, spec: HeadingSpec, text: &str, config: &AozoraConfig) {
@@ -851,6 +930,26 @@ mod tests {
             plain_text_to_xhtml("［＃ここから１字下げ］\n字下げ本文\n［＃ここで字下げ終わり］")
                 .unwrap();
         assert!(output.contains("<div class=\"mt1\">字下げ本文\n</div>"));
+    }
+
+    #[test]
+    fn renders_configured_block_and_inline_block_tags() {
+        let mut config = AozoraConfig::default();
+        config.load_tag_text(
+            "ここから太字\t<div class=\"bold\">\t\t1\n\
+             ここで太字終わり\t</div>\t\t1\n\
+             任意見出し\t<h1 class=\"custom\">\t</h1>\t1\n\
+             空行\t<p><br/></p>\t\t1\n",
+        );
+        let output = super::plain_text_to_xhtml_with_config(
+            "［＃ここから太字］\n本文\n［＃ここで太字終わり］\n\
+             ［＃任意見出し］\n題名\n［＃空行］",
+            &config,
+        )
+        .unwrap();
+        assert!(output.contains("<div class=\"bold\">本文\n</div>"));
+        assert!(output.contains("<h1 class=\"custom\">題名</h1>"));
+        assert!(output.contains("<p><br/></p>"));
     }
     #[test]
     fn nests_multiple_suffix_notes_on_the_same_target() {

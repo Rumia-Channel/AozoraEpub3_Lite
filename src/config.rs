@@ -126,6 +126,10 @@ pub struct AozoraConfig {
     pub gaiji: BTreeMap<String, String>,
     pub gaiji_alternatives: BTreeMap<String, String>,
     pub latin_replacements: BTreeMap<String, String>,
+    pub block_open_tags: BTreeMap<String, String>,
+    pub block_close_tags: BTreeMap<String, String>,
+    pub block_inline_tags: BTreeMap<String, (String, String)>,
+    pub block_single_tags: BTreeMap<String, String>,
     pub page_break_notes: BTreeSet<String>,
     pub split_page_breaks: bool,
 }
@@ -169,6 +173,10 @@ impl Default for AozoraConfig {
             gaiji: BTreeMap::new(),
             gaiji_alternatives: BTreeMap::new(),
             latin_replacements: BTreeMap::new(),
+            block_open_tags: BTreeMap::new(),
+            block_close_tags: BTreeMap::new(),
+            block_inline_tags: BTreeMap::new(),
+            block_single_tags: BTreeMap::new(),
             page_break_notes: BTreeSet::from(["改ページ".to_owned()]),
             split_page_breaks: true,
         }
@@ -237,6 +245,30 @@ impl AozoraConfig {
                 .any(|value| value.trim().contains('P'))
             {
                 self.page_break_notes.insert(note.to_owned());
+            }
+            if fields.iter().skip(1).any(|value| value.trim() == "1") {
+                let tag = fields
+                    .get(1)
+                    .map(|value| value.trim())
+                    .filter(|value| !value.is_empty());
+                let close_tag = fields
+                    .get(2)
+                    .map(|value| value.trim())
+                    .filter(|value| !value.is_empty());
+                if let Some(tag) = tag {
+                    if tag.starts_with("</") {
+                        self.block_close_tags
+                            .insert(note.to_owned(), tag.to_owned());
+                    } else if let Some(close_tag) = close_tag {
+                        self.block_inline_tags
+                            .insert(note.to_owned(), (tag.to_owned(), close_tag.to_owned()));
+                    } else if tag.ends_with("/>") || tag.contains("</") {
+                        self.block_single_tags
+                            .insert(note.to_owned(), tag.to_owned());
+                    } else {
+                        self.block_open_tags.insert(note.to_owned(), tag.to_owned());
+                    }
+                }
             }
         }
     }
@@ -397,6 +429,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn loads_block_tag_definitions() {
+        let mut config = AozoraConfig::default();
+        config.load_tag_text(
+            "ここから太字\t<div class=\"bold\">\t\t1\n\
+             ここで太字終わり\t</div>\t\t1\n\
+             見出し\t<h1 class=\"title\">\t</h1>\t1\n\
+             空行\t<p><br/></p>\t\t1\n",
+        );
+        assert_eq!(
+            config.block_open_tags.get("ここから太字"),
+            Some(&"<div class=\"bold\">".to_owned())
+        );
+        assert_eq!(
+            config.block_close_tags.get("ここで太字終わり"),
+            Some(&"</div>".to_owned())
+        );
+        assert_eq!(
+            config.block_inline_tags.get("見出し"),
+            Some(&("<h1 class=\"title\">".to_owned(), "</h1>".to_owned()))
+        );
+        assert_eq!(
+            config.block_single_tags.get("空行"),
+            Some(&"<p><br/></p>".to_owned())
+        );
+    }
     #[test]
     fn loads_latin_replacement_rows() {
         let mut config = AozoraConfig::default();
