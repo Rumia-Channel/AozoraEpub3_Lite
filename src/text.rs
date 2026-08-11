@@ -1,7 +1,7 @@
 use std::fmt;
 
+use crate::config::AozoraConfig;
 use encoding_rs::{Encoding, SHIFT_JIS, UTF_8};
-const PAGE_BREAK_TAG: &str = "［＃改ページ］";
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum TextError {
@@ -46,28 +46,46 @@ pub fn decode_input(bytes: &[u8], label: Option<&str>) -> Result<String, TextErr
 }
 
 pub fn plain_text_to_xhtml(input: &str) -> Result<String, TextError> {
+    plain_text_to_xhtml_with_config(input, &AozoraConfig::default())
+}
+
+pub fn plain_text_to_xhtml_with_config(
+    input: &str,
+    config: &AozoraConfig,
+) -> Result<String, TextError> {
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
-    Ok(render_lines(input.lines()))
+    Ok(render_lines(input.lines(), config))
 }
 
 pub fn aozora_text_to_xhtml_sections(input: &str) -> Result<Vec<String>, TextError> {
+    aozora_text_to_xhtml_sections_with_config(input, &AozoraConfig::default())
+}
+
+pub fn aozora_text_to_xhtml_sections_with_config(
+    input: &str,
+    config: &AozoraConfig,
+) -> Result<Vec<String>, TextError> {
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
     let mut sections = Vec::new();
     let mut current = Vec::new();
 
     for line in input.lines() {
-        if line.trim() == PAGE_BREAK_TAG {
-            if !current.is_empty() || sections.is_empty() {
-                sections.push(render_lines(current.iter().map(String::as_str)));
-                current.clear();
+        if let Some(note) = page_break_note(line)
+            && config.page_break_notes.contains(note)
+        {
+            if config.split_page_breaks {
+                if !current.is_empty() || sections.is_empty() {
+                    sections.push(render_lines(current.iter().map(String::as_str), config));
+                    current.clear();
+                }
             }
-        } else {
-            current.push(line.to_owned());
+            continue;
         }
+        current.push(line.to_owned());
     }
 
     if !current.is_empty() || sections.is_empty() {
-        sections.push(render_lines(current.iter().map(String::as_str)));
+        sections.push(render_lines(current.iter().map(String::as_str), config));
     }
 
     Ok(sections)
@@ -80,7 +98,7 @@ struct HeadingSpec {
     close_note: &'static str,
 }
 
-fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> String {
+fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraConfig) -> String {
     let mut fragment = String::new();
     let mut has_line = false;
     let mut block: Option<HeadingSpec> = None;
@@ -97,14 +115,14 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> String {
                 fragment.push_str(">\n");
                 block = None;
             } else {
-                fragment.push_str(&convert_inline(line));
+                fragment.push_str(&convert_inline(line, config));
                 fragment.push('\n');
             }
             continue;
         }
 
         if let Some(spec) = pending_heading.take() {
-            append_heading(&mut fragment, spec, line);
+            append_heading(&mut fragment, spec, line, config);
             continue;
         }
 
@@ -113,7 +131,7 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> String {
                 if rest.trim().is_empty() {
                     pending_heading = Some(spec);
                 } else {
-                    append_heading(&mut fragment, spec, rest.trim_start());
+                    append_heading(&mut fragment, spec, rest.trim_start(), config);
                 }
                 continue;
             }
@@ -124,7 +142,7 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> String {
                 fragment.push_str(spec.class_name);
                 fragment.push_str("\">");
                 if !rest.trim().is_empty() {
-                    fragment.push_str(&convert_inline(rest.trim_start()));
+                    fragment.push_str(&convert_inline(rest.trim_start(), config));
                     fragment.push('\n');
                 }
                 block = Some(spec);
@@ -132,7 +150,7 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> String {
             }
         }
 
-        append_line(&mut fragment, line);
+        append_line(&mut fragment, line, config);
     }
 
     if let Some(spec) = block {
@@ -140,7 +158,7 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> String {
         fragment.push_str(spec.element);
         fragment.push_str(">\n");
     } else if let Some(spec) = pending_heading {
-        append_heading(&mut fragment, spec, "");
+        append_heading(&mut fragment, spec, "", config);
     }
 
     if !has_line {
@@ -156,6 +174,10 @@ fn heading_note_at_start(line: &str) -> Option<(&str, &str)> {
     let note = &rest[..close];
     let content = &rest[close + '］'.len_utf8()..];
     Some((note, content))
+}
+
+fn page_break_note(line: &str) -> Option<&str> {
+    line.trim().strip_prefix("［＃")?.strip_suffix('］')
 }
 
 fn heading_spec(note: &str) -> Option<HeadingSpec> {
@@ -225,34 +247,41 @@ fn block_heading_spec(note: &str) -> Option<HeadingSpec> {
     }
 }
 
-fn append_heading(fragment: &mut String, spec: HeadingSpec, text: &str) {
+fn append_heading(fragment: &mut String, spec: HeadingSpec, text: &str, config: &AozoraConfig) {
     fragment.push('<');
     fragment.push_str(spec.element);
     fragment.push_str(" class=\"");
     fragment.push_str(spec.class_name);
     fragment.push_str("\">");
-    fragment.push_str(&convert_inline(text));
+    fragment.push_str(&convert_inline(text, config));
     fragment.push_str("</");
     fragment.push_str(spec.element);
     fragment.push_str(">\n");
 }
 
-fn append_line(fragment: &mut String, line: &str) {
+fn append_line(fragment: &mut String, line: &str, config: &AozoraConfig) {
     if line.is_empty() {
         fragment.push_str("    <p><br/></p>\n");
     } else {
         fragment.push_str("    <p>");
-        fragment.push_str(&convert_inline(line));
+        fragment.push_str(&convert_inline(line, config));
         fragment.push_str("</p>\n");
     }
 }
 
-fn convert_inline(input: &str) -> String {
+fn convert_inline(input: &str, config: &AozoraConfig) -> String {
     let chars = input.chars().collect::<Vec<_>>();
     let mut output = String::new();
     let mut index = 0;
 
     while index < chars.len() {
+        if chars[index] == '※'
+            && let Some((end, replacement)) = parse_gaiji_note(&chars, index, config)
+        {
+            output.push_str(&replacement);
+            index = end;
+            continue;
+        }
         if chars[index] == '※'
             && let Some((end, replacement)) = parse_unicode_note(&chars, index + 1)
         {
@@ -270,8 +299,8 @@ fn convert_inline(input: &str) -> String {
             index = end;
             continue;
         }
-        if let Some((end, replacement)) = parse_inline_note(&chars, index) {
-            output.push_str(replacement);
+        if let Some((end, replacement)) = parse_inline_note(&chars, index, config) {
+            output.push_str(&replacement);
             index = end;
             continue;
         }
@@ -344,6 +373,26 @@ fn parse_unicode_note(chars: &[char], start: usize) -> Option<(usize, String)> {
     Some((close + 1, replacement))
 }
 
+fn parse_gaiji_note(
+    chars: &[char],
+    start: usize,
+    config: &AozoraConfig,
+) -> Option<(usize, String)> {
+    if chars.get(start) != Some(&'※')
+        || chars.get(start + 1) != Some(&'［')
+        || chars.get(start + 2) != Some(&'＃')
+    {
+        return None;
+    }
+    let close = chars
+        .iter()
+        .enumerate()
+        .skip(start + 3)
+        .find_map(|(index, character)| (*character == '］').then_some(index))?;
+    let note = chars[start..=close].iter().collect::<String>();
+    Some((close + 1, config.gaiji.get(&note)?.to_owned()))
+}
+
 fn parse_hex_code(input: &str, start: usize) -> Option<(u32, usize)> {
     let end = input[start..]
         .char_indices()
@@ -412,7 +461,11 @@ pub fn image_references(input: &str) -> Vec<String> {
     references
 }
 
-fn parse_inline_note(chars: &[char], start: usize) -> Option<(usize, &'static str)> {
+fn parse_inline_note(
+    chars: &[char],
+    start: usize,
+    config: &AozoraConfig,
+) -> Option<(usize, String)> {
     if chars.get(start) != Some(&'［') || chars.get(start + 1) != Some(&'＃') {
         return None;
     }
@@ -422,26 +475,7 @@ fn parse_inline_note(chars: &[char], start: usize) -> Option<(usize, &'static st
         .skip(start + 2)
         .find_map(|(index, character)| (*character == '］').then_some(index))?;
     let note = chars[start + 2..close].iter().collect::<String>();
-    let replacement = match note.as_str() {
-        "傍点" => "<span class=\"em-sesame\">",
-        "傍点終わり" => "</span>",
-        "太字" => "<span class=\"bold\">",
-        "太字終わり" => "</span>",
-        "斜体" => "<span class=\"italic\">",
-        "斜体終わり" => "</span>",
-        "ゴシック体" => "<span class=\"gfont\">",
-        "ゴシック体終わり" => "</span>",
-        "縦中横" => "<span class=\"tcy\">",
-        "縦中横終わり" => "</span>",
-        "割り注" | "ここから割り注" => "<span class=\"wrc\">",
-        "割り注終わり" | "ここで割り注終わり" => "</span>",
-        "改行" => "<br/>",
-        "行右小書き" | "上付き小文字" => "<span class=\"super\">",
-        "行右小書き終わり" | "上付き小文字終わり" => "</span>",
-        "行左小書き" | "下付き小文字" => "<span class=\"sub\">",
-        "行左小書き終わり" | "下付き小文字終わり" => "</span>",
-        _ => return None,
-    };
+    let replacement = config.inline_notes.get(&note)?.clone();
     Some((close + 1, replacement))
 }
 
@@ -502,6 +536,7 @@ mod tests {
     use super::{
         aozora_text_to_xhtml_sections, decode_input, image_references, plain_text_to_xhtml,
     };
+    use crate::config::AozoraConfig;
     use encoding_rs::SHIFT_JIS;
 
     #[test]
@@ -592,5 +627,29 @@ mod tests {
         assert!(output.contains("葛"));
         assert!(output.contains("丈\u{e0101}"));
         assert!(!output.contains("［＃"));
+    }
+    #[test]
+    fn applies_external_note_and_gaiji_configuration() {
+        let mut config = AozoraConfig::default();
+        config.load_tag_text("独自注記\t<span class=\"custom\">\t\t\n");
+        config.load_utf_text("U+4E00\t\t一\t※［＃「外字」］\n");
+        let output = super::plain_text_to_xhtml_with_config(
+            "［＃独自注記］注記［＃傍点終わり］ ※［＃「外字」］",
+            &config,
+        )
+        .unwrap();
+        assert!(output.contains("<span class=\"custom\">注記</span>"));
+        assert!(output.contains("一"));
+    }
+
+    #[test]
+    fn ini_page_break_setting_controls_section_split() {
+        let ini = crate::config::IniSettings::parse("PageBreak=0").unwrap();
+        let config = AozoraConfig::from_ini(ini);
+        let sections =
+            super::aozora_text_to_xhtml_sections_with_config("前\n［＃改ページ］\n後", &config)
+                .unwrap();
+        assert_eq!(sections.len(), 1);
+        assert!(!sections[0].contains("改ページ"));
     }
 }

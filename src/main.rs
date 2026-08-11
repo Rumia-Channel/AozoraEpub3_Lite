@@ -1,6 +1,6 @@
 use aozora_epub3_lite::{
-    EpubAsset, EpubBook, EpubMetadata, aozora_text_to_xhtml_sections, decode_input,
-    image_references,
+    AozoraConfig, EpubAsset, EpubBook, EpubMetadata, aozora_text_to_xhtml_sections_with_config,
+    decode_input, image_references,
 };
 use std::env;
 use std::error::Error;
@@ -40,6 +40,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut language = None;
     let mut encoding = None;
     let mut cover = None;
+    let mut config_dir = None;
+    let mut preset = None;
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--creator" => {
@@ -62,6 +64,16 @@ fn run() -> Result<(), Box<dyn Error>> {
                     io::Error::new(io::ErrorKind::InvalidInput, "--cover requires a path")
                 })?);
             }
+            "--config-dir" => {
+                config_dir = Some(args.next().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "--config-dir requires a path")
+                })?);
+            }
+            "--preset" => {
+                preset = Some(args.next().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "--preset requires a path")
+                })?);
+            }
             argument if argument.starts_with('-') => {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, usage()).into());
             }
@@ -70,10 +82,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
     }
     let title = title.unwrap_or_else(|| title_from_path(Path::new(&input_path)));
+    let config = AozoraConfig::load(
+        config_dir.as_deref().map(Path::new),
+        preset.as_deref().map(Path::new),
+    )?;
 
     let input = fs::read(&input_path)?;
     let input = decode_input(&input, encoding.as_deref())?;
-    let sections = aozora_text_to_xhtml_sections(&input)?;
+    let sections = aozora_text_to_xhtml_sections_with_config(&input, &config)?;
     let cover = cover.as_deref().map(normalize_relative_path).transpose()?;
     let assets = collect_assets(Path::new(&input_path), &input, cover.as_deref())?;
     let identifier = format!("urn:aozoraepub3-lite:{}", percent_encode(&title));
@@ -195,5 +211,5 @@ fn print_usage() {
 }
 
 fn usage() -> &'static str {
-    "Usage: AozoraEpub3_Lite <input.txt> <output.epub> [title] [--creator name] [--language lang] [--encoding utf-8|shift_jis] [--cover image]"
+    "Usage: AozoraEpub3_Lite <input.txt> <output.epub> [title] [--creator name] [--language lang] [--encoding utf-8|shift_jis] [--cover image] [--config-dir dir] [--preset file]"
 }
