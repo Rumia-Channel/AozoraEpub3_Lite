@@ -79,6 +79,11 @@ fn convert_inline(input: &str) -> String {
     let mut index = 0;
 
     while index < chars.len() {
+        if let Some((end, replacement)) = parse_inline_note(&chars, index) {
+            output.push_str(replacement);
+            index = end;
+            continue;
+        }
         if chars[index] == '｜'
             && let Some((open, close)) = find_ruby_bounds(&chars, index + 1)
         {
@@ -116,6 +121,39 @@ fn convert_inline(input: &str) -> String {
     }
 
     output
+}
+
+fn parse_inline_note(chars: &[char], start: usize) -> Option<(usize, &'static str)> {
+    if chars.get(start) != Some(&'［') || chars.get(start + 1) != Some(&'＃') {
+        return None;
+    }
+    let close = chars
+        .iter()
+        .enumerate()
+        .skip(start + 2)
+        .find_map(|(index, character)| (*character == '］').then_some(index))?;
+    let note = chars[start + 2..close].iter().collect::<String>();
+    let replacement = match note.as_str() {
+        "傍点" => "<span class=\"em-sesame\">",
+        "傍点終わり" => "</span>",
+        "太字" => "<span class=\"bold\">",
+        "太字終わり" => "</span>",
+        "斜体" => "<span class=\"italic\">",
+        "斜体終わり" => "</span>",
+        "ゴシック体" => "<span class=\"gfont\">",
+        "ゴシック体終わり" => "</span>",
+        "縦中横" => "<span class=\"tcy\">",
+        "縦中横終わり" => "</span>",
+        "割り注" | "ここから割り注" => "<span class=\"wrc\">",
+        "割り注終わり" | "ここで割り注終わり" => "</span>",
+        "改行" => "<br/>",
+        "行右小書き" | "上付き小文字" => "<span class=\"super\">",
+        "行右小書き終わり" | "上付き小文字終わり" => "</span>",
+        "行左小書き" | "下付き小文字" => "<span class=\"sub\">",
+        "行左小書き終わり" | "下付き小文字終わり" => "</span>",
+        _ => return None,
+    };
+    Some((close + 1, replacement))
 }
 
 fn find_ruby_bounds(chars: &[char], start: usize) -> Option<(usize, usize)> {
@@ -211,5 +249,14 @@ mod tests {
         let output = plain_text_to_xhtml("\u{feff}本文").unwrap();
         assert!(output.contains("<p>本文</p>"));
         assert!(!output.contains('\u{feff}'));
+    }
+    #[test]
+    fn converts_representative_inline_notes() {
+        let output = plain_text_to_xhtml(
+            "［＃太字］太字［＃太字終わり］［＃縦中横］12［＃縦中横終わり］［＃改行］",
+        )
+        .unwrap();
+        assert!(output.contains("<span class=\"bold\">太字</span>"));
+        assert!(output.contains("<span class=\"tcy\">12</span><br/>"));
     }
 }
