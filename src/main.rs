@@ -36,9 +36,21 @@ fn run() -> Result<(), Box<dyn Error>> {
         )
     })?;
     let mut title = None;
+    let mut creator = None;
+    let mut language = None;
     let mut encoding = None;
     while let Some(argument) = args.next() {
         match argument.as_str() {
+            "--creator" => {
+                creator = Some(args.next().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "--creator requires a value")
+                })?);
+            }
+            "--language" => {
+                language = Some(args.next().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "--language requires a value")
+                })?);
+            }
             "--encoding" => {
                 encoding = Some(args.next().ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidInput, "--encoding requires a label")
@@ -58,7 +70,13 @@ fn run() -> Result<(), Box<dyn Error>> {
     let sections = aozora_text_to_xhtml_sections(&input)?;
     let assets = collect_assets(Path::new(&input_path), &input)?;
     let identifier = format!("urn:aozoraepub3-lite:{}", percent_encode(&title));
-    let metadata = EpubMetadata::new(title, identifier);
+    let mut metadata = EpubMetadata::new(title, identifier);
+    if let Some(creator) = creator {
+        metadata = metadata.with_creator(creator);
+    }
+    if let Some(language) = language {
+        metadata = metadata.with_language(language);
+    }
 
     let output = File::create(output_path)?;
     EpubBook::from_sections(metadata, sections)
@@ -140,5 +158,5 @@ fn print_usage() {
 }
 
 fn usage() -> &'static str {
-    "Usage: AozoraEpub3_Lite <input.txt> <output.epub> [title] [--encoding utf-8|shift_jis]"
+    "Usage: AozoraEpub3_Lite <input.txt> <output.epub> [title] [--creator name] [--language lang] [--encoding utf-8|shift_jis]"
 }
