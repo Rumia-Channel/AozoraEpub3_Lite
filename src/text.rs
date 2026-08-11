@@ -52,43 +52,174 @@ pub fn plain_text_to_xhtml(input: &str) -> Result<String, TextError> {
 
 pub fn aozora_text_to_xhtml_sections(input: &str) -> Result<Vec<String>, TextError> {
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
-    let mut current = String::new();
     let mut sections = Vec::new();
+    let mut current = Vec::new();
 
     for line in input.lines() {
         if line.trim() == PAGE_BREAK_TAG {
             if !current.is_empty() || sections.is_empty() {
-                sections.push(std::mem::take(&mut current));
+                sections.push(render_lines(current.iter().map(String::as_str)));
+                current.clear();
             }
         } else {
-            append_line(&mut current, line);
+            current.push(line.to_owned());
         }
     }
 
     if !current.is_empty() || sections.is_empty() {
-        sections.push(current);
-    }
-
-    for section in &mut sections {
-        if section.is_empty() {
-            section.push_str("    <p><br/></p>\n");
-        }
+        sections.push(render_lines(current.iter().map(String::as_str)));
     }
 
     Ok(sections)
 }
 
+#[derive(Clone, Copy)]
+struct HeadingSpec {
+    element: &'static str,
+    class_name: &'static str,
+    close_note: &'static str,
+}
+
 fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> String {
     let mut fragment = String::new();
     let mut has_line = false;
+    let mut block: Option<HeadingSpec> = None;
+    let mut pending_heading: Option<HeadingSpec> = None;
+
     for line in lines {
         has_line = true;
+        let trimmed = line.trim();
+
+        if let Some(spec) = block {
+            if trimmed == format!("［＃{}］", spec.close_note) {
+                fragment.push_str("</");
+                fragment.push_str(spec.element);
+                fragment.push_str(">\n");
+                block = None;
+            } else {
+                fragment.push_str(&convert_inline(line));
+                fragment.push('\n');
+            }
+            continue;
+        }
+
+        if let Some(spec) = pending_heading.take() {
+            append_heading(&mut fragment, spec, line);
+            continue;
+        }
+
+        if let Some((note, rest)) = heading_note_at_start(line) {
+            if let Some(spec) = heading_spec(note) {
+                if rest.trim().is_empty() {
+                    pending_heading = Some(spec);
+                } else {
+                    append_heading(&mut fragment, spec, rest.trim_start());
+                }
+                continue;
+            }
+            if let Some(spec) = block_heading_spec(note) {
+                fragment.push('<');
+                fragment.push_str(spec.element);
+                fragment.push_str(" class=\"");
+                fragment.push_str(spec.class_name);
+                fragment.push_str("\">");
+                if !rest.trim().is_empty() {
+                    fragment.push_str(&convert_inline(rest.trim_start()));
+                    fragment.push('\n');
+                }
+                block = Some(spec);
+                continue;
+            }
+        }
+
         append_line(&mut fragment, line);
     }
+
+    if let Some(spec) = block {
+        fragment.push_str("</");
+        fragment.push_str(spec.element);
+        fragment.push_str(">\n");
+    } else if let Some(spec) = pending_heading {
+        append_heading(&mut fragment, spec, "");
+    }
+
     if !has_line {
         fragment.push_str("    <p><br/></p>\n");
     }
     fragment
+}
+
+fn heading_note_at_start(line: &str) -> Option<(&str, &str)> {
+    let line = line.trim_start();
+    let rest = line.strip_prefix("［＃")?;
+    let close = rest.find('］')?;
+    let note = &rest[..close];
+    let content = &rest[close + '］'.len_utf8()..];
+    Some((note, content))
+}
+
+fn heading_spec(note: &str) -> Option<HeadingSpec> {
+    match note {
+        "見出し" => Some(HeadingSpec {
+            element: "h1",
+            class_name: "font-1em50",
+            close_note: "",
+        }),
+        "大見出し" => Some(HeadingSpec {
+            element: "h1",
+            class_name: "font-1em50",
+            close_note: "",
+        }),
+        "中見出し" => Some(HeadingSpec {
+            element: "h2",
+            class_name: "font-1em30",
+            close_note: "",
+        }),
+        "小見出し" => Some(HeadingSpec {
+            element: "h3",
+            class_name: "font-1em10",
+            close_note: "",
+        }),
+        _ => None,
+    }
+}
+
+fn block_heading_spec(note: &str) -> Option<HeadingSpec> {
+    match note {
+        "ここから見出し" => Some(HeadingSpec {
+            element: "h1",
+            class_name: "font-1em50",
+            close_note: "ここで見出し終わり",
+        }),
+        "ここから大見出し" => Some(HeadingSpec {
+            element: "h1",
+            class_name: "font-1em50",
+            close_note: "ここで大見出し終わり",
+        }),
+        "ここから中見出し" => Some(HeadingSpec {
+            element: "h2",
+            class_name: "font-1em30",
+            close_note: "ここで中見出し終わり",
+        }),
+        "ここから小見出し" => Some(HeadingSpec {
+            element: "h3",
+            class_name: "font-1em10",
+            close_note: "ここで小見出し終わり",
+        }),
+        _ => None,
+    }
+}
+
+fn append_heading(fragment: &mut String, spec: HeadingSpec, text: &str) {
+    fragment.push('<');
+    fragment.push_str(spec.element);
+    fragment.push_str(" class=\"");
+    fragment.push_str(spec.class_name);
+    fragment.push_str("\">");
+    fragment.push_str(&convert_inline(text));
+    fragment.push_str("</");
+    fragment.push_str(spec.element);
+    fragment.push_str(">\n");
 }
 
 fn append_line(fragment: &mut String, line: &str) {
@@ -367,5 +498,17 @@ mod tests {
         let output = plain_text_to_xhtml(input).unwrap();
         assert!(output.contains("<img src=\"../image/fig/sample.png\" alt=\"\"/>"));
         assert_eq!(image_references(input), vec!["fig/sample.png"]);
+    }
+    #[test]
+    fn renders_inline_and_block_headings() {
+        let inline = plain_text_to_xhtml("［＃大見出し］章題\n本文").unwrap();
+        assert!(inline.contains("<h1 class=\"font-1em50\">章題</h1>"));
+        assert!(inline.contains("<p>本文</p>"));
+
+        let block =
+            plain_text_to_xhtml("［＃ここから中見出し］\n章題\n［＃ここで中見出し終わり］\n本文")
+                .unwrap();
+        assert!(block.contains("<h2 class=\"font-1em30\">章題\n</h2>"));
+        assert!(block.contains("<p>本文</p>"));
     }
 }
