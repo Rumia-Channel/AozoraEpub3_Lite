@@ -191,10 +191,11 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
 
         if let Some((note, rest)) = heading_note_at_start(line) {
             if let Some(spec) = heading_spec(note) {
-                if rest.trim().is_empty() {
+                let content = heading_content(note, rest);
+                if content.trim().is_empty() {
                     pending_heading = Some(spec);
                 } else {
-                    append_heading(&mut fragment, spec, rest.trim_start(), config);
+                    append_heading(&mut fragment, spec, content.trim_start(), config);
                 }
                 continue;
             }
@@ -280,6 +281,23 @@ fn heading_note_at_start(line: &str) -> Option<(&str, &str)> {
     let note = &rest[..close];
     let content = &rest[close + '］'.len_utf8()..];
     Some((note, content))
+}
+
+fn heading_content<'a>(note: &str, content: &'a str) -> &'a str {
+    let Some(close_note) = (match note {
+        "見出し" => Some("見出し終わり"),
+        "大見出し" => Some("大見出し終わり"),
+        "中見出し" => Some("中見出し終わり"),
+        "小見出し" => Some("小見出し終わり"),
+        _ => None,
+    }) else {
+        return content;
+    };
+    let marker = format!("［＃{close_note}］");
+    content
+        .strip_suffix(&marker)
+        .map(str::trim_end)
+        .unwrap_or(content)
 }
 
 fn page_break_note(line: &str) -> Option<&str> {
@@ -957,6 +975,9 @@ mod tests {
         let inline = plain_text_to_xhtml("［＃大見出し］章題\n本文").unwrap();
         assert!(inline.contains("<h1 class=\"font-1em50\">章題</h1>"));
         assert!(inline.contains("<p>本文</p>"));
+        let closed_inline = plain_text_to_xhtml("［＃大見出し］章題［＃大見出し終わり］").unwrap();
+        assert!(closed_inline.contains("<h1 class=\"font-1em50\">章題</h1>"));
+        assert!(!closed_inline.contains("［＃大見出し終わり］"));
 
         let block =
             plain_text_to_xhtml("［＃ここから中見出し］\n章題\n［＃ここで中見出し終わり］\n本文")
