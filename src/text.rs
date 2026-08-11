@@ -206,6 +206,21 @@ fn block_heading_spec(note: &str) -> Option<HeadingSpec> {
             class_name: "font-1em10",
             close_note: "ここで小見出し終わり",
         }),
+        "ここから１字下げ" => Some(HeadingSpec {
+            element: "div",
+            class_name: "mt1",
+            close_note: "ここで字下げ終わり",
+        }),
+        "ここから２字下げ" => Some(HeadingSpec {
+            element: "div",
+            class_name: "mt2",
+            close_note: "ここで字下げ終わり",
+        }),
+        "ここから３字下げ" => Some(HeadingSpec {
+            element: "div",
+            class_name: "mt3",
+            close_note: "ここで字下げ終わり",
+        }),
         _ => None,
     }
 }
@@ -510,5 +525,12 @@ mod tests {
                 .unwrap();
         assert!(block.contains("<h2 class=\"font-1em30\">章題\n</h2>"));
         assert!(block.contains("<p>本文</p>"));
+    }
+    #[test]
+    fn renders_basic_indent_blocks() {
+        let output =
+            plain_text_to_xhtml("［＃ここから１字下げ］\n字下げ本文\n［＃ここで字下げ終わり］")
+                .unwrap();
+        assert!(output.contains("<div class=\"mt1\">字下げ本文\n</div>"));
     }
 }
