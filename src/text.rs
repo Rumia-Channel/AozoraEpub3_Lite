@@ -253,6 +253,18 @@ fn convert_inline(input: &str) -> String {
     let mut index = 0;
 
     while index < chars.len() {
+        if chars[index] == '※'
+            && let Some((end, replacement)) = parse_unicode_note(&chars, index + 1)
+        {
+            output.push_str(&replacement);
+            index = end;
+            continue;
+        }
+        if let Some((end, replacement)) = parse_unicode_note(&chars, index) {
+            output.push_str(&replacement);
+            index = end;
+            continue;
+        }
         if let Some((end, replacement)) = parse_image_note(&chars, index) {
             output.push_str(&replacement);
             index = end;
@@ -300,6 +312,47 @@ fn convert_inline(input: &str) -> String {
     }
 
     output
+}
+
+fn parse_unicode_note(chars: &[char], start: usize) -> Option<(usize, String)> {
+    if chars.get(start) != Some(&'［') || chars.get(start + 1) != Some(&'＃') {
+        return None;
+    }
+    let close = chars
+        .iter()
+        .enumerate()
+        .skip(start + 2)
+        .find_map(|(index, character)| (*character == '］').then_some(index))?;
+    let note = chars[start + 2..close].iter().collect::<String>();
+    let upper = note.to_ascii_uppercase();
+    let (marker, prefix_len) = [
+        upper.find("U+").map(|index| (index, 2)),
+        upper.find("UNICODE").map(|index| (index, 7)),
+        upper.find("UCS").map(|index| (index, 3)),
+    ]
+    .into_iter()
+    .flatten()
+    .min_by_key(|(index, _)| *index)?;
+    let (code, mut end) = parse_hex_code(&upper, marker + prefix_len)?;
+    let mut replacement = String::from(char::from_u32(code)?);
+    if upper.get(end..).is_some_and(|tail| tail.starts_with("-U+")) {
+        let (variation, variation_end) = parse_hex_code(&upper, end + 1 + 2)?;
+        replacement.push(char::from_u32(variation)?);
+        end = variation_end;
+    }
+    let _ = end;
+    Some((close + 1, replacement))
+}
+
+fn parse_hex_code(input: &str, start: usize) -> Option<(u32, usize)> {
+    let end = input[start..]
+        .char_indices()
+        .find_map(|(offset, character)| (!character.is_ascii_hexdigit()).then_some(start + offset))
+        .unwrap_or(input.len());
+    if end == start {
+        return None;
+    }
+    Some((u32::from_str_radix(&input[start..end], 16).ok()?, end))
 }
 
 fn parse_image_note(chars: &[char], start: usize) -> Option<(usize, String)> {
@@ -532,5 +585,12 @@ mod tests {
             plain_text_to_xhtml("［＃ここから１字下げ］\n字下げ本文\n［＃ここで字下げ終わり］")
                 .unwrap();
         assert!(output.contains("<div class=\"mt1\">字下げ本文\n</div>"));
+    }
+    #[test]
+    fn converts_unicode_and_ivs_gaiji_notes() {
+        let output = plain_text_to_xhtml("※［＃U+845B］ ※［＃U+4E08-U+E0101］").unwrap();
+        assert!(output.contains("葛"));
+        assert!(output.contains("丈\u{e0101}"));
+        assert!(!output.contains("［＃"));
     }
 }
