@@ -1,6 +1,6 @@
 use std::io::{Cursor, Read};
 
-use aozora_epub3_lite::{EpubBook, EpubMetadata};
+use aozora_epub3_lite::{EpubAsset, EpubBook, EpubMetadata};
 use zip::{CompressionMethod, ZipArchive};
 
 #[test]
@@ -70,4 +70,35 @@ fn writes_all_sections_to_manifest_spine_and_navigation() {
         .unwrap();
     assert!(nav.contains("xhtml/0001.xhtml"));
     assert!(nav.contains("xhtml/0002.xhtml"));
+}
+
+#[test]
+fn writes_assets_and_manifest_entries() {
+    let book = EpubBook::new(
+        EpubMetadata::new("画像", "urn:test:image"),
+        "    <p><img src=\"../image/sample.png\" alt=\"\"/></p>\n",
+    )
+    .with_assets([EpubAsset::new(
+        "image/sample.png",
+        "image/png",
+        vec![0x89, b'P', b'N', b'G'],
+    )]);
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+
+    assert_eq!(
+        archive
+            .by_name("item/image/sample.png")
+            .unwrap()
+            .bytes()
+            .count(),
+        4
+    );
+    let mut package = String::new();
+    archive
+        .by_name("item/standard.opf")
+        .unwrap()
+        .read_to_string(&mut package)
+        .unwrap();
+    assert!(package.contains("href=\"image/sample.png\" media-type=\"image/png\""));
 }

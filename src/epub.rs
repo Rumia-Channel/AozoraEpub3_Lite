@@ -122,9 +122,31 @@ impl EpubSection {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EpubAsset {
+    pub path: String,
+    pub media_type: String,
+    pub data: Vec<u8>,
+}
+
+impl EpubAsset {
+    pub fn new(
+        path: impl Into<String>,
+        media_type: impl Into<String>,
+        data: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            media_type: media_type.into(),
+            data: data.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EpubBook {
     pub metadata: EpubMetadata,
     pub sections: Vec<EpubSection>,
+    pub assets: Vec<EpubAsset>,
 }
 
 impl EpubBook {
@@ -146,11 +168,26 @@ impl EpubBook {
         } else {
             sections
         };
-        Self { metadata, sections }
+        Self {
+            metadata,
+            sections,
+            assets: Vec::new(),
+        }
+    }
+
+    pub fn with_assets<I>(mut self, assets: I) -> Self
+    where
+        I: IntoIterator<Item = EpubAsset>,
+    {
+        self.assets = assets.into_iter().collect();
+        self
     }
 
     pub fn write_to<W: Write + Seek>(&self, output: W) -> Result<W, EpubError> {
         validate_metadata(&self.metadata)?;
+        for asset in &self.assets {
+            validate_asset(asset)?;
+        }
 
         let mut archive = ZipWriter::new(output);
         write_entry(
@@ -168,7 +205,7 @@ impl EpubBook {
         write_entry(
             &mut archive,
             "item/standard.opf",
-            render_package(&self.metadata, self.sections.len()).as_bytes(),
+            render_package(&self.metadata, self.sections.len(), &self.assets).as_bytes(),
             CompressionMethod::Deflated,
         )?;
         write_entry(
@@ -198,9 +235,35 @@ impl EpubBook {
                 CompressionMethod::Deflated,
             )?;
         }
+        for asset in &self.assets {
+            let path = format!("item/{}", asset.path);
+            write_entry(
+                &mut archive,
+                &path,
+                &asset.data,
+                CompressionMethod::Deflated,
+            )?;
+        }
 
         Ok(archive.finish()?)
     }
+}
+
+fn validate_asset(asset: &EpubAsset) -> Result<(), EpubError> {
+    if asset.path.trim().is_empty() {
+        return Err(EpubError::InvalidMetadata("asset path"));
+    }
+    if asset.media_type.trim().is_empty() {
+        return Err(EpubError::InvalidMetadata("asset media type"));
+    }
+    if asset
+        .path
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(EpubError::InvalidMetadata("asset path"));
+    }
+    Ok(())
 }
 
 fn validate_metadata(metadata: &EpubMetadata) -> Result<(), EpubError> {
@@ -231,7 +294,7 @@ fn write_entry<W: Write + Seek>(
     Ok(())
 }
 
-fn render_package(metadata: &EpubMetadata, section_count: usize) -> String {
+fn render_package(metadata: &EpubMetadata, section_count: usize, assets: &[EpubAsset]) -> String {
     let creator = metadata
         .creator
         .as_deref()
@@ -244,12 +307,20 @@ fn render_package(metadata: &EpubMetadata, section_count: usize) -> String {
         .unwrap_or_default();
     let mut manifest_sections = String::new();
     let mut spine_sections = String::new();
+    let mut manifest_assets = String::new();
     for index in 0..section_count {
         let number = index + 1;
         manifest_sections.push_str(&format!(
             "    <item id=\"section-{number:04}\" href=\"xhtml/{number:04}.xhtml\" media-type=\"application/xhtml+xml\"/>\n"
         ));
         spine_sections.push_str(&format!("    <itemref idref=\"section-{number:04}\"/>\n"));
+    }
+    for (index, asset) in assets.iter().enumerate() {
+        manifest_assets.push_str(&format!(
+            "    <item id=\"asset-{index:04}\" href=\"{}\" media-type=\"{}\"/>\n",
+            xml_escape(&asset.path),
+            xml_escape(&asset.media_type),
+        ));
     }
 
     format!(
@@ -264,7 +335,7 @@ fn render_package(metadata: &EpubMetadata, section_count: usize) -> String {
   <manifest>
     <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
     <item id="style" href="style/book-style.css" media-type="text/css"/>
-{}    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+{}{}    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
   </manifest>
   <spine page-progression-direction="rtl" toc="ncx">
 {}  </spine>
@@ -276,6 +347,7 @@ fn render_package(metadata: &EpubMetadata, section_count: usize) -> String {
         xml_escape(&metadata.identifier),
         xml_escape(&metadata.modified),
         manifest_sections,
+        manifest_assets,
         spine_sections,
     )
 }

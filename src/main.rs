@@ -1,4 +1,7 @@
-use aozora_epub3_lite::{EpubBook, EpubMetadata, aozora_text_to_xhtml_sections, decode_input};
+use aozora_epub3_lite::{
+    EpubAsset, EpubBook, EpubMetadata, aozora_text_to_xhtml_sections, decode_input,
+    image_references,
+};
 use std::env;
 use std::error::Error;
 use std::ffi::OsStr;
@@ -53,12 +56,53 @@ fn run() -> Result<(), Box<dyn Error>> {
     let input = fs::read(&input_path)?;
     let input = decode_input(&input, encoding.as_deref())?;
     let sections = aozora_text_to_xhtml_sections(&input)?;
+    let assets = collect_assets(Path::new(&input_path), &input)?;
     let identifier = format!("urn:aozoraepub3-lite:{}", percent_encode(&title));
     let metadata = EpubMetadata::new(title, identifier);
 
     let output = File::create(output_path)?;
-    EpubBook::from_sections(metadata, sections).write_to(output)?;
+    EpubBook::from_sections(metadata, sections)
+        .with_assets(assets)
+        .write_to(output)?;
     Ok(())
+}
+
+fn collect_assets(input_path: &Path, input: &str) -> Result<Vec<EpubAsset>, Box<dyn Error>> {
+    let base = input_path.parent().unwrap_or_else(|| Path::new("."));
+    image_references(input)
+        .into_iter()
+        .map(|image_path| {
+            let source = base.join(&image_path);
+            let data = fs::read(&source)?;
+            let media_type = media_type_for_path(&image_path).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unsupported image type: {image_path}"),
+                )
+            })?;
+            Ok(EpubAsset::new(
+                format!("image/{image_path}"),
+                media_type,
+                data,
+            ))
+        })
+        .collect()
+}
+
+fn media_type_for_path(path: &str) -> Option<&'static str> {
+    match Path::new(path)
+        .extension()
+        .and_then(OsStr::to_str)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => Some("image/png"),
+        Some("jpg" | "jpeg") => Some("image/jpeg"),
+        Some("gif") => Some("image/gif"),
+        Some("webp") => Some("image/webp"),
+        Some("svg") => Some("image/svg+xml"),
+        _ => None,
+    }
 }
 
 fn title_from_path(path: &Path) -> String {

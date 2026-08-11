@@ -107,6 +107,11 @@ fn convert_inline(input: &str) -> String {
     let mut index = 0;
 
     while index < chars.len() {
+        if let Some((end, replacement)) = parse_image_note(&chars, index) {
+            output.push_str(&replacement);
+            index = end;
+            continue;
+        }
         if let Some((end, replacement)) = parse_inline_note(&chars, index) {
             output.push_str(replacement);
             index = end;
@@ -149,6 +154,63 @@ fn convert_inline(input: &str) -> String {
     }
 
     output
+}
+
+fn parse_image_note(chars: &[char], start: usize) -> Option<(usize, String)> {
+    let (end, path) = image_path_from_note(chars, start)?;
+    let replacement = format!("<img src=\"../image/{}\" alt=\"\"/>", escape_html(&path));
+    Some((end, replacement))
+}
+
+fn image_path_from_note(chars: &[char], start: usize) -> Option<(usize, String)> {
+    if chars.get(start) != Some(&'［') || chars.get(start + 1) != Some(&'＃') {
+        return None;
+    }
+    let close = chars
+        .iter()
+        .enumerate()
+        .skip(start + 2)
+        .find_map(|(index, character)| (*character == '］').then_some(index))?;
+    let note = chars[start + 2..close].iter().collect::<String>();
+    if !note.ends_with("入る") {
+        return None;
+    }
+    let open_paren = note.find('（')?;
+    let close_paren = note.rfind('）')?;
+    if open_paren >= close_paren {
+        return None;
+    }
+    let path = normalize_image_path(&note[open_paren + '（'.len_utf8()..close_paren])?;
+    Some((close + 1, path))
+}
+
+fn normalize_image_path(path: &str) -> Option<String> {
+    let path = path.trim().replace('\\', "/");
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return None;
+        }
+        parts.push(part);
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+pub fn image_references(input: &str) -> Vec<String> {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut references = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if let Some((end, path)) = image_path_from_note(&chars, index) {
+            if !references.contains(&path) {
+                references.push(path);
+            }
+            index = end;
+        } else {
+            index += 1;
+        }
+    }
+    references
 }
 
 fn parse_inline_note(chars: &[char], start: usize) -> Option<(usize, &'static str)> {
@@ -238,7 +300,9 @@ fn push_escaped_char(output: &mut String, character: char) {
 
 #[cfg(test)]
 mod tests {
-    use super::{aozora_text_to_xhtml_sections, decode_input, plain_text_to_xhtml};
+    use super::{
+        aozora_text_to_xhtml_sections, decode_input, image_references, plain_text_to_xhtml,
+    };
     use encoding_rs::SHIFT_JIS;
 
     #[test]
@@ -296,5 +360,12 @@ mod tests {
         let (shift_jis, _, _) = SHIFT_JIS.encode("日本語");
         let decoded = decode_input(&shift_jis, Some("shift_jis")).unwrap();
         assert_eq!(decoded, "日本語");
+    }
+    #[test]
+    fn converts_and_collects_image_notes() {
+        let input = "画像［＃sample（fig/sample.png）入る］";
+        let output = plain_text_to_xhtml(input).unwrap();
+        assert!(output.contains("<img src=\"../image/fig/sample.png\" alt=\"\"/>"));
+        assert_eq!(image_references(input), vec!["fig/sample.png"]);
     }
 }
