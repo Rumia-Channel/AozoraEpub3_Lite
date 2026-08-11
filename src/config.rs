@@ -156,6 +156,10 @@ impl Default for AozoraConfig {
                 ),
                 ("割り注終わり".to_owned(), "</span>".to_owned()),
                 ("ここで割り注終わり".to_owned(), "</span>".to_owned()),
+                ("見出し終わり".to_owned(), String::new()),
+                ("大見出し終わり".to_owned(), String::new()),
+                ("中見出し終わり".to_owned(), String::new()),
+                ("小見出し終わり".to_owned(), String::new()),
                 ("改行".to_owned(), "<br/>".to_owned()),
                 ("行右小書き".to_owned(), "<span class=\"super\">".to_owned()),
                 (
@@ -239,11 +243,10 @@ impl AozoraConfig {
             {
                 self.inline_notes.insert(note.to_owned(), tag.to_owned());
             }
-            if fields
-                .iter()
-                .skip(1)
-                .any(|value| value.trim().contains('P'))
-            {
+            if fields.iter().skip(1).any(|value| {
+                let flags = value.trim();
+                !flags.is_empty() && flags.chars().all(|flag| matches!(flag, 'P' | 'M' | 'L'))
+            }) {
                 self.page_break_notes.insert(note.to_owned());
             }
             if fields.iter().skip(1).any(|value| value.trim() == "1") {
@@ -399,7 +402,11 @@ mod tests {
     #[test]
     fn loads_tag_and_gaiji_rows() {
         let mut config = AozoraConfig::default();
-        config.load_tag_text("注記\t<span class=\"note\">\t\tP\n改丁\t\tP\n");
+        config.load_tag_text(
+            "注記\t<span class=\"note\">\t\tP\n\
+             改丁\t\tP\n\
+             ページ中央\t\tM\n",
+        );
         config.load_utf_text("U+4E00\t\t一\t※［＃「一」］\n");
         assert_eq!(
             config.inline_notes.get("注記"),
@@ -407,6 +414,7 @@ mod tests {
         );
         assert!(config.page_break_notes.contains("注記"));
         assert!(config.page_break_notes.contains("改丁"));
+        assert!(config.page_break_notes.contains("ページ中央"));
         assert_eq!(config.gaiji.get("※［＃「一」］"), Some(&"一".to_owned()));
     }
 
