@@ -1,4 +1,4 @@
-use aozora_epub3_lite::{EpubBook, EpubMetadata, TextError, plain_text_to_xhtml};
+use aozora_epub3_lite::{EpubBook, EpubMetadata, TextError, aozora_text_to_xhtml_sections};
 use std::env;
 use std::error::Error;
 use std::ffi::OsStr;
@@ -42,12 +42,12 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let input = fs::read(&input_path)?;
     let input = String::from_utf8(input).map_err(|_| TextError::InvalidInput)?;
-    let body = plain_text_to_xhtml(&input)?;
+    let sections = aozora_text_to_xhtml_sections(&input)?;
     let identifier = format!("urn:aozoraepub3-lite:{}", percent_encode(&title));
     let metadata = EpubMetadata::new(title, identifier);
 
     let output = File::create(output_path)?;
-    EpubBook::new(metadata, body).write_to(output)?;
+    EpubBook::from_sections(metadata, sections).write_to(output)?;
     Ok(())
 }
 
