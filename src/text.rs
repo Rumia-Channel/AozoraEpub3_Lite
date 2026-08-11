@@ -1,21 +1,49 @@
 use std::fmt;
 
+use encoding_rs::{Encoding, SHIFT_JIS, UTF_8};
 const PAGE_BREAK_TAG: &str = "［＃改ページ］";
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum TextError {
     InvalidInput,
+    UnsupportedEncoding(String),
+    DecodeError(String),
 }
 
 impl fmt::Display for TextError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidInput => write!(f, "input text is not valid UTF-8"),
+            Self::UnsupportedEncoding(encoding) => {
+                write!(f, "unsupported input encoding: {encoding}")
+            }
+            Self::DecodeError(encoding) => {
+                write!(f, "input cannot be decoded as {encoding}")
+            }
         }
     }
 }
 
 impl std::error::Error for TextError {}
+
+pub fn decode_input(bytes: &[u8], label: Option<&str>) -> Result<String, TextError> {
+    let encoding = match label {
+        Some(label) => Encoding::for_label(label.as_bytes())
+            .ok_or_else(|| TextError::UnsupportedEncoding(label.to_owned()))?,
+        None => {
+            let (_, _, had_errors) = UTF_8.decode(bytes);
+            if had_errors { SHIFT_JIS } else { UTF_8 }
+        }
+    };
+    let (decoded, _, had_errors) = encoding.decode(bytes);
+    if had_errors {
+        return Err(TextError::DecodeError(encoding.name().to_owned()));
+    }
+    Ok(decoded
+        .strip_prefix('\u{feff}')
+        .unwrap_or(decoded.as_ref())
+        .to_owned())
+}
 
 pub fn plain_text_to_xhtml(input: &str) -> Result<String, TextError> {
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
@@ -210,7 +238,8 @@ fn push_escaped_char(output: &mut String, character: char) {
 
 #[cfg(test)]
 mod tests {
-    use super::{aozora_text_to_xhtml_sections, plain_text_to_xhtml};
+    use super::{aozora_text_to_xhtml_sections, decode_input, plain_text_to_xhtml};
+    use encoding_rs::SHIFT_JIS;
 
     #[test]
     fn escapes_text_and_preserves_empty_lines() {
@@ -258,5 +287,14 @@ mod tests {
         .unwrap();
         assert!(output.contains("<span class=\"bold\">太字</span>"));
         assert!(output.contains("<span class=\"tcy\">12</span><br/>"));
+    }
+    #[test]
+    fn decodes_utf8_and_shift_jis_input() {
+        let utf8 = decode_input("日本語".as_bytes(), None).unwrap();
+        assert_eq!(utf8, "日本語");
+
+        let (shift_jis, _, _) = SHIFT_JIS.encode("日本語");
+        let decoded = decode_input(&shift_jis, Some("shift_jis")).unwrap();
+        assert_eq!(decoded, "日本語");
     }
 }

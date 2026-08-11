@@ -1,4 +1,4 @@
-use aozora_epub3_lite::{EpubBook, EpubMetadata, TextError, aozora_text_to_xhtml_sections};
+use aozora_epub3_lite::{EpubBook, EpubMetadata, aozora_text_to_xhtml_sections, decode_input};
 use std::env;
 use std::error::Error;
 use std::ffi::OsStr;
@@ -32,16 +32,26 @@ fn run() -> Result<(), Box<dyn Error>> {
             "an output EPUB path is required",
         )
     })?;
-    let title = args
-        .next()
-        .unwrap_or_else(|| title_from_path(Path::new(&input_path)));
-
-    if args.next().is_some() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, usage()).into());
+    let mut title = None;
+    let mut encoding = None;
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--encoding" => {
+                encoding = Some(args.next().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "--encoding requires a label")
+                })?);
+            }
+            argument if argument.starts_with('-') => {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, usage()).into());
+            }
+            argument if title.is_none() => title = Some(argument.to_owned()),
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, usage()).into()),
+        }
     }
+    let title = title.unwrap_or_else(|| title_from_path(Path::new(&input_path)));
 
     let input = fs::read(&input_path)?;
-    let input = String::from_utf8(input).map_err(|_| TextError::InvalidInput)?;
+    let input = decode_input(&input, encoding.as_deref())?;
     let sections = aozora_text_to_xhtml_sections(&input)?;
     let identifier = format!("urn:aozoraepub3-lite:{}", percent_encode(&title));
     let metadata = EpubMetadata::new(title, identifier);
@@ -86,5 +96,5 @@ fn print_usage() {
 }
 
 fn usage() -> &'static str {
-    "Usage: AozoraEpub3_Lite <input.txt> <output.epub> [title]"
+    "Usage: AozoraEpub3_Lite <input.txt> <output.epub> [title] [--encoding utf-8|shift_jis]"
 }
