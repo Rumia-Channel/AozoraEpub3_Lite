@@ -102,3 +102,41 @@ fn writes_assets_and_manifest_entries() {
         .unwrap();
     assert!(package.contains("href=\"image/sample.png\" media-type=\"image/png\""));
 }
+
+#[test]
+fn writes_cover_document_and_cover_manifest_property() {
+    let book = EpubBook::new(
+        EpubMetadata::new("表紙", "urn:test:cover"),
+        "    <p>本文</p>\n",
+    )
+    .with_assets([EpubAsset::new(
+        "image/cover.jpg",
+        "image/jpeg",
+        vec![0xff, 0xd8, 0xff],
+    )])
+    .with_cover_asset("image/cover.jpg");
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+
+    let mut package = String::new();
+    archive
+        .by_name("item/standard.opf")
+        .unwrap()
+        .read_to_string(&mut package)
+        .unwrap();
+    assert!(
+        package.contains(
+            "href=\"image/cover.jpg\" media-type=\"image/jpeg\" properties=\"cover-image\""
+        )
+    );
+    assert!(package.contains("id=\"cover\" href=\"cover.xhtml\""));
+    assert!(package.contains("<itemref idref=\"cover\"/>"));
+
+    let mut cover = String::new();
+    archive
+        .by_name("item/cover.xhtml")
+        .unwrap()
+        .read_to_string(&mut cover)
+        .unwrap();
+    assert!(cover.contains("<img src=\"image/cover.jpg\""));
+}

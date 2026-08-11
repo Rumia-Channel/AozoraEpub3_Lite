@@ -147,6 +147,7 @@ pub struct EpubBook {
     pub metadata: EpubMetadata,
     pub sections: Vec<EpubSection>,
     pub assets: Vec<EpubAsset>,
+    pub cover_asset: Option<String>,
 }
 
 impl EpubBook {
@@ -172,6 +173,7 @@ impl EpubBook {
             metadata,
             sections,
             assets: Vec::new(),
+            cover_asset: None,
         }
     }
 
@@ -183,10 +185,20 @@ impl EpubBook {
         self
     }
 
+    pub fn with_cover_asset(mut self, path: impl Into<String>) -> Self {
+        self.cover_asset = Some(path.into());
+        self
+    }
+
     pub fn write_to<W: Write + Seek>(&self, output: W) -> Result<W, EpubError> {
         validate_metadata(&self.metadata)?;
         for asset in &self.assets {
             validate_asset(asset)?;
+        }
+        if let Some(cover_asset) = &self.cover_asset
+            && !self.assets.iter().any(|asset| &asset.path == cover_asset)
+        {
+            return Err(EpubError::InvalidMetadata("cover asset"));
         }
 
         let mut archive = ZipWriter::new(output);
@@ -205,7 +217,13 @@ impl EpubBook {
         write_entry(
             &mut archive,
             "item/standard.opf",
-            render_package(&self.metadata, self.sections.len(), &self.assets).as_bytes(),
+            render_package(
+                &self.metadata,
+                self.sections.len(),
+                &self.assets,
+                self.cover_asset.as_deref(),
+            )
+            .as_bytes(),
             CompressionMethod::Deflated,
         )?;
         write_entry(
@@ -214,6 +232,14 @@ impl EpubBook {
             render_nav(&self.metadata, self.sections.len()).as_bytes(),
             CompressionMethod::Deflated,
         )?;
+        if let Some(cover_asset) = &self.cover_asset {
+            write_entry(
+                &mut archive,
+                "item/cover.xhtml",
+                render_cover(&self.metadata, cover_asset).as_bytes(),
+                CompressionMethod::Deflated,
+            )?;
+        }
         write_entry(
             &mut archive,
             "item/toc.ncx",
@@ -294,7 +320,12 @@ fn write_entry<W: Write + Seek>(
     Ok(())
 }
 
-fn render_package(metadata: &EpubMetadata, section_count: usize, assets: &[EpubAsset]) -> String {
+fn render_package(
+    metadata: &EpubMetadata,
+    section_count: usize,
+    assets: &[EpubAsset],
+    cover_asset: Option<&str>,
+) -> String {
     let creator = metadata
         .creator
         .as_deref()
@@ -316,12 +347,27 @@ fn render_package(metadata: &EpubMetadata, section_count: usize, assets: &[EpubA
         spine_sections.push_str(&format!("    <itemref idref=\"section-{number:04}\"/>\n"));
     }
     for (index, asset) in assets.iter().enumerate() {
+        let properties = if cover_asset == Some(asset.path.as_str()) {
+            " properties=\"cover-image\""
+        } else {
+            ""
+        };
         manifest_assets.push_str(&format!(
-            "    <item id=\"asset-{index:04}\" href=\"{}\" media-type=\"{}\"/>\n",
+            "    <item id=\"asset-{index:04}\" href=\"{}\" media-type=\"{}\"{properties}/>\n",
             xml_escape(&asset.path),
             xml_escape(&asset.media_type),
         ));
     }
+    let cover_manifest = if cover_asset.is_some() {
+        "    <item id=\"cover\" href=\"cover.xhtml\" media-type=\"application/xhtml+xml\"/>\n"
+    } else {
+        ""
+    };
+    let cover_spine = if cover_asset.is_some() {
+        "    <itemref idref=\"cover\"/>\n"
+    } else {
+        ""
+    };
 
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -335,10 +381,10 @@ fn render_package(metadata: &EpubMetadata, section_count: usize, assets: &[EpubA
   <manifest>
     <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
     <item id="style" href="style/book-style.css" media-type="text/css"/>
-{}{}    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+{}{}{}    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
   </manifest>
   <spine page-progression-direction="rtl" toc="ncx">
-{}  </spine>
+{}{}  </spine>
 </package>
 "#,
         xml_escape(&metadata.title),
@@ -348,6 +394,8 @@ fn render_package(metadata: &EpubMetadata, section_count: usize, assets: &[EpubA
         xml_escape(&metadata.modified),
         manifest_sections,
         manifest_assets,
+        cover_manifest,
+        cover_spine,
         spine_sections,
     )
 }
@@ -423,6 +471,28 @@ fn render_ncx(metadata: &EpubMetadata, section_count: usize) -> String {
         identifier = xml_escape(&metadata.identifier),
         title = xml_escape(&metadata.title),
         nav_points = nav_points,
+    )
+}
+
+fn render_cover(metadata: &EpubMetadata, asset_path: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{language}">
+<head>
+  <meta charset="UTF-8"/>
+  <title>{title}</title>
+</head>
+<body>
+  <div class="cover">
+    <img src="{asset_path}" alt="{title}"/>
+  </div>
+</body>
+</html>
+"#,
+        language = xml_escape(&metadata.language),
+        title = xml_escape(&metadata.title),
+        asset_path = xml_escape(asset_path),
     )
 }
 

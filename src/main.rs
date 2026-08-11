@@ -39,6 +39,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut creator = None;
     let mut language = None;
     let mut encoding = None;
+    let mut cover = None;
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--creator" => {
@@ -56,6 +57,11 @@ fn run() -> Result<(), Box<dyn Error>> {
                     io::Error::new(io::ErrorKind::InvalidInput, "--encoding requires a label")
                 })?);
             }
+            "--cover" => {
+                cover = Some(args.next().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "--cover requires a path")
+                })?);
+            }
             argument if argument.starts_with('-') => {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, usage()).into());
             }
@@ -68,7 +74,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let input = fs::read(&input_path)?;
     let input = decode_input(&input, encoding.as_deref())?;
     let sections = aozora_text_to_xhtml_sections(&input)?;
-    let assets = collect_assets(Path::new(&input_path), &input)?;
+    let cover = cover.as_deref().map(normalize_relative_path).transpose()?;
+    let assets = collect_assets(Path::new(&input_path), &input, cover.as_deref())?;
     let identifier = format!("urn:aozoraepub3-lite:{}", percent_encode(&title));
     let mut metadata = EpubMetadata::new(title, identifier);
     if let Some(creator) = creator {
@@ -79,15 +86,26 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     let output = File::create(output_path)?;
-    EpubBook::from_sections(metadata, sections)
-        .with_assets(assets)
-        .write_to(output)?;
+    let mut book = EpubBook::from_sections(metadata, sections).with_assets(assets);
+    if let Some(cover) = cover {
+        book = book.with_cover_asset(format!("image/{cover}"));
+    }
+    book.write_to(output)?;
     Ok(())
 }
-
-fn collect_assets(input_path: &Path, input: &str) -> Result<Vec<EpubAsset>, Box<dyn Error>> {
+fn collect_assets(
+    input_path: &Path,
+    input: &str,
+    cover: Option<&str>,
+) -> Result<Vec<EpubAsset>, Box<dyn Error>> {
     let base = input_path.parent().unwrap_or_else(|| Path::new("."));
-    image_references(input)
+    let mut image_paths = image_references(input);
+    if let Some(cover) = cover
+        && !image_paths.iter().any(|path| path == cover)
+    {
+        image_paths.push(cover.to_owned());
+    }
+    image_paths
         .into_iter()
         .map(|image_path| {
             let source = base.join(&image_path);
@@ -105,6 +123,25 @@ fn collect_assets(input_path: &Path, input: &str) -> Result<Vec<EpubAsset>, Box<
             ))
         })
         .collect()
+}
+
+fn normalize_relative_path(path: &str) -> Result<String, Box<dyn Error>> {
+    let normalized = path.trim().replace('\\', "/");
+    let mut parts = Vec::new();
+    for part in normalized.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "asset paths must stay below the input directory",
+            )
+            .into());
+        }
+        parts.push(part);
+    }
+    if parts.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "asset path is empty").into());
+    }
+    Ok(parts.join("/"))
 }
 
 fn media_type_for_path(path: &str) -> Option<&'static str> {
@@ -158,5 +195,5 @@ fn print_usage() {
 }
 
 fn usage() -> &'static str {
-    "Usage: AozoraEpub3_Lite <input.txt> <output.epub> [title] [--creator name] [--language lang] [--encoding utf-8|shift_jis]"
+    "Usage: AozoraEpub3_Lite <input.txt> <output.epub> [title] [--creator name] [--language lang] [--encoding utf-8|shift_jis] [--cover image]"
 }
