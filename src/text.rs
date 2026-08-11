@@ -271,6 +271,7 @@ fn append_line(fragment: &mut String, line: &str, config: &AozoraConfig) {
 
 fn convert_inline(input: &str, config: &AozoraConfig) -> String {
     let input = rewrite_suffix_notes(input, config);
+    let input = rewrite_alternative_gaiji(&input, config);
     let chars = input.chars().collect::<Vec<_>>();
     let mut output = String::new();
     let mut index = 0;
@@ -395,6 +396,28 @@ fn rewrite_suffix_notes(input: &str, config: &AozoraConfig) -> String {
     }
 }
 
+fn rewrite_alternative_gaiji(input: &str, config: &AozoraConfig) -> String {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+
+    while index < chars.len() {
+        if let Some((end, note)) = gaiji_note_range(&chars, index) {
+            if let Some(replacement) = config.gaiji_alternatives.get(&note) {
+                output.push_str(replacement);
+            } else {
+                output.extend(chars[index..end].iter());
+            }
+            index = end;
+        } else {
+            output.push(chars[index]);
+            index += 1;
+        }
+    }
+
+    output
+}
+
 fn suffix_note_at(chars: &[char], start: usize) -> Option<(usize, String, String)> {
     if chars.get(start) != Some(&'［')
         || chars.get(start + 1) != Some(&'＃')
@@ -513,6 +536,11 @@ fn parse_gaiji_note(
     start: usize,
     config: &AozoraConfig,
 ) -> Option<(usize, String)> {
+    let (end, note) = gaiji_note_range(chars, start)?;
+    Some((end, config.gaiji.get(&note)?.to_owned()))
+}
+
+fn gaiji_note_range(chars: &[char], start: usize) -> Option<(usize, String)> {
     if chars.get(start) != Some(&'※')
         || chars.get(start + 1) != Some(&'［')
         || chars.get(start + 2) != Some(&'＃')
@@ -525,7 +553,7 @@ fn parse_gaiji_note(
         .skip(start + 3)
         .find_map(|(index, character)| (*character == '］').then_some(index))?;
     let note = chars[start..=close].iter().collect::<String>();
-    Some((close + 1, config.gaiji.get(&note)?.to_owned()))
+    Some((close + 1, note))
 }
 
 fn parse_hex_code(input: &str, start: usize) -> Option<(u32, usize)> {
@@ -793,6 +821,25 @@ mod tests {
         .unwrap();
         assert!(output.contains("<span class=\"custom\">注記</span>"));
         assert!(output.contains("一"));
+    }
+
+    #[test]
+    fn converts_external_alternative_gaiji_before_inline_parsing() {
+        let mut config = AozoraConfig::default();
+        config.load_tag_text(
+            "縦中横\t<span class=\"tcy\">\t\t\n縦中横終わり\t</span>\t\t\n小書き\t<span class=\"kogaki\">\t\t\n小書き終わり\t</span>\t\t\n",
+        );
+        config.load_alt_text(
+            "\t\t［＃縦中横］!!!［＃縦中横終わり］\t※［＃感嘆符三つ］\n\t\t［＃小書き］こ［＃小書き終わり］\t※［＃小書き平仮名こ］\n",
+        );
+        let output = super::plain_text_to_xhtml_with_config(
+            "※［＃感嘆符三つ］ ※［＃小書き平仮名こ］",
+            &config,
+        )
+        .unwrap();
+        assert!(output.contains("<span class=\"tcy\">!!!</span>"));
+        assert!(output.contains("<span class=\"kogaki\">こ</span>"));
+        assert!(!output.contains("※［＃"));
     }
 
     #[test]

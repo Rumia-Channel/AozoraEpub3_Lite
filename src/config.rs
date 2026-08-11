@@ -124,6 +124,7 @@ pub struct AozoraConfig {
     pub inline_notes: BTreeMap<String, String>,
     pub suffix_notes: BTreeMap<String, SuffixNoteRule>,
     pub gaiji: BTreeMap<String, String>,
+    pub gaiji_alternatives: BTreeMap<String, String>,
     pub page_break_notes: BTreeSet<String>,
     pub split_page_breaks: bool,
 }
@@ -165,6 +166,7 @@ impl Default for AozoraConfig {
             ]),
             suffix_notes: BTreeMap::new(),
             gaiji: BTreeMap::new(),
+            gaiji_alternatives: BTreeMap::new(),
             page_break_notes: BTreeSet::from(["改ページ".to_owned()]),
             split_page_breaks: true,
         }
@@ -199,6 +201,7 @@ impl AozoraConfig {
                 .load_optional_file(directory.join("chuki_tag_suf.txt"), Self::load_suffix_text)?;
             config.load_optional_file(directory.join("chuki_utf.txt"), Self::load_utf_text)?;
             config.load_optional_file(directory.join("chuki_ivs.txt"), Self::load_ivs_text)?;
+            config.load_optional_file(directory.join("chuki_alt.txt"), Self::load_alt_text)?;
         }
 
         Ok(config)
@@ -285,6 +288,9 @@ impl AozoraConfig {
     pub fn load_ivs_text(&mut self, input: &str) {
         load_gaiji_rows(&mut self.gaiji, input);
     }
+    pub fn load_alt_text(&mut self, input: &str) {
+        load_gaiji_rows(&mut self.gaiji_alternatives, input);
+    }
 
     fn load_optional_file(
         &mut self,
@@ -350,5 +356,15 @@ mod tests {
         let rule = config.suffix_notes.get("に傍点").unwrap();
         assert_eq!(rule.start, "傍点");
         assert_eq!(rule.end, "傍点終わり");
+    }
+
+    #[test]
+    fn loads_alternative_gaiji_rows() {
+        let mut config = AozoraConfig::default();
+        config.load_alt_text("\t\t［＃縦中横］!!!［＃縦中横終わり］\t※［＃感嘆符三つ］\n");
+        assert_eq!(
+            config.gaiji_alternatives.get("※［＃感嘆符三つ］"),
+            Some(&"［＃縦中横］!!!［＃縦中横終わり］".to_owned())
+        );
     }
 }
