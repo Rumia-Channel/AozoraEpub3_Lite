@@ -113,9 +113,16 @@ impl IniSettings {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SuffixNoteRule {
+    pub start: String,
+    pub end: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AozoraConfig {
     pub ini: IniSettings,
     pub inline_notes: BTreeMap<String, String>,
+    pub suffix_notes: BTreeMap<String, SuffixNoteRule>,
     pub gaiji: BTreeMap<String, String>,
     pub page_break_notes: BTreeSet<String>,
     pub split_page_breaks: bool,
@@ -156,6 +163,7 @@ impl Default for AozoraConfig {
                 ("行左小書き終わり".to_owned(), "</span>".to_owned()),
                 ("下付き小文字終わり".to_owned(), "</span>".to_owned()),
             ]),
+            suffix_notes: BTreeMap::new(),
             gaiji: BTreeMap::new(),
             page_break_notes: BTreeSet::from(["改ページ".to_owned()]),
             split_page_breaks: true,
@@ -187,6 +195,8 @@ impl AozoraConfig {
                 return Err(ConfigError::InvalidPath(directory.display().to_string()));
             }
             config.load_optional_file(directory.join("chuki_tag.txt"), Self::load_tag_text)?;
+            config
+                .load_optional_file(directory.join("chuki_tag_suf.txt"), Self::load_suffix_text)?;
             config.load_optional_file(directory.join("chuki_utf.txt"), Self::load_utf_text)?;
             config.load_optional_file(directory.join("chuki_ivs.txt"), Self::load_ivs_text)?;
         }
@@ -221,6 +231,49 @@ impl AozoraConfig {
                 .any(|value| value.trim().contains('P'))
             {
                 self.page_break_notes.insert(note.to_owned());
+            }
+        }
+    }
+
+    pub fn load_suffix_text(&mut self, input: &str) {
+        for line in input.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let fields = line.split('\t').collect::<Vec<_>>();
+            let Some(key) = fields
+                .first()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            let Some(start) = fields
+                .get(1)
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            let Some(end) = fields
+                .get(2)
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            let rule = SuffixNoteRule {
+                start: start.to_owned(),
+                end: end.to_owned(),
+            };
+            self.suffix_notes.insert(key.to_owned(), rule.clone());
+            if let Some(alias) = fields
+                .get(3)
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            {
+                self.suffix_notes.insert(format!("{alias}{key}"), rule);
             }
         }
     }
@@ -288,5 +341,14 @@ mod tests {
         assert!(config.page_break_notes.contains("注記"));
         assert!(config.page_break_notes.contains("改丁"));
         assert_eq!(config.gaiji.get("※［＃「一」］"), Some(&"一".to_owned()));
+    }
+
+    #[test]
+    fn loads_suffix_note_rules_and_aliases() {
+        let mut config = AozoraConfig::default();
+        config.load_suffix_text("に傍点\t傍点\t傍点終わり\n");
+        let rule = config.suffix_notes.get("に傍点").unwrap();
+        assert_eq!(rule.start, "傍点");
+        assert_eq!(rule.end, "傍点終わり");
     }
 }

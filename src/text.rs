@@ -270,6 +270,7 @@ fn append_line(fragment: &mut String, line: &str, config: &AozoraConfig) {
 }
 
 fn convert_inline(input: &str, config: &AozoraConfig) -> String {
+    let input = rewrite_suffix_notes(input, config);
     let chars = input.chars().collect::<Vec<_>>();
     let mut output = String::new();
     let mut index = 0;
@@ -341,6 +342,140 @@ fn convert_inline(input: &str, config: &AozoraConfig) -> String {
     }
 
     output
+}
+
+fn rewrite_suffix_notes(input: &str, config: &AozoraConfig) -> String {
+    let mut current = input.to_owned();
+
+    loop {
+        let chars = current.chars().collect::<Vec<_>>();
+        let mut index = 0;
+        let mut selected = None;
+
+        while index < chars.len() {
+            if let Some((end, target, suffix)) = suffix_note_at(&chars, index) {
+                if let Some(rule) = config.suffix_notes.get(&suffix) {
+                    let prefix = chars[..index].iter().collect::<String>();
+                    if suffix_target_range(&prefix, &target).is_some() {
+                        let target_length = target.chars().count();
+                        let should_select = selected
+                            .as_ref()
+                            .is_none_or(|(_, _, _, _, _, length)| target_length > *length);
+                        if should_select {
+                            selected = Some((
+                                index,
+                                end,
+                                target,
+                                rule.start.clone(),
+                                rule.end.clone(),
+                                target_length,
+                            ));
+                        }
+                    }
+                }
+                index = end;
+            } else {
+                index += 1;
+            }
+        }
+
+        let Some((start, end, target, start_tag, end_tag, _)) = selected else {
+            return current;
+        };
+        let prefix = chars[..start].iter().collect::<String>();
+        let suffix = chars[end..].iter().collect::<String>();
+        let (target_start, target_end) = suffix_target_range(&prefix, &target).unwrap();
+        let start_note = format!("［＃{start_tag}］");
+        let end_note = format!("［＃{end_tag}］");
+        let mut rewritten = prefix;
+        rewritten.insert_str(target_start, &start_note);
+        rewritten.insert_str(target_end + start_note.len(), &end_note);
+        rewritten.push_str(&suffix);
+        current = rewritten;
+    }
+}
+
+fn suffix_note_at(chars: &[char], start: usize) -> Option<(usize, String, String)> {
+    if chars.get(start) != Some(&'［')
+        || chars.get(start + 1) != Some(&'＃')
+        || chars.get(start + 2) != Some(&'「')
+    {
+        return None;
+    }
+    let target_end = chars
+        .iter()
+        .enumerate()
+        .skip(start + 3)
+        .find_map(|(index, character)| (*character == '」').then_some(index))?;
+    let close = chars
+        .iter()
+        .enumerate()
+        .skip(target_end + 1)
+        .find_map(|(index, character)| (*character == '］').then_some(index))?;
+    let target = chars[start + 3..target_end].iter().collect::<String>();
+    let suffix = chars[target_end + 1..close].iter().collect::<String>();
+    (!target.is_empty() && !suffix.is_empty()).then_some((close + 1, target, suffix))
+}
+
+fn suffix_target_range(output: &str, target: &str) -> Option<(usize, usize)> {
+    let indexed_chars = output.char_indices().collect::<Vec<_>>();
+    let mut visible = Vec::new();
+    let mut index = 0;
+
+    while index < indexed_chars.len() {
+        let (byte_index, character) = indexed_chars[index];
+        if character == '［' && indexed_chars.get(index + 1).map(|(_, value)| *value) == Some('＃')
+        {
+            index = indexed_chars
+                .iter()
+                .enumerate()
+                .skip(index + 2)
+                .find_map(|(candidate, (_, value))| (*value == '］').then_some(candidate + 1))
+                .unwrap_or(index + 1);
+            continue;
+        }
+        if character == '｜' {
+            index += 1;
+            continue;
+        }
+        if character == '《' {
+            index = indexed_chars
+                .iter()
+                .enumerate()
+                .skip(index + 1)
+                .find_map(|(candidate, (_, value))| (*value == '》').then_some(candidate + 1))
+                .unwrap_or(index + 1);
+            continue;
+        }
+        let end = byte_index + character.len_utf8();
+        visible.push((character, byte_index, end));
+        index += 1;
+    }
+
+    let target_chars = target.chars().collect::<Vec<_>>();
+    if target_chars.is_empty() || target_chars.len() > visible.len() {
+        return None;
+    }
+    let match_start = visible.len() - target_chars.len();
+    if !visible[match_start..]
+        .iter()
+        .zip(target_chars)
+        .all(|((character, _, _), target)| *character == target)
+    {
+        return None;
+    }
+
+    let mut start = visible[match_start].1;
+    if start >= '｜'.len_utf8() && output[..start].ends_with('｜') {
+        start -= '｜'.len_utf8();
+    }
+    let mut end = visible.last()?.2;
+    if output[end..].starts_with('《')
+        && let Some(ruby_end) = output[end..].find('》')
+    {
+        end += ruby_end + '》'.len_utf8();
+    }
+    Some((start, end))
 }
 
 fn parse_unicode_note(chars: &[char], start: usize) -> Option<(usize, String)> {
@@ -622,6 +757,24 @@ mod tests {
         assert!(output.contains("<div class=\"mt1\">字下げ本文\n</div>"));
     }
     #[test]
+    fn nests_multiple_suffix_notes_on_the_same_target() {
+        let mut config = AozoraConfig::default();
+        config.load_suffix_text(
+            "は太字\t太字\t太字終わり\nに傍点\t傍点\t傍点終わり\nに傍線\t傍線\t傍線終わり\n",
+        );
+        config.load_tag_text("傍線\t<span class=\"em-line\">\t\t\n傍線終わり\t</span>\t\t\n");
+        let output = super::plain_text_to_xhtml_with_config(
+            "青空［＃「青空」は太字］［＃「青空」に傍点］文庫《ぶんこ》［＃「青空文庫」に傍線］",
+            &config,
+        )
+        .unwrap();
+        assert!(output.contains(
+            "<span class=\"em-line\"><span class=\"bold\"><span class=\"em-sesame\">青空"
+        ));
+        assert!(output.contains("</span></span><ruby>文庫<rt>ぶんこ</rt></ruby></span>"));
+        assert!(!output.contains("［＃「青空"));
+    }
+    #[test]
     fn converts_unicode_and_ivs_gaiji_notes() {
         let output = plain_text_to_xhtml("※［＃U+845B］ ※［＃U+4E08-U+E0101］").unwrap();
         assert!(output.contains("葛"));
@@ -651,5 +804,19 @@ mod tests {
                 .unwrap();
         assert_eq!(sections.len(), 1);
         assert!(!sections[0].contains("改ページ"));
+    }
+    #[test]
+    fn converts_external_suffix_notes_before_inline_parsing() {
+        let mut config = AozoraConfig::default();
+        config.load_suffix_text("に傍点\t傍点\t傍点終わり\n");
+        let output = super::plain_text_to_xhtml_with_config(
+            "青空［＃「青空」に傍点］\n｜青空《あおぞら》［＃「青空」に傍点］",
+            &config,
+        )
+        .unwrap();
+        assert!(output.contains("<span class=\"em-sesame\">青空</span>"));
+        assert!(
+            output.contains("<span class=\"em-sesame\"><ruby>青空<rt>あおぞら</rt></ruby></span>")
+        );
     }
 }
