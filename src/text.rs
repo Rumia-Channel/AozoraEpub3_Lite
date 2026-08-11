@@ -98,44 +98,21 @@ struct HeadingSpec {
     close_note: &'static str,
 }
 
+enum OpenBlock {
+    Hardcoded(HeadingSpec),
+    Configured { fallback_close_tag: String },
+}
+
 fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraConfig) -> String {
     let mut fragment = String::new();
     let mut has_line = false;
-    let mut block: Option<HeadingSpec> = None;
+    let mut blocks: Vec<OpenBlock> = Vec::new();
     let mut pending_heading: Option<HeadingSpec> = None;
-    let mut configured_block: Option<String> = None;
     let mut pending_config_heading: Option<(String, String)> = None;
 
     for line in lines {
         has_line = true;
         let trimmed = line.trim();
-
-        if configured_block.is_some() {
-            if let Some(note) = page_break_note(trimmed)
-                && let Some(close_tag) = config.block_close_tags.get(note)
-            {
-                fragment.push_str(close_tag);
-                fragment.push('\n');
-                configured_block = None;
-            } else {
-                fragment.push_str(&convert_inline(line, config));
-                fragment.push('\n');
-            }
-            continue;
-        }
-
-        if let Some(spec) = block {
-            if trimmed == format!("［＃{}］", spec.close_note) {
-                fragment.push_str("</");
-                fragment.push_str(spec.element);
-                fragment.push_str(">\n");
-                block = None;
-            } else {
-                fragment.push_str(&convert_inline(line, config));
-                fragment.push('\n');
-            }
-            continue;
-        }
 
         if let Some((open_tag, close_tag)) = pending_config_heading.take() {
             fragment.push_str(&open_tag);
@@ -149,6 +126,61 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
             append_heading(&mut fragment, spec, line, config);
             continue;
         }
+
+        if !blocks.is_empty() {
+            if let Some((note, rest)) = heading_note_at_start(line)
+                && rest.trim().is_empty()
+            {
+                let closes_hardcoded = matches!(blocks.last(), Some(OpenBlock::Hardcoded(spec)) if note == spec.close_note);
+                if closes_hardcoded {
+                    if let Some(OpenBlock::Hardcoded(spec)) = blocks.pop() {
+                        fragment.push_str("</");
+                        fragment.push_str(spec.element);
+                        fragment.push_str(">\n");
+                    }
+                    continue;
+                }
+
+                let closes_configured = matches!(blocks.last(), Some(OpenBlock::Configured { .. }));
+                if closes_configured && let Some(close_tag) = config.block_close_tags.get(note) {
+                    fragment.push_str(close_tag);
+                    fragment.push('\n');
+                    blocks.pop();
+                    continue;
+                }
+
+                if let Some(spec) = block_heading_spec(note) {
+                    fragment.push('<');
+                    fragment.push_str(spec.element);
+                    fragment.push_str(" class=\"");
+                    fragment.push_str(spec.class_name);
+                    fragment.push_str("\">");
+                    blocks.push(OpenBlock::Hardcoded(spec));
+                    continue;
+                }
+                if let Some(open_tag) = config.block_open_tags.get(note) {
+                    fragment.push_str(open_tag);
+                    blocks.push(OpenBlock::Configured {
+                        fallback_close_tag: fallback_close_tag(open_tag),
+                    });
+                    continue;
+                }
+                if let Some(tag) = config.block_single_tags.get(note) {
+                    fragment.push_str(tag);
+                    fragment.push('\n');
+                    continue;
+                }
+                if let Some((open_tag, close_tag)) = config.block_inline_tags.get(note) {
+                    pending_config_heading = Some((open_tag.clone(), close_tag.clone()));
+                    continue;
+                }
+            }
+
+            fragment.push_str(&convert_inline(line, config));
+            fragment.push('\n');
+            continue;
+        }
+
         if let Some(note) = page_break_note(trimmed)
             && let Some(close_tag) = config.block_close_tags.get(note)
         {
@@ -176,7 +208,7 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
                     fragment.push_str(&convert_inline(rest.trim_start(), config));
                     fragment.push('\n');
                 }
-                block = Some(spec);
+                blocks.push(OpenBlock::Hardcoded(spec));
                 continue;
             }
             if let Some(tag) = config.block_single_tags.get(note) {
@@ -204,7 +236,9 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
                     fragment.push_str(&convert_inline(rest.trim_start(), config));
                     fragment.push('\n');
                 }
-                configured_block = Some(fallback_close_tag(open_tag));
+                blocks.push(OpenBlock::Configured {
+                    fallback_close_tag: fallback_close_tag(open_tag),
+                });
                 continue;
             }
         }
@@ -212,14 +246,20 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
         append_line(&mut fragment, line, config);
     }
 
-    if let Some(spec) = block {
-        fragment.push_str("</");
-        fragment.push_str(spec.element);
-        fragment.push_str(">\n");
-    } else if let Some(close_tag) = configured_block {
-        fragment.push_str(&close_tag);
-        fragment.push('\n');
-    } else if let Some((open_tag, close_tag)) = pending_config_heading {
+    while let Some(block) = blocks.pop() {
+        match block {
+            OpenBlock::Hardcoded(spec) => {
+                fragment.push_str("</");
+                fragment.push_str(spec.element);
+                fragment.push_str(">\n");
+            }
+            OpenBlock::Configured { fallback_close_tag } => {
+                fragment.push_str(&fallback_close_tag);
+                fragment.push('\n');
+            }
+        }
+    }
+    if let Some((open_tag, close_tag)) = pending_config_heading {
         fragment.push_str(&open_tag);
         fragment.push_str(&close_tag);
         fragment.push('\n');
@@ -950,6 +990,32 @@ mod tests {
         assert!(output.contains("<div class=\"bold\">本文\n</div>"));
         assert!(output.contains("<h1 class=\"custom\">題名</h1>"));
         assert!(output.contains("<p><br/></p>"));
+    }
+
+    #[test]
+    fn nests_configured_blocks_and_handles_single_tags_inside() {
+        let mut config = AozoraConfig::default();
+        config.load_tag_text(
+            "ここから太字\t<div class=\"bold\">\t\t1\n\
+             ここで太字終わり\t</div>\t\t1\n\
+             空行\t<p><br/></p>\t\t1\n",
+        );
+        let output = super::plain_text_to_xhtml_with_config(
+            "［＃ここから２字下げ］\n\
+             ［＃ここから太字］\n\
+             本文\n\
+             ［＃空行］\n\
+             ［＃ここで太字終わり］\n\
+             ［＃ここで字下げ終わり］",
+            &config,
+        )
+        .unwrap();
+        assert!(
+            output.contains(
+                "<div class=\"mt2\"><div class=\"bold\">本文\n<p><br/></p>\n</div>\n</div>"
+            )
+        );
+        assert!(!output.contains("［＃"));
     }
     #[test]
     fn nests_multiple_suffix_notes_on_the_same_target() {
