@@ -4,3 +4,4 @@ version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
 [dependencies]
+zip = { version = "6.0", default-features = false, features = ["deflate"] }
