@@ -95,6 +95,15 @@ fn groups_java_kanji_in_implicit_ruby_bases() {
     assert!(output.contains("〆<ruby>切<rt>しめきり</rt></ruby>"));
     assert!(output.contains("<ruby>漢字𥈽漢字<rt>かんじがいじかんじ</rt></ruby>"));
 }
+#[test]
+fn groups_non_kanji_implicit_ruby_bases() {
+    let output =
+        plain_text_to_xhtml("漢字AB《えーびー》 漢字ひらがな《ひらがな》 カタカナ《かたかな》")
+            .unwrap();
+    assert!(output.contains("漢字<ruby>AB<rt>えーびー</rt></ruby>"));
+    assert!(output.contains("漢字<ruby>ひらがな<rt>ひらがな</rt></ruby>"));
+    assert!(output.contains("<ruby>カタカナ<rt>かたかな</rt></ruby>"));
+}
 
 #[test]
 fn splits_sections_at_page_break_tags() {

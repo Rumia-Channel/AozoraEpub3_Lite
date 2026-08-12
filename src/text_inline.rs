@@ -147,10 +147,19 @@ fn convert_inline_with_auto_yoko(input: &str, config: &AozoraConfig, auto_yoko: 
         if chars[index] == '《'
             && let Some(close) = find_closing_ruby(&chars, index)
             && index > 0
-            && ruby_base_kind(chars[index - 1]) == Some(0)
+            && ruby_base_kind(chars[index - 1]).is_some()
         {
             let mut base_start = index - 1;
-            while base_start > 0 && ruby_base_kind(chars[base_start - 1]) == Some(0) {
+            while base_start > 0 {
+                let Some(current_kind) = ruby_base_kind(chars[base_start]) else {
+                    break;
+                };
+                let Some(previous_kind) = ruby_base_kind(chars[base_start - 1]) else {
+                    break;
+                };
+                if previous_kind != current_kind {
+                    break;
+                }
                 base_start -= 1;
             }
             let base = chars[base_start..index].iter().collect::<String>();
@@ -1459,7 +1468,7 @@ fn ruby_base_kind(character: char) -> Option<u8> {
         0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff | 0x20000..=0x2ffff => Some(0),
         0x3041..=0x3096 => Some(1),
         0x30a1..=0x30fa | 0xff61..=0xff9f => Some(2),
-        0x20..=0x7e => Some(3),
+        0x20..=0x7e | 0xa0..=0x2af => Some(3),
         0xff10..=0xff19 | 0xff21..=0xff3a | 0xff41..=0xff5a => Some(4),
         _ => None,
     }
