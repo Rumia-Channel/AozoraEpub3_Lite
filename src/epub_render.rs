@@ -13,6 +13,7 @@ pub(super) fn section_path(section: &EpubSection, body_number: usize) -> String 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct NavEntry {
     label: String,
+    markup: bool,
     path: String,
     level: usize,
 }
@@ -22,8 +23,7 @@ fn is_no_chapter(section: &EpubSection) -> bool {
         .trim_start()
         .starts_with(PAGE_NO_CHAPTER_MARKER)
 }
-
-fn nav_entries(sections: &[EpubSection]) -> Vec<NavEntry> {
+fn nav_entries(sections: &[EpubSection], title_markup: Option<&str>) -> Vec<NavEntry> {
     let body_count = sections
         .iter()
         .filter(|section| !is_title_page(section) && !is_no_chapter(section))
@@ -37,7 +37,25 @@ fn nav_entries(sections: &[EpubSection]) -> Vec<NavEntry> {
         if is_no_chapter(section) {
             continue;
         }
-        let level = if is_title_page(section) {
+        if !is_title_page(section)
+            && first_heading(section.body_fragment.as_str()).is_none()
+            && first_text_label(section.body_fragment.as_str()).is_none()
+        {
+            continue;
+        }
+        let is_title = is_title_page(section);
+        let label = if is_title {
+            title_markup.unwrap_or("タイトル").to_owned()
+        } else if title_markup.is_some()
+            && body_number == 1
+            && first_heading(section.body_fragment.as_str()).is_none()
+        {
+            title_markup.unwrap_or_default().to_owned()
+        } else {
+            section_label(section, body_number, body_count)
+        };
+        let markup = title_markup.is_some() && (is_title || body_number == 1);
+        let level = if is_title {
             1
         } else {
             first_heading(section.body_fragment.as_str())
@@ -45,7 +63,8 @@ fn nav_entries(sections: &[EpubSection]) -> Vec<NavEntry> {
                 .unwrap_or(1)
         };
         entries.push(NavEntry {
-            label: section_label(section, body_number, body_count),
+            label,
+            markup,
             path: section_path(section, body_number),
             level: level.clamp(1, 3),
         });
@@ -61,13 +80,15 @@ pub(super) fn section_label(
     if is_title_page(section) {
         return "タイトル".to_owned();
     }
-    first_heading_label(&section.body_fragment).unwrap_or_else(|| {
-        if body_count == 1 {
-            "本文".to_owned()
-        } else {
-            format!("本文 {body_number}")
-        }
-    })
+    first_heading_label(&section.body_fragment)
+        .or_else(|| first_text_label(&section.body_fragment))
+        .unwrap_or_else(|| {
+            if body_count == 1 {
+                "本文".to_owned()
+            } else {
+                format!("本文 {body_number}")
+            }
+        })
 }
 
 fn first_heading(body: &str) -> Option<(usize, String)> {
@@ -93,6 +114,28 @@ fn first_heading(body: &str) -> Option<(usize, String)> {
     None
 }
 
+fn first_text_label(body: &str) -> Option<String> {
+    let mut offset = 0usize;
+    while let Some(relative_start) = body[offset..].find("<p") {
+        let start = offset + relative_start;
+        let content_start = start + body[start..].find('>')? + 1;
+        let content_end = body[content_start..].find("</p>")? + content_start;
+        let label = unescape_html(&strip_html(&body[content_start..content_end]));
+        if !label.trim().is_empty() {
+            return Some(label.trim().to_owned());
+        }
+        offset = content_end + "</p>".len();
+    }
+    None
+}
+fn unescape_html(value: &str) -> String {
+    value
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+}
 fn first_heading_label(body: &str) -> Option<String> {
     first_heading(body).map(|(_, label)| label)
 }
@@ -302,8 +345,10 @@ pub(super) fn render_nav(
     metadata: &EpubMetadata,
     sections: &[EpubSection],
     vertical: bool,
+    title_markup: Option<&str>,
 ) -> String {
-    let nav_items = render_nav_items(&nav_entries(sections));
+    let entries = nav_entries(sections, title_markup);
+    let nav_items = render_nav_items(&entries);
     let toc_style = if vertical {
         r#"@page {margin:.5em .5em 0 0;}
 html {
@@ -336,11 +381,17 @@ li a {text-decoration:none; border-bottom-width:1px; border-bottom-style:solid; 
                 .count();
             format!("xhtml/{body_number:04}.xhtml")
         });
-    let landmark = first_body
+    let title_landmark = if sections.iter().any(is_title_page) {
+        "\t\t\t<li><a epub:type=\"titlepage\" href=\"xhtml/title.xhtml\">扉</a></li>\n"
+    } else {
+        ""
+    };
+    let body_landmark = first_body
         .map(|path| {
             format!("\t\t\t<li><a epub:type=\"bodymatter\" href=\"{path}\">本文</a></li>\n")
         })
         .unwrap_or_default();
+    let landmark = format!("{title_landmark}{body_landmark}");
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
@@ -350,6 +401,17 @@ li a {text-decoration:none; border-bottom-width:1px; border-bottom-style:solid; 
 <title>{title}</title>
 <style type="text/css">
 {toc_style}
+.tcy {{
+  -webkit-text-combine:         horizontal;
+  -webkit-text-combine-upright: all;
+  text-combine-upright:         all;
+  -epub-text-combine:           horizontal;
+}}
+.upr {{
+text-orientation: upright;
+-webkit-text-orientation: upright;
+-epub-text-orientation: upright;
+}}
 li {{list-style:none;}}
 li.chapter {{list-style:disc; line-height:1.75em;}}
 nav#landmarks {{ display:none; }}
@@ -381,10 +443,14 @@ nav#landmarks {{ display:none; }}
 fn render_nav_items(entries: &[NavEntry]) -> String {
     if entries.len() == 1 && entries[0].level == 1 {
         let entry = &entries[0];
+        let label = if entry.markup {
+            entry.label.clone()
+        } else {
+            xml_escape(&entry.label)
+        };
         return format!(
-            "\t\t\t<li><a href=\"{}\">{}</a></li>\n\n",
+            "\t\t\t<li><a href=\"{}\">{label}</a></li>\n\n",
             xml_escape(&entry.path),
-            xml_escape(&entry.label),
         );
     }
     let mut output = String::new();
@@ -404,10 +470,14 @@ fn render_nav_items(entries: &[NavEntry]) -> String {
                 }
             }
         }
+        let label = if entry.markup {
+            entry.label.clone()
+        } else {
+            xml_escape(&entry.label)
+        };
         output.push_str(&format!(
-            "\t\t\t<li><a href=\"{}\">{}</a>\n",
+            "\t\t\t<li><a href=\"{}\">{label}</a>\n",
             xml_escape(&entry.path),
-            xml_escape(&entry.label),
         ));
         depth = level;
         has_item = true;
@@ -420,9 +490,12 @@ fn render_nav_items(entries: &[NavEntry]) -> String {
     }
     output
 }
-
-pub(super) fn render_ncx(metadata: &EpubMetadata, sections: &[EpubSection]) -> String {
-    let entries = nav_entries(sections);
+pub(super) fn render_ncx(
+    metadata: &EpubMetadata,
+    sections: &[EpubSection],
+    title_markup: Option<&str>,
+) -> String {
+    let entries = nav_entries(sections, title_markup);
     let identifier = metadata
         .identifier
         .strip_prefix("urn:uuid:")
@@ -442,13 +515,17 @@ pub(super) fn render_ncx(metadata: &EpubMetadata, sections: &[EpubSection]) -> S
             "\t".repeat(entry.level)
         };
         let play_order = index + 1;
+        let label = if entry.markup {
+            entry.label.clone()
+        } else {
+            xml_escape(&entry.label)
+        };
         nav_points.push_str(&format!(
             "{indent}<navPoint id=\"toc{play_order}\" playOrder=\"{play_order}\">\n\
 {indent}<navLabel>\n\
-{indent}<text>{}</text>\n\
+{indent}<text>{label}</text>\n\
 {indent}</navLabel>\n\
 {indent}<content src=\"{}\"/>\n",
-            xml_escape(&entry.label),
             xml_escape(&entry.path),
         ));
         current_depth = entry.level;
@@ -508,6 +585,8 @@ pub(super) fn render_section(
     body_fragment: &str,
     vertical: bool,
     kindle: bool,
+    title_markup: Option<&str>,
+    creator_markup: Option<&str>,
 ) -> String {
     let kindle_class = if kindle { " kindle" } else { "" };
     let trimmed = body_fragment.trim();
@@ -522,10 +601,13 @@ pub(super) fn render_section(
                 )
             })
             .unwrap_or_default();
-        let creator = metadata
-            .creator
-            .as_deref()
-            .map(|value| format!("\n<div class=\"author\"><p>{}</p></div>", xml_escape(value)))
+        let creator = creator_markup
+            .map(|value| format!("\n<div class=\"author\"><p>{value}</p></div>"))
+            .or_else(|| {
+                metadata.creator.as_deref().map(|value| {
+                    format!("\n<div class=\"author\"><p>{}</p></div>", xml_escape(value))
+                })
+            })
             .unwrap_or_default();
         return format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -538,22 +620,23 @@ pub(super) fn render_section(
 >
 <head>
 <meta charset="UTF-8"/>
-<title>{title}</title>
+<title>{title_text}</title>
 <link rel="stylesheet" type="text/css" href="../style/book-style.css"/>
 
 </head>
 <body class="p-titlepage{kindle_class}">
 <div class="{main_class}">{publisher}
 <div class="{book_class}">
-<div class="book-title-main"><p>{title}</p></div>{creator}
+<div class="book-title-main"><p>{title_body}</p></div>{creator}
 </div>
 </div>
 </body>
 </html>
 "#,
             language = xml_escape(&metadata.language),
-            title = xml_escape(&metadata.title),
-            layout_class = if vertical { "vrtl" } else { "hltr" },
+            title_text = xml_escape(&metadata.title),
+            title_body = title_markup.unwrap_or(&metadata.title),
+            layout_class = "hltr",
             main_class = if vertical {
                 "main vrtl block-align-center"
             } else {

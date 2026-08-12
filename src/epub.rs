@@ -28,7 +28,7 @@ const TEXT_CSS: &str = r#"@charset "utf-8";
 
 /** 共通 テキスト用スタイル */
 @page {
-margin: 0 0 0 0;
+margin: 0.5em 0.5em 0.5em 0.5em;
 }
 body {
 margin: 0;
@@ -41,7 +41,7 @@ vertical-align: baseline;
 }
 /** 縦書き テキスト用スタイル */
 html.vrtl {
-margin: 0 0 0 0;
+margin: 0em 0em 0em 0em;
 padding: 0;
 writing-mode: vertical-rl;
 -webkit-writing-mode: vertical-rl;
@@ -65,7 +65,7 @@ font-family: '@ＭＳ ゴシック','@MS Gothic',sans-serif;
 /** 横書き テキスト用スタイル */
 
 html.hltr {
-margin: 0 0 0 0;
+margin: 0em 0em 0em 0em;
 padding: 0;
 writing-mode: horizontal-tb;
 -webkit-writing-mode: horizontal-tb;
@@ -202,8 +202,9 @@ pub struct EpubBook {
     pub cover_asset: Option<String>,
     vertical: bool,
     kindle: bool,
+    title_markup: Option<String>,
+    creator_markup: Option<String>,
 }
-
 impl EpubBook {
     pub fn new(metadata: EpubMetadata, body_fragment: impl Into<String>) -> Self {
         Self::from_sections(metadata, [body_fragment.into()])
@@ -230,6 +231,8 @@ impl EpubBook {
             cover_asset: None,
             vertical: true,
             kindle: false,
+            title_markup: None,
+            creator_markup: None,
         }
     }
 
@@ -253,6 +256,15 @@ impl EpubBook {
 
     pub fn with_kindle(mut self, kindle: bool) -> Self {
         self.kindle = kindle;
+        self
+    }
+    pub fn with_metadata_markup(
+        mut self,
+        title_markup: impl Into<String>,
+        creator_markup: Option<String>,
+    ) -> Self {
+        self.title_markup = Some(title_markup.into());
+        self.creator_markup = creator_markup;
         self
     }
 
@@ -381,6 +393,8 @@ impl EpubBook {
                     &section.body_fragment,
                     self.vertical,
                     self.kindle,
+                    self.title_markup.as_deref(),
+                    self.creator_markup.as_deref(),
                 )
                 .as_bytes(),
                 CompressionMethod::Deflated,
@@ -410,13 +424,19 @@ impl EpubBook {
         write_entry(
             &mut archive,
             "item/nav.xhtml",
-            render_nav(&self.metadata, &self.sections, self.vertical).as_bytes(),
+            render_nav(
+                &self.metadata,
+                &self.sections,
+                self.vertical,
+                self.title_markup.as_deref(),
+            )
+            .as_bytes(),
             CompressionMethod::Deflated,
         )?;
         write_entry(
             &mut archive,
             "item/toc.ncx",
-            render_ncx(&self.metadata, &self.sections).as_bytes(),
+            render_ncx(&self.metadata, &self.sections, self.title_markup.as_deref()).as_bytes(),
             CompressionMethod::Deflated,
         )?;
         if !image_only {
@@ -515,7 +535,7 @@ mod tests {
             .unwrap();
         assert!(title_page.contains("<body class=\"p-titlepage\">"));
         assert!(title_page.contains("<div class=\"author\"><p>著者</p></div>"));
-        assert!(title_page.contains("<div class=\"book-title\">"));
+        assert!(title_page.contains("<div class=\"book-title"));
 
         let mut package = String::new();
         archive
@@ -535,6 +555,30 @@ mod tests {
             .unwrap();
         assert!(nav.contains(">タイトル</a>"));
         assert!(nav.contains(">第一章</a>"));
+    }
+    #[test]
+    fn renders_optional_metadata_markup_in_title_and_navigation() {
+        let book = EpubBook::new(EpubMetadata::new("題名", "urn:uuid:test"), "<p>本文</p>")
+            .with_title_page()
+            .with_metadata_markup(
+                "<ruby>題<rt>だい</rt>名</ruby>",
+                Some("<ruby>著者<rt>ちょしゃ</rt></ruby>".to_owned()),
+            );
+        let mut archive = ZipArchive::new(book.write_to(Cursor::new(Vec::new())).unwrap()).unwrap();
+        let mut title_page = String::new();
+        archive
+            .by_name("item/xhtml/title.xhtml")
+            .unwrap()
+            .read_to_string(&mut title_page)
+            .unwrap();
+        assert!(title_page.contains("<ruby>題<rt>だい</rt>名</ruby>"));
+        let mut nav = String::new();
+        archive
+            .by_name("item/nav.xhtml")
+            .unwrap()
+            .read_to_string(&mut nav)
+            .unwrap();
+        assert!(nav.contains("<a href=\"xhtml/title.xhtml\"><ruby>題<rt>だい</rt>名</ruby></a>"));
     }
 
     #[test]

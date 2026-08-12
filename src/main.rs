@@ -2,7 +2,7 @@ use aozora_epub3_lite::{
     AozoraConfig, BookMeta, EpubAsset, EpubBook, EpubMetadata, Input, TextEntry, TitleType,
     aozora_text_to_xhtml_sections_with_config, decode_text, detect_meta_with_gaiji, escape_html,
     file_title_creator, image::process as process_image, image_reference_occurrences,
-    image_references,
+    image_references, inline_to_xhtml,
 };
 use std::env;
 use std::error::Error;
@@ -134,8 +134,18 @@ fn convert_input(
         let text = decode_text(&bytes, encoding_label)?;
 
         let detected = detect_meta_with_gaiji(&text, title_type, publisher_first, &config.gaiji);
+        let detected_title_source = detected
+            .title_line
+            .and_then(|line| text.lines().nth(line))
+            .map(str::trim)
+            .map(str::to_owned);
+        let detected_creator_source = detected
+            .creator_line
+            .and_then(|line| text.lines().nth(line))
+            .map(str::trim)
+            .map(str::to_owned);
+        let publisher = detected.publisher.clone();
         let body_text = remove_metadata_lines(&text, &detected);
-        let publisher = detected.publisher;
         let (title, creator) = if options.use_file_name {
             (
                 file_title.clone().or(detected.title),
@@ -177,6 +187,20 @@ fn convert_input(
         decorate_image_tags(&mut sections, &assets, config);
         reflow_image_sections(&mut sections, &assets, config);
 
+        let title_markup_input = if options.use_file_name {
+            title.as_str()
+        } else {
+            detected_title_source.as_deref().unwrap_or(title.as_str())
+        };
+        let title_markup = inline_to_xhtml(title_markup_input, config);
+        let creator_markup = creator.map(|value| {
+            let source = if options.use_file_name || options.creator.is_some() {
+                value
+            } else {
+                detected_creator_source.as_deref().unwrap_or(value)
+            };
+            inline_to_xhtml(source, config)
+        });
         let metadata = build_metadata(
             &title,
             creator,
@@ -197,7 +221,8 @@ fn convert_input(
             .with_title_page_if(config.title_page_write && matches!(config.title_page_type, 1 | 2))
             .with_vertical(vertical)
             .with_kindle(is_kindle(options))
-            .with_assets(assets);
+            .with_assets(assets)
+            .with_metadata_markup(title_markup, creator_markup);
         if let Some(cover) = cover {
             book = book.with_cover_asset(cover);
         }

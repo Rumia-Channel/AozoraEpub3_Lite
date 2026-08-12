@@ -6,6 +6,9 @@ use encoding_rs::{Encoding, SHIFT_JIS, UTF_8};
 mod inline;
 
 use inline::convert_inline;
+pub fn inline_to_xhtml(input: &str, config: &AozoraConfig) -> String {
+    convert_inline(input, config)
+}
 pub use inline::{escape_html, image_reference_occurrences, image_references};
 
 #[derive(Debug, Eq, PartialEq)]
