@@ -181,3 +181,29 @@ fn writes_publisher_metadata_and_kindle_body_class() {
     assert!(title.contains("<body class=\"p-titlepage kindle\">"));
     assert!(title.contains("<div class=\"publisher\"><p>出版社</p></div>"));
 }
+
+#[test]
+fn writes_heading_levels_as_nested_navigation() {
+    let book = EpubBook::from_sections(
+        EpubMetadata::new("階層", "urn:test:hierarchy"),
+        [
+            "<h1 class=\"font-1em50\">第一章</h1>\n",
+            "<h2 class=\"font-1em30\">第一節</h2>\n",
+            "<h1 class=\"font-1em50\">第二章</h1>\n",
+        ],
+    );
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let mut nav = String::new();
+    archive
+        .by_name("item/nav.xhtml")
+        .unwrap()
+        .read_to_string(&mut nav)
+        .unwrap();
+    assert!(nav.contains("第一章"));
+    assert!(nav.contains("第一節"));
+    assert!(nav.contains("<ol>\n      <li><a href=\"xhtml/0001.xhtml\">第一章</a>\n      <ol>"));
+    assert!(
+        nav.contains("      </ol>\n      </li>\n      <li><a href=\"xhtml/0003.xhtml\">第二章</a>")
+    );
+}

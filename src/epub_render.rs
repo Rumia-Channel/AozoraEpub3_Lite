@@ -9,6 +9,39 @@ pub(super) fn section_path(section: &EpubSection, body_number: usize) -> String 
         format!("xhtml/{body_number:04}.xhtml")
     }
 }
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NavEntry {
+    label: String,
+    path: String,
+    level: usize,
+}
+
+fn nav_entries(sections: &[EpubSection]) -> Vec<NavEntry> {
+    let body_count = sections
+        .iter()
+        .filter(|section| !is_title_page(section))
+        .count();
+    let mut body_number = 0;
+    let mut entries = Vec::with_capacity(sections.len());
+    for section in sections {
+        if !is_title_page(section) {
+            body_number += 1;
+        }
+        let level = if is_title_page(section) {
+            1
+        } else {
+            first_heading(section.body_fragment.as_str())
+                .map(|(level, _)| level)
+                .unwrap_or(1)
+        };
+        entries.push(NavEntry {
+            label: section_label(section, body_number, body_count),
+            path: section_path(section, body_number),
+            level: level.clamp(1, 3),
+        });
+    }
+    entries
+}
 
 pub(super) fn section_label(
     section: &EpubSection,
@@ -27,8 +60,8 @@ pub(super) fn section_label(
     })
 }
 
-fn first_heading_label(body: &str) -> Option<String> {
-    for element in ["h1", "h2", "h3"] {
+fn first_heading(body: &str) -> Option<(usize, String)> {
+    for (level, element) in ["h1", "h2", "h3"].into_iter().enumerate() {
         let open = format!("<{element}");
         let Some(start) = body.find(&open) else {
             continue;
@@ -44,10 +77,14 @@ fn first_heading_label(body: &str) -> Option<String> {
         let content_end = content_start + close_offset;
         let label = strip_html(&body[content_start..content_end]);
         if !label.trim().is_empty() {
-            return Some(label.trim().to_owned());
+            return Some((level + 1, label.trim().to_owned()));
         }
     }
     None
+}
+
+fn first_heading_label(body: &str) -> Option<String> {
+    first_heading(body).map(|(_, label)| label)
 }
 
 fn strip_html(input: &str) -> String {
@@ -172,23 +209,7 @@ pub(super) fn render_package(
 }
 
 pub(super) fn render_nav(metadata: &EpubMetadata, sections: &[EpubSection]) -> String {
-    let body_count = sections
-        .iter()
-        .filter(|section| !is_title_page(section))
-        .count();
-    let mut body_number = 0;
-    let mut nav_items = String::new();
-    for section in sections {
-        if !is_title_page(section) {
-            body_number += 1;
-        }
-        let label = section_label(section, body_number, body_count);
-        let path = section_path(section, body_number);
-        nav_items.push_str(&format!(
-            "      <li><a href=\"{path}\">{}</a></li>\n",
-            xml_escape(&label)
-        ));
-    }
+    let nav_items = render_nav_items(&nav_entries(sections));
 
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -213,27 +234,67 @@ pub(super) fn render_nav(metadata: &EpubMetadata, sections: &[EpubSection]) -> S
     )
 }
 
-pub(super) fn render_ncx(metadata: &EpubMetadata, sections: &[EpubSection]) -> String {
-    let body_count = sections
-        .iter()
-        .filter(|section| !is_title_page(section))
-        .count();
-    let mut body_number = 0;
-    let mut nav_points = String::new();
-    for (index, section) in sections.iter().enumerate() {
-        if !is_title_page(section) {
-            body_number += 1;
+fn render_nav_items(entries: &[NavEntry]) -> String {
+    let mut output = String::new();
+    let mut depth = 1usize;
+    let mut has_item = false;
+    for entry in entries {
+        let level = entry.level;
+        if has_item {
+            if level > depth {
+                for _ in depth..level {
+                    output.push_str("      <ol>\n");
+                }
+            } else {
+                output.push_str("      </li>\n");
+                for _ in level..depth {
+                    output.push_str("      </ol>\n      </li>\n");
+                }
+            }
         }
-        let play_order = index + 1;
-        let label = section_label(section, body_number, body_count);
-        let path = section_path(section, body_number);
-        nav_points.push_str(&format!(
-            "    <navPoint id=\"navpoint-{play_order}\" playOrder=\"{play_order}\">\n\
-      <navLabel><text>{}</text></navLabel>\n\
-      <content src=\"{path}\"/>\n\
-    </navPoint>\n",
-            xml_escape(&label)
+        output.push_str(&format!(
+            "      <li><a href=\"{}\">{}</a>",
+            xml_escape(&entry.path),
+            xml_escape(&entry.label),
         ));
+        depth = level;
+        has_item = true;
+        output.push('\n');
+    }
+    if has_item {
+        output.push_str("      </li>\n");
+        for _ in 1..depth {
+            output.push_str("      </ol>\n      </li>\n");
+        }
+    }
+    output
+}
+
+pub(super) fn render_ncx(metadata: &EpubMetadata, sections: &[EpubSection]) -> String {
+    let entries = nav_entries(sections);
+    let mut nav_points = String::new();
+    let mut current_depth = 0usize;
+    for (index, entry) in entries.iter().enumerate() {
+        while current_depth >= entry.level && current_depth > 0 {
+            let indent = "    ".repeat(current_depth);
+            nav_points.push_str(&format!("{indent}</navPoint>\n"));
+            current_depth -= 1;
+        }
+        let indent = "    ".repeat(entry.level);
+        let play_order = index + 1;
+        nav_points.push_str(&format!(
+            "{indent}<navPoint id=\"navpoint-{play_order}\" playOrder=\"{play_order}\">\n\
+{indent}  <navLabel><text>{}</text></navLabel>\n\
+{indent}  <content src=\"{}\"/>\n",
+            xml_escape(&entry.label),
+            xml_escape(&entry.path),
+        ));
+        current_depth = entry.level;
+    }
+    while current_depth > 0 {
+        let indent = "    ".repeat(current_depth);
+        nav_points.push_str(&format!("{indent}</navPoint>\n"));
+        current_depth -= 1;
     }
 
     format!(
