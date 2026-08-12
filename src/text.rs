@@ -203,13 +203,15 @@ pub fn aozora_text_to_xhtml_sections_with_config(
                 break;
             };
 
-            append_section_line(
-                &remainder[..offset],
-                &mut sections,
-                &mut current,
-                &mut page_marker,
-                config,
-            );
+            if !remainder[..offset].is_empty() {
+                append_section_line(
+                    &remainder[..offset],
+                    &mut sections,
+                    &mut current,
+                    &mut page_marker,
+                    config,
+                );
+            }
             if config.split_page_breaks {
                 trim_trailing_empty_lines(&mut current);
                 if !current.is_empty() {
@@ -229,6 +231,9 @@ pub fn aozora_text_to_xhtml_sections_with_config(
                 };
             }
             remainder = &remainder[end..];
+            if remainder.is_empty() {
+                break;
+            }
         }
     }
 
