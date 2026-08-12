@@ -534,7 +534,7 @@ pub(super) fn render_section(
  xmlns="http://www.w3.org/1999/xhtml"
  xmlns:epub="http://www.idpf.org/2007/ops"
  xml:lang="{language}"
- class="hltr"
+ class="{layout_class}"
 >
 <head>
 <meta charset="UTF-8"/>
@@ -551,6 +551,7 @@ pub(super) fn render_section(
 "#,
             language = xml_escape(&metadata.language),
             title = xml_escape(&metadata.title),
+            layout_class = if vertical { "vrtl" } else { "hltr" },
             publisher = publisher,
             creator = creator,
             kindle_class = kindle_class,
