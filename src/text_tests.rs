@@ -198,6 +198,14 @@ fn converts_and_collects_image_notes() {
 }
 
 #[test]
+fn converts_gaiji_image_notes_without_remote_resources() {
+    let input = "※［＃外字（gaiji.png）#GAIJI#］";
+    let output = plain_text_to_xhtml(input).unwrap();
+    assert!(output.contains("<img class=\"gaiji\" src=\"../image/gaiji.png\" alt=\"\"/>"));
+    assert_eq!(image_references(input), vec!["gaiji.png"]);
+}
+
+#[test]
 fn converts_raw_named_anchors_to_xhtml_ids() {
     let output = plain_text_to_xhtml(r##"<a name="aaa">本文</a><a href="#aaa">参照</a>"##).unwrap();
     assert!(output.contains(r#"<a id="aaa">本文</a>"#));

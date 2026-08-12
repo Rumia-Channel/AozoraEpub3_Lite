@@ -858,8 +858,16 @@ fn parse_image_note(
     start: usize,
     config: &AozoraConfig,
 ) -> Option<(usize, String)> {
-    let (end, path, description) = image_note_parts(chars, start)?;
+    let (end, path, description, is_gaiji) = image_note_parts(chars, start)?;
     let source = format!("../image/{}", escape_html(&path));
+    if is_gaiji {
+        let replacement = config
+            .inline_notes
+            .get("外字画像")
+            .map(|template| format_image_template(template, &source, ""))
+            .unwrap_or_else(|| format!("<img class=\"gaiji\" src=\"{source}\" alt=\"\"/>"));
+        return Some((end, replacement));
+    }
     let alt = if config.inline_notes.contains_key("画像") && !description.is_empty() {
         escape_html(&description)
     } else {
@@ -1051,7 +1059,7 @@ fn find_note(chars: &[char], start: usize, note: &str) -> Option<(usize, usize)>
     })
 }
 
-fn image_note_parts(chars: &[char], start: usize) -> Option<(usize, String, String)> {
+fn image_note_parts(chars: &[char], start: usize) -> Option<(usize, String, String, bool)> {
     if chars.get(start) != Some(&'［') || chars.get(start + 1) != Some(&'＃') {
         return None;
     }
@@ -1077,11 +1085,11 @@ fn image_note_parts(chars: &[char], start: usize) -> Option<(usize, String, Stri
         .strip_suffix("入る")
         .unwrap_or(note[..open_paren].trim())
         .to_owned();
-    Some((close + 1, path, description))
+    Some((close + 1, path, description, note.contains("#GAIJI#")))
 }
 
 fn image_path_from_note(chars: &[char], start: usize) -> Option<(usize, String)> {
-    let (end, path, _) = image_note_parts(chars, start)?;
+    let (end, path, _, _) = image_note_parts(chars, start)?;
     Some((end, path))
 }
 
