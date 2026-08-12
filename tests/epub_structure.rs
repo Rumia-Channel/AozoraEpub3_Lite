@@ -37,6 +37,17 @@ fn writes_epub3_layout_with_uncompressed_mimetype_first() {
         .unwrap();
     assert!(package.contains("<dc:title>試験 &lt;作品&gt;</dc:title>"));
     assert!(package.contains("<dc:creator id=\"creator\">著者 &amp; 共著</dc:creator>"));
+    let mut section = String::new();
+    archive
+        .by_name("item/xhtml/0001.xhtml")
+        .unwrap()
+        .read_to_string(&mut section)
+        .unwrap();
+    assert!(section.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE html>\n"));
+    assert!(section.contains(
+        "<html xmlns=\"http://www.w3.org/1999/xhtml\" \
+         xmlns:epub=\"http://www.idpf.org/2007/ops\""
+    ));
 }
 
 #[test]

@@ -577,7 +577,8 @@ mod tests {
             .read_to_string(&mut section)
             .unwrap();
         assert!(section.contains(
-            "<html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"ja\" class=\"hltr\">"
+            "<html xmlns=\"http://www.w3.org/1999/xhtml\" \
+             xmlns:epub=\"http://www.idpf.org/2007/ops\" xml:lang=\"ja\" class=\"hltr\">"
         ));
         assert!(section.contains("<body class=\"p-image\">"));
         assert!(section.contains("<img class=\"fit\" src=\"../image/fig.png\""));

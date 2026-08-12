@@ -259,7 +259,7 @@ pub(super) fn render_cover(metadata: &EpubMetadata, asset_path: &str, kindle: bo
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{language}">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{language}">
 <head>
   <meta charset="UTF-8"/>
   <title>{title}</title>
@@ -310,7 +310,7 @@ pub(super) fn render_section(
         return format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{language}" class="hltr">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{language}" class="hltr">
 <head>
   <meta charset="UTF-8"/>
   <title>{title}</title>
@@ -336,8 +336,7 @@ pub(super) fn render_section(
     if let Some(image) = image_page_body(&body_fragment) {
         return format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{language}" class="hltr">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{language}" class="hltr">
 <head>
   <meta charset="UTF-8"/>
   <title>{title}</title>
@@ -359,7 +358,8 @@ pub(super) fn render_section(
     let page_class = body_class(page_class, kindle);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{language}" class="{layout_class}">
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{language}" class="{layout_class}">
 <head>
   <meta charset="UTF-8"/>
   <title>{title}</title>
