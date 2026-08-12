@@ -86,14 +86,13 @@ fn writes_assets_and_manifest_entries() {
     let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
     let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
 
-    assert_eq!(
-        archive
-            .by_name("item/image/sample.png")
-            .unwrap()
-            .bytes()
-            .count(),
-        4
-    );
+    let mut image = Vec::new();
+    archive
+        .by_name("item/image/sample.png")
+        .unwrap()
+        .read_to_end(&mut image)
+        .unwrap();
+    assert_eq!(image.len(), 4);
     let mut package = String::new();
     archive
         .by_name("item/standard.opf")
@@ -139,4 +138,35 @@ fn writes_cover_document_and_cover_manifest_property() {
         .read_to_string(&mut cover)
         .unwrap();
     assert!(cover.contains("<img src=\"image/cover.jpg\""));
+}
+
+#[test]
+fn writes_publisher_metadata_and_kindle_body_class() {
+    let book = EpubBook::new(
+        EpubMetadata::new("題名", "urn:test:kindle")
+            .with_creator("著者")
+            .with_publisher("出版社"),
+        "<p>本文</p>",
+    )
+    .with_title_page()
+    .with_kindle(true);
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+
+    let mut package = String::new();
+    archive
+        .by_name("item/standard.opf")
+        .unwrap()
+        .read_to_string(&mut package)
+        .unwrap();
+    assert!(package.contains("<dc:publisher>出版社</dc:publisher>"));
+
+    let mut title = String::new();
+    archive
+        .by_name("item/xhtml/title.xhtml")
+        .unwrap()
+        .read_to_string(&mut title)
+        .unwrap();
+    assert!(title.contains("<body class=\"p-titlepage kindle\">"));
+    assert!(title.contains("<div class=\"publisher\"><p>出版社</p></div>"));
 }
