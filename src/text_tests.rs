@@ -389,3 +389,42 @@ fn converts_external_suffix_notes_before_inline_parsing() {
     assert!(output.contains("<span class=\"em-sesame\">青空</span>"));
     assert!(output.contains("<span class=\"em-sesame\"><ruby>青空<rt>あおぞら</rt></ruby></span>"));
 }
+
+#[test]
+fn converts_suffix_ruby_notes() {
+    let output = plain_text_to_xhtml(
+        "青空文庫［＃「文庫」に「ぶんこ」のルビ］\n\
+         青空文庫［＃「青空文庫」に「aozora bunko」のルビ］\n\
+         漢字青空文庫《あおぞらぶんこ》［＃「青空文庫《あおぞらぶんこ》」に「aozora bunko」のルビ］",
+    )
+    .unwrap();
+    assert!(output.contains("青空<ruby>文庫<rt>ぶんこ</rt></ruby>"));
+    assert!(output.contains("<ruby>漢字青空文庫<rt>aozora bunko</rt></ruby>"));
+    assert!(output.contains("<ruby>青空文庫<rt>aozora bunko</rt></ruby>"));
+    assert!(!output.contains("のルビ"));
+}
+
+#[test]
+fn converts_note_attached_ruby_markers() {
+    let output = plain_text_to_xhtml(
+        "［＃注記付き］名※［＃二の字点、1-2-22］［＃「（銘々）」の注記付き終わり］",
+    )
+    .unwrap();
+    assert!(output.contains("<ruby>"));
+    assert!(output.contains("<rt>（銘々）</rt>"));
+    assert!(!output.contains("注記付き"));
+}
+
+#[test]
+fn drops_java_unsupported_left_ruby_notes() {
+    let output = plain_text_to_xhtml(
+        "青空文庫［＃「青空文庫」の左に「あおぞらぶんこ」のルビ］\n\
+         ［＃左にルビ付き］欞子窓［＃左に「れんじまど」のルビ付き終わり］\n\
+         ［＃左に注記付き］名※［＃二の字点、1-2-22］［＃左に「（銘々）」の注記付き終わり］",
+    )
+    .unwrap();
+    assert!(output.contains("青空文庫"));
+    assert!(output.contains("欞子窓"));
+    assert!(!output.contains("左に"));
+    assert!(!output.contains("のルビ"));
+}

@@ -185,6 +185,11 @@ fn rewrite_suffix_notes(input: &str, config: &AozoraConfig) -> String {
     let mut current = input.to_owned();
 
     loop {
+        if let Some(rewritten) = rewrite_special_suffix_once(&current) {
+            current = rewritten;
+            continue;
+        }
+
         let chars = current.chars().collect::<Vec<_>>();
         let mut index = 0;
         let mut selected = None;
@@ -229,8 +234,7 @@ fn rewrite_suffix_notes(input: &str, config: &AozoraConfig) -> String {
         rewritten.insert_str(target_start, &start_note);
 
         // A suffix note may appear between an explicit ruby base and its
-        // reading marker. Keep the generated tcy span outside the complete
-        // ruby instead of placing the closing note before <rt>.
+        // reading marker. Keep the generated span outside the complete ruby.
         let ruby_end = suffix.strip_prefix('《').and_then(|reading| {
             reading
                 .find('》')
@@ -246,6 +250,85 @@ fn rewrite_suffix_notes(input: &str, config: &AozoraConfig) -> String {
         }
         current = rewritten;
     }
+}
+
+fn rewrite_special_suffix_once(input: &str) -> Option<String> {
+    let chars = input.chars().collect::<Vec<_>>();
+    for start in 0..chars.len() {
+        let Some((end, target, suffix)) = suffix_note_at(&chars, start) else {
+            continue;
+        };
+        let prefix = chars[..start].iter().collect::<String>();
+        let replacement = if let Some(reading) = suffix
+            .strip_prefix("に「")
+            .and_then(|value| value.strip_suffix("」のルビ"))
+            .filter(|reading| !reading.is_empty() && !reading.starts_with("ママ"))
+        {
+            let visible_target = suffix_visible_text(&target);
+            let (mut target_start, target_end) = suffix_target_range(&prefix, &visible_target)?;
+            if target.contains('《') {
+                let extra = target
+                    .chars()
+                    .count()
+                    .saturating_sub(visible_target.chars().count());
+                for _ in 0..extra {
+                    target_start = previous_char_boundary(&prefix, target_start);
+                }
+                while target_start > 0 && prefix[..target_start].ends_with('｜') {
+                    target_start -= '｜'.len_utf8();
+                }
+            }
+            let mut rewritten = String::with_capacity(prefix.len() + reading.len() + 4);
+            rewritten.push_str(&prefix[..target_start]);
+            rewritten.push('｜');
+            if target.contains('《') {
+                rewritten.push_str(&remove_suffix_ruby(&prefix[target_start..target_end]));
+            } else {
+                rewritten.push_str(&prefix[target_start..target_end]);
+            }
+            rewritten.push('《');
+            rewritten.push_str(reading);
+            rewritten.push('》');
+            rewritten.push_str(&prefix[target_end..]);
+            rewritten
+        } else if suffix
+            .strip_prefix("の左に「")
+            .and_then(|value| value.strip_suffix("」のルビ"))
+            .is_some()
+        {
+            prefix
+        } else if suffix.ends_with("のルビ付き終わり") {
+            let mut rewritten = prefix;
+            if let Some(marker_start) = rewritten.rfind("［＃左にルビ付き］") {
+                rewritten
+                    .replace_range(marker_start..marker_start + "［＃左にルビ付き］".len(), "");
+            }
+            rewritten
+        } else if suffix.ends_with("の注記付き終わり") {
+            let mut rewritten = prefix;
+            if let Some(marker_start) = rewritten.rfind("［＃左に注記付き］") {
+                rewritten
+                    .replace_range(marker_start..marker_start + "［＃左に注記付き］".len(), "");
+            } else {
+                if let Some(marker_start) = rewritten.rfind("［＃注記付き］") {
+                    rewritten
+                        .replace_range(marker_start..marker_start + "［＃注記付き］".len(), "｜");
+                }
+                rewritten.push('《');
+                rewritten.push_str(&target);
+                rewritten.push('》');
+            }
+            rewritten
+        } else {
+            continue;
+        };
+        let byte_end = chars[..end]
+            .iter()
+            .map(|character| character.len_utf8())
+            .sum::<usize>();
+        return Some(format!("{replacement}{}", &input[byte_end..]));
+    }
+    None
 }
 
 fn rewrite_alternative_gaiji(input: &str, config: &AozoraConfig) -> String {
@@ -417,25 +500,99 @@ fn is_halfwidth_for_tcy(character: char) -> bool {
 }
 
 fn suffix_note_at(chars: &[char], start: usize) -> Option<(usize, String, String)> {
-    if chars.get(start) != Some(&'［')
-        || chars.get(start + 1) != Some(&'＃')
-        || chars.get(start + 2) != Some(&'「')
-    {
+    if chars.get(start) != Some(&'［') || chars.get(start + 1) != Some(&'＃') {
         return None;
     }
+    let target_start = {
+        let mut found = None;
+        for (index, character) in chars.iter().enumerate().skip(start + 2) {
+            match character {
+                '「' => {
+                    found = Some(index);
+                    break;
+                }
+                '］' => break,
+                _ => {}
+            }
+        }
+        found?
+    };
     let target_end = chars
         .iter()
         .enumerate()
-        .skip(start + 3)
+        .skip(target_start + 1)
         .find_map(|(index, character)| (*character == '」').then_some(index))?;
     let close = chars
         .iter()
         .enumerate()
         .skip(target_end + 1)
         .find_map(|(index, character)| (*character == '］').then_some(index))?;
-    let target = chars[start + 3..target_end].iter().collect::<String>();
+    let target = chars[target_start + 1..target_end]
+        .iter()
+        .collect::<String>();
     let suffix = chars[target_end + 1..close].iter().collect::<String>();
     (!target.is_empty() && !suffix.is_empty()).then_some((close + 1, target, suffix))
+}
+
+fn suffix_visible_text(input: &str) -> String {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '［' && chars.get(index + 1) == Some(&'＃') {
+            index = chars
+                .iter()
+                .enumerate()
+                .skip(index + 2)
+                .find_map(|(candidate, value)| (*value == '］').then_some(candidate + 1))
+                .unwrap_or(index + 1);
+            continue;
+        }
+        if chars[index] == '｜' {
+            index += 1;
+            continue;
+        }
+        if chars[index] == '《' {
+            index = chars
+                .iter()
+                .enumerate()
+                .skip(index + 1)
+                .find_map(|(candidate, value)| (*value == '》').then_some(candidate + 1))
+                .unwrap_or(index + 1);
+            continue;
+        }
+        output.push(chars[index]);
+        index += 1;
+    }
+    output
+}
+
+fn previous_char_boundary(text: &str, byte_index: usize) -> usize {
+    text[..byte_index]
+        .char_indices()
+        .next_back()
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn remove_suffix_ruby(input: &str) -> String {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '《' {
+            index = chars
+                .iter()
+                .enumerate()
+                .skip(index + 1)
+                .find_map(|(candidate, value)| (*value == '》').then_some(candidate + 1))
+                .unwrap_or(index + 1);
+            continue;
+        }
+        output.push(chars[index]);
+        index += 1;
+    }
+    output
 }
 
 fn suffix_target_range(output: &str, target: &str) -> Option<(usize, usize)> {
@@ -473,7 +630,7 @@ fn suffix_target_range(output: &str, target: &str) -> Option<(usize, usize)> {
         index += 1;
     }
 
-    let target_chars = target.chars().collect::<Vec<_>>();
+    let target_chars = suffix_visible_text(target).chars().collect::<Vec<_>>();
     if target_chars.is_empty() || target_chars.len() > visible.len() {
         return None;
     }
