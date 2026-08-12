@@ -92,7 +92,7 @@ fn convert_inline_with_auto_yoko(input: &str, config: &AozoraConfig, auto_yoko: 
             continue;
         }
         if chars[index] == '<'
-            && let Some((end, replacement)) = parse_raw_image(&chars, index)
+            && let Some((end, replacement)) = parse_raw_image(&chars, index, config)
         {
             output.push_str(&replacement);
             index = end;
@@ -926,7 +926,7 @@ fn parse_configured_inline_block(
     Some((close_end, replacement))
 }
 
-fn parse_raw_image(chars: &[char], start: usize) -> Option<(usize, String)> {
+fn parse_raw_image(chars: &[char], start: usize, config: &AozoraConfig) -> Option<(usize, String)> {
     let end = chars
         .iter()
         .enumerate()
@@ -939,15 +939,23 @@ fn parse_raw_image(chars: &[char], start: usize) -> Option<(usize, String)> {
     }
     let source = raw_tag_attribute(&raw, "src")?;
     let source = normalize_image_path(source.trim())?;
-    let alt = raw_tag_attribute(&raw, "alt").unwrap_or_default();
-    Some((
-        end + 1,
-        format!(
-            "<img class=\"fit\" src=\"../image/{}\" alt=\"{}\"/>",
-            escape_html(&source),
-            escape_html(alt.trim()),
-        ),
-    ))
+    let alt = escape_html(raw_tag_attribute(&raw, "alt").unwrap_or_default().trim());
+    let source = format!("../image/{}", escape_html(&source));
+    let replacement = config
+        .inline_notes
+        .get("画像")
+        .map(|template| format_image_template(template, &source, &alt))
+        .unwrap_or_else(|| format!("<img class=\"fit\" src=\"{source}\" alt=\"{alt}\"/>"));
+    let replacement = if replacement.contains("<img") && !replacement.contains("</span>") {
+        if let Some(close) = config.inline_notes.get("画像終わり") {
+            format!("{replacement}{close}")
+        } else {
+            replacement
+        }
+    } else {
+        replacement
+    };
+    Some((end + 1, replacement))
 }
 fn raw_tag_attribute<'a>(tag: &'a str, attribute: &str) -> Option<&'a str> {
     let lower = tag.to_ascii_lowercase();
@@ -1075,22 +1083,6 @@ fn image_note_parts(chars: &[char], start: usize) -> Option<(usize, String, Stri
 fn image_path_from_note(chars: &[char], start: usize) -> Option<(usize, String)> {
     let (end, path, _) = image_note_parts(chars, start)?;
     Some((end, path))
-}
-pub(super) fn split_image_line(line: &str) -> Option<(String, String, String)> {
-    let chars = line.chars().collect::<Vec<_>>();
-    for start in 0..chars.len() {
-        let Some((end, _, _description)) = image_note_parts(&chars, start) else {
-            continue;
-        };
-        let prefix = chars[..start].iter().collect::<String>();
-        let image = chars[start..end].iter().collect::<String>();
-        let suffix = chars[end..].iter().collect::<String>();
-        if !prefix.trim().is_empty() || !suffix.trim().is_empty() {
-            continue;
-        }
-        return Some((prefix, image, suffix));
-    }
-    None
 }
 
 fn normalize_image_path(path: &str) -> Option<String> {

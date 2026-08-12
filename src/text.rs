@@ -5,7 +5,7 @@ use encoding_rs::{Encoding, SHIFT_JIS, UTF_8};
 #[path = "text_inline.rs"]
 mod inline;
 
-use inline::{convert_inline, split_image_line};
+use inline::convert_inline;
 pub use inline::{escape_html, image_references};
 
 #[derive(Debug, Eq, PartialEq)]
@@ -226,32 +226,6 @@ fn append_section_line(
             current.clear();
         }
         *page_marker = None;
-    }
-    if config.split_page_breaks
-        && let Some((prefix, image, suffix)) = split_image_line(line)
-    {
-        if !prefix.trim().is_empty() {
-            current.push(prefix);
-        }
-        trim_trailing_empty_lines(current);
-        if !current.is_empty() {
-            sections.push(render_marked_lines(
-                current.iter().map(String::as_str),
-                config,
-                *page_marker,
-            ));
-            current.clear();
-        }
-        sections.push(render_marked_lines(
-            std::iter::once(image.as_str()),
-            config,
-            None,
-        ));
-        *page_marker = None;
-        if !suffix.trim().is_empty() {
-            current.push(suffix);
-        }
-        return;
     }
     current.push(line.to_owned());
 }

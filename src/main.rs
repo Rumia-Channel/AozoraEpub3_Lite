@@ -174,6 +174,7 @@ fn convert_input(
             .collect::<Vec<_>>();
         sanitize_anchor_links(&mut sections);
         decorate_image_tags(&mut sections, &assets, config);
+        reflow_image_sections(&mut sections, &assets, config);
 
         let metadata = build_metadata(
             &title,
@@ -741,6 +742,206 @@ struct ImageDimensions {
     height: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ImagePageType {
+    Inline,
+    Page,
+}
+
+impl ImagePageType {
+    fn is_page(self) -> bool {
+        matches!(self, Self::Page)
+    }
+}
+
+fn image_setting_f32(config: &AozoraConfig, key: &str, default: f32) -> f32 {
+    config
+        .ini
+        .get(key)
+        .and_then(|value| value.parse::<f32>().ok())
+        .unwrap_or(default)
+}
+
+fn image_setting_usize(config: &AozoraConfig, key: &str, default: usize) -> usize {
+    config
+        .ini
+        .get(key)
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn image_setting_bool(config: &AozoraConfig, key: &str, default: bool) -> bool {
+    config.ini.get_bool(key).unwrap_or(default)
+}
+
+fn image_page_type(
+    dimensions: ImageDimensions,
+    config: &AozoraConfig,
+    has_caption: bool,
+    tag_level: usize,
+) -> ImagePageType {
+    let display_width = image_setting_f32(config, "DispW", 600.0);
+    let display_height = image_setting_f32(config, "DispH", 800.0);
+    let scale = image_setting_f32(config, "ImageScale", 1.0);
+    let image_width = dimensions.width as f32 * scale;
+    let image_height = dimensions.height as f32 * scale;
+    let float_type = image_setting_usize(config, "ImageFloatType", 0);
+    let float_width = image_setting_usize(config, "ImageFloatW", 0) as u32;
+    let float_height = image_setting_usize(config, "ImageFloatH", 0) as u32;
+
+    if float_type != 0
+        && (dimensions.width >= 64 || dimensions.height >= 64)
+        && dimensions.width <= float_width
+        && dimensions.height <= float_height
+    {
+        return ImagePageType::Inline;
+    }
+
+    let single_page_width = image_setting_usize(config, "SinglePageWidth", 550) as u32;
+    let single_page_size_width = image_setting_usize(config, "SinglePageSizeW", 400) as u32;
+    let single_page_size_height = image_setting_usize(config, "SinglePageSizeH", 600) as u32;
+    let eligible = dimensions.width >= single_page_width
+        || (dimensions.width >= single_page_size_width
+            && dimensions.height >= single_page_size_height);
+    if eligible && tag_level == 0 && !has_caption {
+        let fit_image = image_setting_bool(config, "FitImage", true);
+        let image_size_type = image_setting_usize(config, "ImageSizeType", 2);
+        if image_width <= display_width && image_height < display_height {
+            if !fit_image {
+                return ImagePageType::Inline;
+            }
+        } else if image_size_type == 1 {
+            return ImagePageType::Page;
+        }
+        return ImagePageType::Page;
+    }
+
+    ImagePageType::Inline
+}
+
+fn image_tag_in_line(line: &str) -> Option<&str> {
+    let start = line.find("<img")?;
+    let end = start + line[start..].find('>')? + 1;
+    Some(&line[start..end])
+}
+
+fn image_asset_for_line<'a>(line: &str, assets: &'a [EpubAsset]) -> Option<(&'a EpubAsset, bool)> {
+    let tag = image_tag_in_line(line)?;
+    let source = tag_attribute(tag, "src")?;
+    let source = source.strip_prefix("../")?;
+    let asset = assets.iter().find(|asset| asset.path == source)?;
+    let has_caption = line.contains("キャプション") || line.contains("caption");
+    Some((asset, has_caption))
+}
+
+fn is_standalone_image_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    let Some(inner) = trimmed
+        .strip_prefix("<p>")
+        .and_then(|value| value.strip_suffix("</p>"))
+        .map(str::trim)
+    else {
+        return false;
+    };
+    let inner = inner
+        .strip_prefix("<span>")
+        .and_then(|value| value.strip_suffix("</span>"))
+        .map(str::trim)
+        .unwrap_or(inner);
+    inner.starts_with("<img") && inner.ends_with("/>")
+}
+
+fn split_image_page_sections(
+    section: &str,
+    assets: &[EpubAsset],
+    config: &AozoraConfig,
+) -> Vec<String> {
+    let mut output = Vec::new();
+    let mut current = Vec::new();
+    for line in section.split_inclusive('\n') {
+        if is_standalone_image_line(line)
+            && let Some((asset, has_caption)) = image_asset_for_line(line, assets)
+            && image_page_type(
+                image_dimensions(&asset.data, &asset.media_type).unwrap_or(ImageDimensions {
+                    width: 0,
+                    height: 0,
+                }),
+                config,
+                has_caption,
+                0,
+            )
+            .is_page()
+        {
+            let prefix: String = current.concat();
+            if !prefix.trim().is_empty() {
+                output.push(prefix);
+            }
+            output.push(line.to_owned());
+            current.clear();
+        } else {
+            current.push(line);
+        }
+    }
+    let suffix = current.concat();
+    if !suffix.trim().is_empty() {
+        output.push(suffix);
+    }
+    if output.is_empty() {
+        vec![section.to_owned()]
+    } else {
+        output
+    }
+}
+
+fn standalone_image_page_type(
+    section: &str,
+    assets: &[EpubAsset],
+    config: &AozoraConfig,
+) -> Option<ImagePageType> {
+    if section.contains("aozora-page-") {
+        return None;
+    }
+    if !is_standalone_image_line(section) {
+        return None;
+    }
+    let (asset, has_caption) = image_asset_for_line(section, assets)?;
+    let dimensions = image_dimensions(&asset.data, &asset.media_type)?;
+    Some(image_page_type(dimensions, config, has_caption, 0))
+}
+
+fn reflow_image_sections(sections: &mut Vec<String>, assets: &[EpubAsset], config: &AozoraConfig) {
+    let split = sections
+        .drain(..)
+        .flat_map(|section| split_image_page_sections(&section, assets, config))
+        .collect::<Vec<_>>();
+    let mut output: Vec<String> = Vec::with_capacity(split.len());
+    let mut pending = String::new();
+    for section in split {
+        if standalone_image_page_type(&section, assets, config) == Some(ImagePageType::Inline) {
+            if !pending.is_empty() {
+                pending.push_str(&section);
+            } else if let Some(previous) = output.last_mut() {
+                previous.push_str(&section);
+            } else {
+                pending = section;
+            }
+        } else {
+            if !pending.is_empty() {
+                output.push(std::mem::take(&mut pending));
+            }
+            output.push(section);
+        }
+    }
+    if !pending.is_empty() {
+        if let Some(previous) = output.last_mut() {
+            previous.push_str(&pending);
+        } else {
+            output.push(pending);
+        }
+    }
+    *sections = output;
+}
+
 fn decorate_image_tags(sections: &mut [String], assets: &[EpubAsset], config: &AozoraConfig) {
     let display_width = config
         .ini
@@ -1118,9 +1319,10 @@ fn usage() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        AozoraConfig, CliOptions, EpubAsset, ImageDimensions, TitleType, decorate_image_tags,
-        detect_meta, image_dimensions, output_path, parse_args, remove_metadata_lines,
-        sanitize_anchor_links, should_rotate,
+        AozoraConfig, CliOptions, EpubAsset, ImageDimensions, ImagePageType, TitleType,
+        decorate_image_tags, detect_meta, image_dimensions, image_page_type, output_path,
+        parse_args, reflow_image_sections, remove_metadata_lines, sanitize_anchor_links,
+        should_rotate,
     };
     use aozora_epub3_lite::IniSettings;
     use std::path::Path;
@@ -1346,6 +1548,73 @@ mod tests {
         sanitize_anchor_links(&mut sections);
         assert_eq!(sections[0], "<p><a>参照</a></p>");
         assert!(sections[1].contains(r##"<a href="#present">参照</a>"##));
+    }
+
+    #[test]
+    fn classifies_large_standalone_images_as_pages() {
+        let config = AozoraConfig::from_ini(
+            IniSettings::parse(
+                "DispW=584\nDispH=754\nSinglePageWidth=550\nSinglePageSizeW=400\nSinglePageSizeH=600\n",
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            image_page_type(
+                ImageDimensions {
+                    width: 1836,
+                    height: 1400,
+                },
+                &config,
+                false,
+                0,
+            ),
+            ImagePageType::Page
+        );
+        assert_eq!(
+            image_page_type(
+                ImageDimensions {
+                    width: 459,
+                    height: 350,
+                },
+                &config,
+                false,
+                0,
+            ),
+            ImagePageType::Inline
+        );
+        assert_eq!(
+            image_page_type(
+                ImageDimensions {
+                    width: 1836,
+                    height: 1400,
+                },
+                &config,
+                true,
+                0,
+            ),
+            ImagePageType::Inline
+        );
+    }
+
+    #[test]
+    fn reflows_large_image_lines_into_page_sections() {
+        let mut png = vec![0; 24];
+        png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        png[16..20].copy_from_slice(&1836u32.to_be_bytes());
+        png[20..24].copy_from_slice(&1400u32.to_be_bytes());
+        let asset = EpubAsset::new("image/large.png", "image/png", png);
+        let config = AozoraConfig::from_ini(
+            IniSettings::parse("DispW=584\nDispH=754\nSinglePageWidth=550\n").unwrap(),
+        );
+        let mut sections = vec![
+            "<p>前</p>\n<p><span><img class=\"fit\" src=\"../image/large.png\" alt=\"\"/></span></p>\n<p>後</p>\n"
+                .to_owned(),
+        ];
+        reflow_image_sections(&mut sections, &[asset], &config);
+        assert_eq!(sections.len(), 3);
+        assert!(sections[1].contains("<p><span><img"));
+        assert!(sections[0].contains("<p>前</p>"));
+        assert!(sections[2].contains("<p>後</p>"));
     }
 
     #[test]

@@ -532,7 +532,11 @@ fn section_page_mode(body: &str) -> (&'static str, &str) {
 
 fn image_page_body(body: &str) -> Option<&str> {
     let body = body.strip_prefix("<p>")?.strip_suffix("</p>")?.trim();
-    (body.starts_with("<img class=\"fit\"") && body.ends_with("/>")).then_some(body)
+    if body.starts_with("<img class=\"fit\"") && body.ends_with("/>") {
+        return Some(body);
+    }
+    let image = body.strip_prefix("<span>")?.strip_suffix("</span>")?.trim();
+    (image.starts_with("<img class=\"fit\"") && image.ends_with("/>")).then_some(body)
 }
 
 fn xml_escape(value: &str) -> String {
