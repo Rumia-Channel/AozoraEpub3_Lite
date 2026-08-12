@@ -1,7 +1,7 @@
 use aozora_epub3_lite::{
     AozoraConfig, BookMeta, EpubAsset, EpubBook, EpubMetadata, Input, TextEntry, TitleType,
     aozora_text_to_xhtml_sections_with_config, decode_text, detect_meta, escape_html,
-    file_title_creator, image_references,
+    file_title_creator, image::process as process_image, image_references,
 };
 use std::env;
 use std::error::Error;
@@ -122,7 +122,6 @@ fn convert_input(
     if input.is_image_only() {
         return convert_image_only(&input, options, config, vertical);
     }
-
     let (file_title, file_creator) = file_title_creator(input.file_name().unwrap_or_default());
     let multi_entry = input.text_entries().len() > 1;
     for entry in input.text_entries() {
@@ -152,7 +151,7 @@ fn convert_input(
 
         let mut sections = aozora_text_to_xhtml_sections_with_config(&body_text, config)?;
         let cover_setting = options.cover.as_deref().or_else(|| config.ini.get("Cover"));
-        let (assets, cover) = collect_assets(&input, entry, &text, cover_setting)?;
+        let (assets, cover) = collect_assets(&input, entry, &text, cover_setting, config)?;
         for collected in &assets {
             for reference in &collected.references {
                 if collected.resolved != *reference {
@@ -281,6 +280,7 @@ fn convert_image_only(
     let input_path = input.path();
     let mut sections = Vec::new();
     let mut assets = Vec::new();
+    let cover_path = input.images().keys().next().cloned();
     for (path, data) in input.images() {
         let extension = path
             .rsplit_once('.')
@@ -292,7 +292,13 @@ fn convert_image_only(
                 format!("unsupported image type: {path}"),
             )
         })?;
-        let fragment = image_dimensions(data, media_type)
+        let processed_data = process_image(
+            data,
+            media_type,
+            &config.ini,
+            cover_path.as_deref() == Some(path),
+        )?;
+        let fragment = image_dimensions(&processed_data, media_type)
             .map(|dimensions| svg_image_fragment(path, dimensions))
             .unwrap_or_else(|| {
                 format!(
@@ -304,7 +310,7 @@ fn convert_image_only(
         assets.push(EpubAsset::new(
             format!("image/{path}"),
             media_type,
-            data.clone(),
+            processed_data,
         ));
     }
     if assets.is_empty() {
@@ -388,6 +394,7 @@ fn collect_assets(
     entry: &TextEntry,
     text: &str,
     cover: Option<&str>,
+    config: &AozoraConfig,
 ) -> Result<(Vec<CollectedAsset>, Option<String>), Box<dyn Error>> {
     let base = input.path().parent().unwrap_or_else(|| Path::new("."));
     let mut assets: Vec<CollectedAsset> = Vec::new();
@@ -421,13 +428,14 @@ fn collect_assets(
             )
         })?;
         let epub_path = format!("image/{source_path}");
-        if is_auto_cover(cover)
+        let is_cover = is_auto_cover(cover)
             && cover_asset.is_none()
             && image_dimensions(&data, media_type)
-                .is_some_and(|dimensions| dimensions.width > 64 && dimensions.height > 64)
-        {
+                .is_some_and(|dimensions| dimensions.width > 64 && dimensions.height > 64);
+        if is_cover {
             cover_asset = Some(epub_path.clone());
         }
+        let data = process_image(&data, media_type, &config.ini, is_cover)?;
         if let Some(existing) = assets.iter_mut().find(|item| item.asset.path == epub_path) {
             existing.references.push(reference);
         } else {
@@ -456,6 +464,7 @@ fn collect_assets(
                     format!("unsupported cover image type: {extension}"),
                 )
             })?;
+            let data = process_image(&data, media_type, &config.ini, true)?;
             let epub_path = format!(
                 "image/{}",
                 source
@@ -487,7 +496,7 @@ fn collect_assets(
                         format!("unsupported cover image type: {extension}"),
                     )
                 })?;
-                let data = fs::read(&source)?;
+                let data = process_image(&fs::read(&source)?, media_type, &config.ini, true)?;
                 let epub_path = format!("image/{normalized}");
                 if !assets.iter().any(|item| item.asset.path == epub_path) {
                     assets.push(CollectedAsset {

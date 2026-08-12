@@ -1,5 +1,6 @@
 pub mod config;
 pub mod epub;
+pub mod image;
 pub mod input;
 pub mod metadata;
 pub mod text;
