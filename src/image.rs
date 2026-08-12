@@ -60,14 +60,14 @@ impl ImageOptions {
         let display_width = get_u32(ini, "DispW", 600);
         let display_height = get_u32(ini, "DispH", 800);
         let max_width = if cover {
-            get_u32(ini, "CoverW", 600)
+            get_u32(ini, "CoverW", 0)
         } else if ini.get_bool("ResizeW").unwrap_or(false) {
             get_u32(ini, "ResizeNumW", 0)
         } else {
             0
         };
         let max_height = if cover {
-            get_u32(ini, "CoverH", 800)
+            get_u32(ini, "CoverH", 0)
         } else if ini.get_bool("ResizeH").unwrap_or(false) {
             get_u32(ini, "ResizeNumH", 0)
         } else {

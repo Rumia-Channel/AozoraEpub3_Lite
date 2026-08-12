@@ -258,15 +258,17 @@ fn entry_suffix(entry: &TextEntry) -> String {
 /// Converts an image-only archive (CBZ) into an EPUB with one page per
 /// image, the first image (name-sorted) as the cover.
 fn svg_image_fragment(path: &str, dimensions: ImageDimensions) -> String {
+    let width = dimensions.width.max(1);
+    let height = dimensions.height.max(1);
     format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\" \
          xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"100%\" height=\"100%\" \
          viewBox=\"0 0 {} {}\"><image width=\"{}\" height=\"{}\" \
          xlink:href=\"../image/{}\"/></svg>",
-        dimensions.width,
-        dimensions.height,
-        dimensions.width,
-        dimensions.height,
+        width,
+        height,
+        width,
+        height,
         escape_html(path),
     )
 }
