@@ -1,6 +1,7 @@
 use super::{EpubAsset, EpubMetadata, EpubSection, TITLE_PAGE_MARKER, is_title_page};
 const PAGE_MIDDLE_MARKER: &str = "<!-- aozora-page-middle -->";
 const PAGE_BOTTOM_MARKER: &str = "<!-- aozora-page-bottom -->";
+const PAGE_NO_CHAPTER_MARKER: &str = "<!-- aozora-page-no-chapter -->";
 
 pub(super) fn section_path(section: &EpubSection, body_number: usize) -> String {
     if is_title_page(section) {
@@ -15,17 +16,26 @@ struct NavEntry {
     path: String,
     level: usize,
 }
+fn is_no_chapter(section: &EpubSection) -> bool {
+    section
+        .body_fragment
+        .trim_start()
+        .starts_with(PAGE_NO_CHAPTER_MARKER)
+}
 
 fn nav_entries(sections: &[EpubSection]) -> Vec<NavEntry> {
     let body_count = sections
         .iter()
-        .filter(|section| !is_title_page(section))
+        .filter(|section| !is_title_page(section) && !is_no_chapter(section))
         .count();
     let mut body_number = 0;
     let mut entries = Vec::with_capacity(sections.len());
     for section in sections {
         if !is_title_page(section) {
             body_number += 1;
+        }
+        if is_no_chapter(section) {
+            continue;
         }
         let level = if is_title_page(section) {
             1
@@ -571,6 +581,9 @@ fn section_page_mode(body: &str) -> (&'static str, &str) {
     }
     if let Some(body) = body.strip_prefix(PAGE_BOTTOM_MARKER) {
         return (" class=\"p-bottom\"", body.trim());
+    }
+    if let Some(body) = body.strip_prefix(PAGE_NO_CHAPTER_MARKER) {
+        return ("", body.trim());
     }
     ("", body)
 }

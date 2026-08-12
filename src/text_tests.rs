@@ -108,6 +108,15 @@ fn splits_page_breaks_embedded_in_text_lines() {
     assert!(sections[2].contains("<p>終</p>"));
 }
 #[test]
+fn separates_colophon_into_a_non_chapter_section() {
+    let sections = aozora_text_to_xhtml_sections("本文\n底本：青空文庫").unwrap();
+    assert_eq!(sections.len(), 2);
+    assert!(sections[0].contains("<p>本文</p>"));
+    assert!(sections[1].starts_with("<!-- aozora-page-no-chapter -->"));
+    assert!(sections[1].contains("<p>底本：青空文庫</p>"));
+}
+
+#[test]
 fn classifies_middle_and_bottom_page_breaks() {
     let mut config = AozoraConfig::default();
     config.load_tag_text("中寄せ\t\tM\n下寄せ\t\tL\n");

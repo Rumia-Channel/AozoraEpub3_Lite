@@ -632,4 +632,25 @@ mod tests {
         assert!(middle.contains("<body class=\"p-middle\">"));
         assert!(!middle.contains("aozora-page-middle"));
     }
+
+    #[test]
+    fn omits_colophon_page_from_navigation() {
+        let book = EpubBook::from_sections(
+            EpubMetadata::new("題名", "urn:uuid:test"),
+            [
+                "<p>本文</p>",
+                "<!-- aozora-page-no-chapter -->\n<p>底本：青空文庫</p>",
+            ],
+        );
+        let cursor = book.write_to(Cursor::new(Vec::new())).unwrap();
+        let mut archive = ZipArchive::new(cursor).unwrap();
+        let mut nav = String::new();
+        archive
+            .by_name("item/nav.xhtml")
+            .unwrap()
+            .read_to_string(&mut nav)
+            .unwrap();
+        assert!(nav.contains("xhtml/0001.xhtml"));
+        assert!(!nav.contains("xhtml/0002.xhtml"));
+    }
 }

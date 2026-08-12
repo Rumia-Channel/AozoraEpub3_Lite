@@ -251,6 +251,18 @@ fn append_section_line(
     if line.trim().is_empty() && current.is_empty() && page_marker.is_some() {
         return;
     }
+    if is_colophon_line(line) && !current.is_empty() {
+        trim_trailing_empty_lines(current);
+        if !current.is_empty() {
+            sections.push(render_marked_lines(
+                current.iter().map(String::as_str),
+                config,
+                *page_marker,
+            ));
+            current.clear();
+        }
+        *page_marker = Some(PAGE_NO_CHAPTER_MARKER);
+    }
     if should_force_page_break(current, line, config) {
         trim_trailing_empty_lines(current);
         if !current.is_empty() {
@@ -265,6 +277,7 @@ fn append_section_line(
     }
     current.push(line.to_owned());
 }
+
 fn should_force_page_break(current: &[String], line: &str, config: &AozoraConfig) -> bool {
     if !config.force_page_break || current.is_empty() || line.trim().is_empty() {
         return false;
@@ -273,7 +286,7 @@ fn should_force_page_break(current: &[String], line: &str, config: &AozoraConfig
         .iter()
         .map(|value| value.len().saturating_add(8))
         .sum::<usize>();
-    if page_size > config.force_page_break_size {
+    if config.force_page_break_size > 0 && page_size > config.force_page_break_size {
         return true;
     }
     let empty_lines = current
@@ -290,6 +303,11 @@ fn should_force_page_break(current: &[String], line: &str, config: &AozoraConfig
     config.force_page_break_chapter_level > 0
         && page_size > config.force_page_break_chapter_size
         && is_chapter_line(line)
+}
+
+fn is_colophon_line(line: &str) -> bool {
+    line.trim_start_matches([' ', '\u{3000}'])
+        .starts_with("底本：")
 }
 
 fn is_chapter_line(line: &str) -> bool {
@@ -319,6 +337,7 @@ fn find_page_break_note(line: &str, config: &AozoraConfig) -> Option<(usize, usi
 
 const PAGE_MIDDLE_MARKER: &str = "<!-- aozora-page-middle -->";
 const PAGE_BOTTOM_MARKER: &str = "<!-- aozora-page-bottom -->";
+const PAGE_NO_CHAPTER_MARKER: &str = "<!-- aozora-page-no-chapter -->";
 const RAW_COMMENT_PREFIX: &str = "\u{0000}aozora-raw-comment\u{0000}";
 
 fn render_marked_lines<'a>(
