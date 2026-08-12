@@ -477,8 +477,39 @@ fn join_two(first: Option<&str>, second: Option<&str>) -> Option<String> {
 }
 
 fn normalize_text(text: &str, reduce: bool) -> Option<String> {
-    let cleaned = chapter_name(&remove_ruby(text), 0, reduce);
+    let text = remove_metadata_image_notes(text);
+    let cleaned = chapter_name(&remove_ruby(&text), 0, reduce);
     (!cleaned.is_empty()).then_some(cleaned)
+}
+
+fn remove_metadata_image_notes(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0;
+    while cursor < input.len() {
+        let marker = input[cursor..].find("［＃").map(|offset| cursor + offset);
+        let Some(marker_start) = marker else {
+            output.push_str(&input[cursor..]);
+            break;
+        };
+        output.push_str(&input[cursor..marker_start]);
+        let note_start = marker_start + "［＃".len();
+        let Some(close_offset) = input[note_start..].find('］') else {
+            output.push_str(&input[marker_start..]);
+            break;
+        };
+        let note_end = note_start + close_offset + '］'.len_utf8();
+        let note = &input[note_start..note_start + close_offset];
+        let is_image = note.contains('（') && note.contains('.') && note.contains('）');
+        if is_image {
+            if output.ends_with('※') {
+                output.pop();
+            }
+        } else {
+            output.push_str(&input[marker_start..note_end]);
+        }
+        cursor = note_end;
+    }
+    output
 }
 
 /// Parses `[creator] title` (and fallback forms) from a file name,
@@ -897,6 +928,18 @@ mod tests {
         // ※-escaped ruby markers survive
         let book = meta("※《表題》\n著者名\n\n本文", TitleType::TitleAuthor);
         assert_eq!(book.title.as_deref(), Some("《表題》"));
+    }
+
+    #[test]
+    fn removes_image_notes_from_title_and_creator() {
+        let book = meta(
+            "縦中横※［＃図形（fig.png、横19×縦15）入る］AAA\n\
+             著者※［＃図形（author.png）入る］\n\
+             \n本文",
+            TitleType::TitleAuthor,
+        );
+        assert_eq!(book.title.as_deref(), Some("縦中横AAA"));
+        assert_eq!(book.creator.as_deref(), Some("著者"));
     }
 
     #[test]

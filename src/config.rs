@@ -286,22 +286,22 @@ impl Default for AozoraConfig {
 }
 impl AozoraConfig {
     pub fn from_ini(ini: IniSettings) -> Self {
-        let split_page_breaks = ini.get_bool("PageBreak").unwrap_or(true);
+        let split_page_breaks = ini.get_bool("PageBreak").unwrap_or(false);
         let comment_print = ini.get_bool("CommentPrint").unwrap_or(false);
         let comment_convert = ini.get_bool("CommentConvert").unwrap_or(false);
         let title_page_write = ini.get_bool("TitlePageWrite").unwrap_or(false);
-        let auto_yoko = ini.get_bool("AutoYoko").unwrap_or(true);
-        let auto_yoko_num1 = ini.get_bool("AutoYokoNum1").unwrap_or(true);
-        let auto_yoko_num3 = ini.get_bool("AutoYokoNum3").unwrap_or(true);
-        let auto_yoko_eq1 = ini.get_bool("AutoYokoEQ1").unwrap_or(true);
-        let auto_yoko_eq3 = ini.get_bool("AutoYokoEQ3").unwrap_or(true);
+        let auto_yoko = ini.get_bool("AutoYoko").unwrap_or(false);
+        let auto_yoko_num1 = ini.get_bool("AutoYokoNum1").unwrap_or(false);
+        let auto_yoko_num3 = ini.get_bool("AutoYokoNum3").unwrap_or(false);
+        let auto_yoko_eq1 = ini.get_bool("AutoYokoEQ1").unwrap_or(false);
+        let auto_yoko_eq3 = ini.get_bool("AutoYokoEQ3").unwrap_or(false);
         let dakuten_type = ini
             .get("DakutenType")
             .and_then(|value| value.parse::<u8>().ok())
             .filter(|value| *value <= 2)
-            .unwrap_or(1);
+            .unwrap_or(0);
         let print_ivs_bmp = ini.get_bool("IvsBMP").unwrap_or(false);
-        let print_ivs_ssp = ini.get_bool("IvsSSP").unwrap_or(true);
+        let print_ivs_ssp = ini.get_bool("IvsSSP").unwrap_or(false);
         let vertical = ini.get_bool("Vertical").unwrap_or(true);
         Self {
             ini,
@@ -600,6 +600,19 @@ mod tests {
         assert!(!AozoraConfig::default().title_page_write);
         let config = AozoraConfig::from_ini(IniSettings::parse("TitlePageWrite=1\n").unwrap());
         assert!(config.title_page_write);
+    }
+
+    #[test]
+    fn applies_java_property_defaults_for_missing_conversion_flags() {
+        let config = AozoraConfig::from_ini(IniSettings::parse("PageBreak=1\n").unwrap());
+        assert!(config.split_page_breaks);
+        assert!(!config.auto_yoko);
+        assert!(!config.auto_yoko_num1);
+        assert!(!config.auto_yoko_num3);
+        assert!(!config.auto_yoko_eq1);
+        assert!(!config.auto_yoko_eq3);
+        assert_eq!(config.dakuten_type, 0);
+        assert!(!config.print_ivs_ssp);
     }
 
     #[test]
