@@ -362,17 +362,11 @@ impl AozoraConfig {
         let force_page_break_chapter_size = get_usize("PageBreakChapterSize")
             .unwrap_or(0)
             .saturating_mul(1024);
-        let mut force_page_break_size = if split_page_breaks {
+        let force_page_break_size = if split_page_breaks {
             get_usize("PageBreakSize").unwrap_or(0).saturating_mul(1024)
         } else {
             0
         };
-        if force_page_break_empty_line > 0 {
-            force_page_break_size = force_page_break_size.max(force_page_break_empty_size);
-        }
-        if force_page_break_chapter_level > 0 {
-            force_page_break_size = force_page_break_size.max(force_page_break_chapter_size);
-        }
         let force_page_break = force_page_break_size > 0
             || (force_page_break_empty_line > 0 && force_page_break_empty_size > 0)
             || (force_page_break_chapter_level > 0 && force_page_break_chapter_size > 0);
@@ -718,6 +712,19 @@ mod tests {
         assert!(!config.auto_yoko_eq3);
         assert_eq!(config.dakuten_type, 0);
         assert!(!config.print_ivs_ssp);
+    }
+
+    #[test]
+    fn keeps_force_page_break_thresholds_independent() {
+        let config = AozoraConfig::from_ini(
+            IniSettings::parse(
+                "PageBreak=1\nPageBreakEmpty=1\nPageBreakEmptyLine=2\nPageBreakEmptySize=4\n",
+            )
+            .unwrap(),
+        );
+        assert!(config.force_page_break);
+        assert_eq!(config.force_page_break_size, 0);
+        assert_eq!(config.force_page_break_empty_size, 4 * 1024);
     }
 
     #[test]

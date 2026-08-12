@@ -65,7 +65,7 @@ pub fn plain_text_to_xhtml_with_config(
 
 fn visible_lines(input: &str, config: &AozoraConfig) -> Vec<String> {
     let mut in_comment = false;
-    let lines = input
+    let mut lines = input
         .lines()
         .filter_map(|line| {
             if is_comment_line(line) {
@@ -83,7 +83,43 @@ fn visible_lines(input: &str, config: &AozoraConfig) -> Vec<String> {
             Some(line.to_owned())
         })
         .collect::<Vec<_>>();
+    if config.force_indent {
+        for line in &mut lines {
+            force_indent_line(line);
+        }
+    }
     normalize_empty_lines(lines, config)
+}
+
+fn force_indent_line(line: &mut String) {
+    let mut chars = line.chars();
+    let Some(first) = chars.next() else {
+        return;
+    };
+    let Some(second) = chars.next() else {
+        return;
+    };
+    if matches!(
+        first,
+        '\u{3000}' | '「' | '『' | '（' | '”' | '〈' | '【' | '〔' | '［' | '※'
+    ) {
+        return;
+    }
+    if first == ' ' || first == '\u{2000}' {
+        let replacement_start = if second == ' ' || second == '\u{2000}' || second == '\u{3000}' {
+            first.len_utf8()
+        } else {
+            0
+        };
+        let replacement_end = replacement_start
+            + line[replacement_start..]
+                .chars()
+                .next()
+                .map_or(0, char::len_utf8);
+        line.replace_range(replacement_start..replacement_end, "\u{3000}");
+    } else {
+        line.insert(0, '\u{3000}');
+    }
 }
 
 fn normalize_empty_lines(lines: Vec<String>, config: &AozoraConfig) -> Vec<String> {

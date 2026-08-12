@@ -57,6 +57,17 @@ fn applies_empty_line_limits_and_force_page_breaks() {
 }
 
 #[test]
+fn applies_java_force_indent_rules() {
+    let config = AozoraConfig::from_ini(IniSettings::parse("ForceIndent=1").unwrap());
+    let output =
+        super::plain_text_to_xhtml_with_config("本文\n「会話\n 本文\n  本文", &config).unwrap();
+    assert!(output.contains("<p>　本文</p>"));
+    assert!(output.contains("<p>「会話</p>"));
+    assert!(output.contains("<p>　本文</p>"));
+    assert!(output.contains("<p> 　本文</p>"));
+}
+
+#[test]
 fn emits_a_placeholder_for_empty_input() {
     assert_eq!(plain_text_to_xhtml("").unwrap(), "    <p><br/></p>\n");
 }
