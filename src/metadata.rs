@@ -125,6 +125,53 @@ pub fn detect_meta(input: &str, title_type: TitleType, publisher_first: bool) ->
         .collect();
     detect_meta_with_page_breaks(input, title_type, publisher_first, &page_breaks)
 }
+/// Detects metadata after applying the configured Aozora gaiji replacements.
+///
+/// The Java converter resolves gaiji notes before collecting title lines, so
+/// special escaped characters such as `※［＃始め二重山括弧］` remain visible in
+/// the title. The line layout and indices are preserved by this conversion.
+pub fn detect_meta_with_gaiji(
+    input: &str,
+    title_type: TitleType,
+    publisher_first: bool,
+    gaiji: &std::collections::BTreeMap<String, String>,
+) -> BookMeta {
+    let converted = convert_gaiji_notes(input, gaiji);
+    detect_meta(&converted, title_type, publisher_first)
+}
+
+fn convert_gaiji_notes(input: &str, gaiji: &std::collections::BTreeMap<String, String>) -> String {
+    const NOTE_PREFIX: &str = "※［＃";
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0;
+    while let Some(relative_start) = input[cursor..].find(NOTE_PREFIX) {
+        let start = cursor + relative_start;
+        output.push_str(&input[cursor..start]);
+        let note_start = start + NOTE_PREFIX.len();
+        let Some(relative_end) = input[note_start..].find('］') else {
+            output.push_str(&input[start..]);
+            return output;
+        };
+        let end = note_start + relative_end + '］'.len_utf8();
+        let marker = &input[start..end];
+        if let Some(replacement) = gaiji.get(marker) {
+            if replacement.chars().count() == 1
+                && replacement
+                    .chars()
+                    .next()
+                    .is_some_and(|character| matches!(character, '※' | '《' | '》' | '｜' | '＃'))
+            {
+                output.push('※');
+            }
+            output.push_str(replacement);
+        } else {
+            output.push_str(marker);
+        }
+        cursor = end;
+    }
+    output.push_str(&input[cursor..]);
+    output
+}
 
 /// Same as [`detect_meta`] with a caller-provided page-break note set.
 pub fn detect_meta_with_page_breaks(
@@ -724,7 +771,8 @@ fn unescape_marks(line: &str) -> String {
     let mut index = 0;
     while index < chars.len() {
         if chars[index] == '※' && index + 1 < chars.len() && special_next(&chars, index + 1) {
-            index += 1;
+            out.push(chars[index + 1]);
+            index += 2;
         } else {
             out.push(chars[index]);
             index += 1;
@@ -928,6 +976,17 @@ mod tests {
         // ※-escaped ruby markers survive
         let book = meta("※《表題》\n著者名\n\n本文", TitleType::TitleAuthor);
         assert_eq!(book.title.as_deref(), Some("《表題》"));
+    }
+
+    #[test]
+    fn unescapes_adjacent_escaped_marks_without_overlapping() {
+        let book = meta(
+            "｜ルビ※［＃米印］《るび》※［＃米印］※［＃始め二重山括弧］※［＃終わり二重山括弧］\n\
+             著者\n\
+             \n本文",
+            TitleType::TitleAuthor,
+        );
+        assert_eq!(book.title.as_deref(), Some("ルビ※※"));
     }
 
     #[test]

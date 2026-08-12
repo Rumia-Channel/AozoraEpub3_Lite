@@ -1,6 +1,6 @@
 use aozora_epub3_lite::{
     AozoraConfig, BookMeta, EpubAsset, EpubBook, EpubMetadata, Input, TextEntry, TitleType,
-    aozora_text_to_xhtml_sections_with_config, decode_text, detect_meta, escape_html,
+    aozora_text_to_xhtml_sections_with_config, decode_text, detect_meta_with_gaiji, escape_html,
     file_title_creator, image::process as process_image, image_reference_occurrences,
     image_references,
 };
@@ -133,7 +133,7 @@ fn convert_input(
             .filter(|label| !label.eq_ignore_ascii_case("AUTO"));
         let text = decode_text(&bytes, encoding_label)?;
 
-        let detected = detect_meta(&text, title_type, publisher_first);
+        let detected = detect_meta_with_gaiji(&text, title_type, publisher_first, &config.gaiji);
         let body_text = remove_metadata_lines(&text, &detected);
         let publisher = detected.publisher;
         let (title, creator) = if options.use_file_name {
@@ -227,12 +227,17 @@ fn remove_metadata_lines(input: &str, metadata: &BookMeta) -> String {
         remove_end += 1;
     }
 
-    lines
+    let mut retained = lines
         .into_iter()
         .enumerate()
         .filter_map(|(index, line)| (index < remove_start || index > remove_end).then_some(line))
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect::<Vec<_>>();
+    if remove_start == 0 {
+        while retained.first().is_some_and(|line| line.trim().is_empty()) {
+            retained.remove(0);
+        }
+    }
+    retained.join("\n")
 }
 
 fn is_metadata_wrapper(line: &str) -> bool {
@@ -262,10 +267,11 @@ fn svg_image_fragment(path: &str, dimensions: ImageDimensions) -> String {
     let width = dimensions.width.max(1);
     let height = dimensions.height.max(1);
     format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\" \
-         xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"100%\" height=\"100%\" \
-         viewBox=\"0 0 {} {}\"><image width=\"{}\" height=\"{}\" \
-         xlink:href=\"../image/{}\"/></svg>",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\"\n\
+xmlns:xlink=\"http://www.w3.org/1999/xlink\"\n\
+width=\"100%\" height=\"100%\" viewBox=\"0 0 {} {}\">\n\
+<image width=\"{}\" height=\"{}\" xlink:href=\"../image/{}\"/>\n\
+</svg>",
         width,
         height,
         width,
@@ -1680,9 +1686,8 @@ fn usage() -> &'static str {
      \x20 -d, --dst <dir>        output directory\n\
      \x20 -enc <encoding>        input encoding: AUTO (default), MS932, UTF-8\n\
      \x20 -hor                   horizontal writing (default vertical)\n\
-     \x20 -device <kindle>       target device\n\
+     \x20 --language <lang>        EPUB language (default ja)\n\
      \x20 --creator <name>       override creator\n\
-     \x20 --language <lang>      EPUB language (default ja)\n\
      \x20 --config-dir <dir>     configuration directory (repeatable)\n\
      \x20 --preset <file>        preset ini file\n\
      \x20 --vertical             vertical writing"
@@ -1692,11 +1697,10 @@ fn usage() -> &'static str {
 mod tests {
     use super::{
         AozoraConfig, CliOptions, EpubAsset, ImageDimensions, ImagePageType, TitleType,
-        decorate_image_tags, detect_meta, image_dimensions, image_page_type, output_path,
-        parse_args, reflow_image_sections, remove_metadata_lines, sanitize_anchor_links,
-        should_rotate,
+        decorate_image_tags, image_dimensions, image_page_type, output_path, parse_args,
+        reflow_image_sections, remove_metadata_lines, sanitize_anchor_links, should_rotate,
     };
-    use aozora_epub3_lite::IniSettings;
+    use aozora_epub3_lite::{IniSettings, decode_text, detect_meta};
     use std::path::Path;
 
     fn parse(args: &[&str]) -> Result<CliOptions, String> {
@@ -1836,7 +1840,57 @@ mod tests {
     fn removes_detected_title_lines_before_body_conversion() {
         let input = "表題\n著者名\n\n本文";
         let metadata = detect_meta(input, TitleType::TitleAuthor, false);
-        assert_eq!(remove_metadata_lines(input, &metadata), "\n本文");
+        assert_eq!(remove_metadata_lines(input, &metadata), "本文");
+    }
+    #[test]
+    fn drops_separator_blank_before_hidden_comment_block() {
+        let input =
+            "表題\n著者名\n\n-------------------------------------------------------\n注記\n本文";
+        let metadata = detect_meta(input, TitleType::TitleAuthor, false);
+        assert_eq!(
+            remove_metadata_lines(input, &metadata),
+            "-------------------------------------------------------\n注記\n本文"
+        );
+    }
+    #[test]
+    fn removes_separator_blank_from_gaiji_title_fixture() {
+        let input = "｜ルビ※［＃米印］《るび》※［＃米印］※［＃始め二重山括弧］※［＃終わり二重山括弧］\n\
+                     テスト《てすと》\n\
+                     \n\
+                     -------------------------------------------------------\n\
+                     注記";
+        let config = AozoraConfig::default();
+        let metadata = aozora_epub3_lite::detect_meta_with_gaiji(
+            input,
+            TitleType::TitleAuthor,
+            false,
+            &config.gaiji,
+        );
+        assert_eq!(
+            remove_metadata_lines(input, &metadata),
+            "-------------------------------------------------------\n注記"
+        );
+    }
+    #[test]
+    fn removes_separator_blank_from_real_ruby_fixture() {
+        let bytes = std::fs::read("sample/AozoraEpub3/test_data/test_ruby.txt").unwrap();
+        let text = decode_text(&bytes, None).unwrap();
+        let config = AozoraConfig::default();
+        let metadata = aozora_epub3_lite::detect_meta_with_gaiji(
+            &text,
+            TitleType::TitleAuthor,
+            false,
+            &config.gaiji,
+        );
+        let body = remove_metadata_lines(&text, &metadata);
+        assert!(!body.starts_with('\n'), "{body:?}");
+        let sections =
+            aozora_epub3_lite::aozora_text_to_xhtml_sections_with_config(&body, &config).unwrap();
+        assert!(
+            !sections[0].starts_with("    <p><br/></p>"),
+            "{:?}",
+            sections[0]
+        );
     }
     #[test]
     fn sanitizes_file_name_hostile_characters() {
