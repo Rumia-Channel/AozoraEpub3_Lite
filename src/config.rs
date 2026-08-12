@@ -170,6 +170,7 @@ pub struct AozoraConfig {
     pub comment_print: bool,
     pub comment_convert: bool,
     pub title_page_write: bool,
+    pub title_page_type: usize,
     pub split_page_breaks: bool,
     pub remove_empty_line: usize,
     pub max_empty_line: usize,
@@ -306,6 +307,7 @@ impl Default for AozoraConfig {
             comment_print: false,
             comment_convert: false,
             title_page_write: false,
+            title_page_type: 0,
             split_page_breaks: true,
             remove_empty_line: 0,
             max_empty_line: 0,
@@ -373,6 +375,9 @@ impl AozoraConfig {
         let comment_print = ini.get_bool("CommentPrint").unwrap_or(false);
         let comment_convert = ini.get_bool("CommentConvert").unwrap_or(false);
         let title_page_write = ini.get_bool("TitlePageWrite").unwrap_or(false);
+        let title_page_type = get_usize("TitlePage")
+            .filter(|value| *value <= 2)
+            .unwrap_or(0);
         let auto_yoko = ini.get_bool("AutoYoko").unwrap_or(false);
         let auto_yoko_num1 = ini.get_bool("AutoYokoNum1").unwrap_or(false);
         let auto_yoko_num3 = ini.get_bool("AutoYokoNum3").unwrap_or(false);
@@ -400,8 +405,9 @@ impl AozoraConfig {
             force_page_break_chapter_size,
             comment_print,
             title_page_write,
-            comment_convert,
+            title_page_type,
             auto_yoko,
+            comment_convert,
             auto_yoko_num1,
             auto_yoko_num3,
             auto_yoko_eq1,
@@ -699,6 +705,16 @@ mod tests {
         assert!(!AozoraConfig::default().title_page_write);
         let config = AozoraConfig::from_ini(IniSettings::parse("TitlePageWrite=1\n").unwrap());
         assert!(config.title_page_write);
+    }
+    #[test]
+    fn reads_java_title_page_type() {
+        let middle =
+            AozoraConfig::from_ini(IniSettings::parse("TitlePageWrite=1\nTitlePage=1\n").unwrap());
+        assert!(middle.title_page_write);
+        assert_eq!(middle.title_page_type, 1);
+        let normal =
+            AozoraConfig::from_ini(IniSettings::parse("TitlePageWrite=1\nTitlePage=0\n").unwrap());
+        assert_eq!(normal.title_page_type, 0);
     }
 
     #[test]

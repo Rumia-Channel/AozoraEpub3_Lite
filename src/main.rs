@@ -193,7 +193,7 @@ fn convert_input(
             suffix.as_deref(),
         );
         let mut book = EpubBook::from_sections(metadata, sections)
-            .with_title_page_if(config.title_page_write)
+            .with_title_page_if(config.title_page_write && matches!(config.title_page_type, 1 | 2))
             .with_vertical(vertical)
             .with_kindle(is_kindle(options))
             .with_assets(assets);
