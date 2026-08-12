@@ -585,6 +585,23 @@ mod tests {
     }
 
     #[test]
+    fn renders_svg_image_section_with_fixed_layout_viewport() {
+        let body = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480"><image width="640" height="480" xlink:href="../image/0001.png"/></svg>"#;
+        let book = EpubBook::new(EpubMetadata::new("画像", "urn:uuid:test"), body);
+        let cursor = book.write_to(Cursor::new(Vec::new())).unwrap();
+        let mut archive = ZipArchive::new(cursor).unwrap();
+        let mut section = String::new();
+        archive
+            .by_name("item/xhtml/0001.xhtml")
+            .unwrap()
+            .read_to_string(&mut section)
+            .unwrap();
+        assert!(section.contains("fixed-layout-jp.css"));
+        assert!(section.contains("name=\"viewport\" content=\"width=640, height=480\""));
+        assert!(section.contains("<svg xmlns=\"http://www.w3.org/2000/svg\""));
+    }
+
+    #[test]
     fn renders_page_alignment_and_horizontal_layout() {
         let book = EpubBook::from_sections(
             EpubMetadata::new("題名", "urn:uuid:test"),

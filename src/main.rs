@@ -258,6 +258,20 @@ fn entry_suffix(entry: &TextEntry) -> String {
 
 /// Converts an image-only archive (CBZ) into an EPUB with one page per
 /// image, the first image (name-sorted) as the cover.
+fn svg_image_fragment(path: &str, dimensions: ImageDimensions) -> String {
+    format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\" \
+         xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"100%\" height=\"100%\" \
+         viewBox=\"0 0 {} {}\"><image width=\"{}\" height=\"{}\" \
+         xlink:href=\"../image/{}\"/></svg>",
+        dimensions.width,
+        dimensions.height,
+        dimensions.width,
+        dimensions.height,
+        escape_html(path),
+    )
+}
+
 fn convert_image_only(
     input: &Input,
     options: &CliOptions,
@@ -278,10 +292,15 @@ fn convert_image_only(
                 format!("unsupported image type: {path}"),
             )
         })?;
-        sections.push(format!(
-            "<p><img class=\"fit\" src=\"../image/{}\" alt=\"\"/></p>",
-            escape_html(path)
-        ));
+        let fragment = image_dimensions(data, media_type)
+            .map(|dimensions| svg_image_fragment(path, dimensions))
+            .unwrap_or_else(|| {
+                format!(
+                    "<p><img class=\"fit\" src=\"../image/{}\" alt=\"\"/></p>",
+                    escape_html(path)
+                )
+            });
+        sections.push(fragment);
         assets.push(EpubAsset::new(
             format!("image/{path}"),
             media_type,
@@ -770,6 +789,14 @@ impl ImagePageType {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ImagePageFit {
+    None,
+    Width,
+    Height,
+    HeightPercent(f32),
+}
+
 fn image_setting_f32(config: &AozoraConfig, key: &str, default: f32) -> f32 {
     config
         .ini
@@ -788,6 +815,14 @@ fn image_setting_usize(config: &AozoraConfig, key: &str, default: usize) -> usiz
 
 fn image_setting_bool(config: &AozoraConfig, key: &str, default: bool) -> bool {
     config.ini.get_bool(key).unwrap_or(default)
+}
+
+fn image_rotation(config: &AozoraConfig) -> Option<i32> {
+    match config.ini.get("RotateImage").map(str::trim) {
+        Some("1") => Some(90),
+        Some("2") => Some(-90),
+        _ => None,
+    }
 }
 
 fn image_page_type(
@@ -820,7 +855,7 @@ fn image_page_type(
         || (dimensions.width >= single_page_size_width
             && dimensions.height >= single_page_size_height);
     if eligible && tag_level == 0 && !has_caption {
-        let fit_image = image_setting_bool(config, "FitImage", true);
+        let fit_image = image_setting_bool(config, "FitImage", false);
         let image_size_type = image_setting_usize(config, "ImageSizeType", 2);
         if image_width <= display_width && image_height < display_height {
             if !fit_image {
@@ -833,6 +868,79 @@ fn image_page_type(
     }
 
     ImagePageType::Inline
+}
+fn rotated_dimensions(
+    dimensions: ImageDimensions,
+    config: &AozoraConfig,
+    page_type: ImagePageType,
+) -> ImageDimensions {
+    if page_type.is_page()
+        && image_rotation(config).is_some()
+        && should_rotate(
+            dimensions,
+            image_setting_f32(config, "DispW", 600.0),
+            image_setting_f32(config, "DispH", 800.0),
+        )
+    {
+        ImageDimensions {
+            width: dimensions.height,
+            height: dimensions.width,
+        }
+    } else {
+        dimensions
+    }
+}
+
+fn image_page_fit(
+    dimensions: ImageDimensions,
+    config: &AozoraConfig,
+    has_caption: bool,
+    page_type: ImagePageType,
+) -> ImagePageFit {
+    if !page_type.is_page() || has_caption {
+        return ImagePageFit::None;
+    }
+    let dimensions = rotated_dimensions(dimensions, config, page_type);
+    let display_width = image_setting_f32(config, "DispW", 600.0);
+    let display_height = image_setting_f32(config, "DispH", 800.0);
+    if display_width <= 0.0 || display_height <= 0.0 {
+        return ImagePageFit::None;
+    }
+    let image_width =
+        dimensions.width as f32 * image_setting_f32(config, "ImageScale", 1.0).max(0.0);
+    let image_height =
+        dimensions.height as f32 * image_setting_f32(config, "ImageScale", 1.0).max(0.0);
+    if image_width <= display_width && image_height < display_height {
+        return ImagePageFit::None;
+    }
+    match image_setting_usize(config, "ImageSizeType", 2) {
+        1 => ImagePageFit::None,
+        3 if image_width / image_height > display_width / display_height => ImagePageFit::Width,
+        2 if image_width / image_height > display_width / display_height => {
+            ImagePageFit::HeightPercent(
+                (image_height / image_width * display_width / display_height * 100.0)
+                    .clamp(0.0, 100.0),
+            )
+        }
+        _ => ImagePageFit::Height,
+    }
+}
+
+fn image_float_type(dimensions: ImageDimensions, config: &AozoraConfig) -> Option<(usize, bool)> {
+    let float_type = image_setting_usize(config, "ImageFloatType", 0);
+    let float_width = image_setting_usize(config, "ImageFloatW", 0) as u32;
+    let float_height = image_setting_usize(config, "ImageFloatH", 0) as u32;
+    if float_type == 0
+        || (dimensions.width < 64 && dimensions.height < 64)
+        || dimensions.width > float_width
+        || dimensions.height > float_height
+    {
+        return None;
+    }
+    let display_width = image_setting_f32(config, "DispW", 600.0);
+    let scaled_width =
+        dimensions.width as f32 * image_setting_f32(config, "ImageScale", 1.0).max(0.0);
+    Some((float_type, scaled_width > display_width))
 }
 
 fn image_tag_in_line(line: &str) -> Option<&str> {
@@ -867,6 +975,15 @@ fn is_standalone_image_line(line: &str) -> bool {
     inner.starts_with("<img") && inner.ends_with("/>")
 }
 
+fn should_split_image_page(
+    dimensions: ImageDimensions,
+    config: &AozoraConfig,
+    has_caption: bool,
+) -> bool {
+    image_page_type(dimensions, config, has_caption, 0).is_page()
+        && !image_setting_bool(config, "ImageFloatPage", false)
+}
+
 fn split_image_page_sections(
     section: &str,
     assets: &[EpubAsset],
@@ -877,16 +994,14 @@ fn split_image_page_sections(
     for line in section.split_inclusive('\n') {
         if is_standalone_image_line(line)
             && let Some((asset, has_caption)) = image_asset_for_line(line, assets)
-            && image_page_type(
+            && should_split_image_page(
                 image_dimensions(&asset.data, &asset.media_type).unwrap_or(ImageDimensions {
                     width: 0,
                     height: 0,
                 }),
                 config,
                 has_caption,
-                0,
             )
-            .is_page()
         {
             let prefix: String = current.concat();
             if !prefix.trim().is_empty() {
@@ -922,7 +1037,14 @@ fn standalone_image_page_type(
     }
     let (asset, has_caption) = image_asset_for_line(section, assets)?;
     let dimensions = image_dimensions(&asset.data, &asset.media_type)?;
-    Some(image_page_type(dimensions, config, has_caption, 0))
+    let page_type = image_page_type(dimensions, config, has_caption, 0);
+    Some(
+        if page_type.is_page() && image_setting_bool(config, "ImageFloatPage", false) {
+            ImagePageType::Inline
+        } else {
+            page_type
+        },
+    )
 }
 
 fn reflow_image_sections(sections: &mut Vec<String>, assets: &[EpubAsset], config: &AozoraConfig) {
@@ -958,14 +1080,42 @@ fn reflow_image_sections(sections: &mut Vec<String>, assets: &[EpubAsset], confi
     *sections = output;
 }
 
+fn image_wrapper_range(original: &str, image_start: usize) -> Option<(usize, usize)> {
+    let start = original[..image_start].rfind("<span")?;
+    let end = start + original[start..].find('>')? + 1;
+    original[end..image_start]
+        .trim()
+        .is_empty()
+        .then_some((start, end))
+}
+
+fn render_image_tag(
+    source: &str,
+    alt: &str,
+    class_name: Option<&str>,
+    style: Option<&str>,
+    dimensions: Option<ImageDimensions>,
+) -> String {
+    let class = class_name
+        .map(|value| format!(" class=\"{value}\""))
+        .unwrap_or_default();
+    let dimensions = dimensions
+        .map(|value| format!(" width=\"{}\" height=\"{}\"", value.width, value.height))
+        .unwrap_or_default();
+    let style = style
+        .filter(|value| !value.is_empty())
+        .map(|value| format!(" style=\"{value}\""))
+        .unwrap_or_default();
+    format!(
+        "<img{class}{dimensions}{style} src=\"{}\" alt=\"{alt}\"/>",
+        escape_html(source)
+    )
+}
+
 fn decorate_image_tags(sections: &mut [String], assets: &[EpubAsset], config: &AozoraConfig) {
     let display_width = image_setting_f32(config, "DispW", 600.0);
     let display_height = image_setting_f32(config, "DispH", 800.0);
-    let rotation = match config.ini.get("RotateImage") {
-        Some("1") => Some(90),
-        Some("2") => Some(-90),
-        _ => None,
-    };
+    let rotation = image_rotation(config);
 
     for section in sections.iter_mut() {
         let original = section.clone();
@@ -1005,44 +1155,141 @@ fn decorate_image_tags(sections: &mut [String], assets: &[EpubAsset], config: &A
             } else {
                 image_width_ratio(dimensions, config, has_caption)
             };
-            let rotate =
-                rotation.filter(|_| should_rotate(dimensions, display_width, display_height));
             let alt = escape_html(tag_attribute(tag, "alt").unwrap_or_default().trim());
-            let new_tag = if let Some(angle) = rotate.filter(|_| page_type.is_page()) {
-                format!(
-                    "<img class=\"fit\" width=\"{}\" height=\"{}\" style=\"transform: rotate({angle}deg); transform-origin: center;\" src=\"{}\" alt=\"{}\"/>",
-                    dimensions.width,
-                    dimensions.height,
-                    escape_html(source),
-                    alt
+            let wrapper =
+                image_wrapper_range(&original, start).filter(|(wrapper_start, wrapper_end)| {
+                    &original[*wrapper_start..*wrapper_end] == "<span>"
+                });
+
+            if tag_attribute(tag, "class")
+                .is_some_and(|class| class.split_whitespace().any(|name| name == "gaiji"))
+            {
+                let class_name = match image_orientation(dimensions, config) {
+                    1 => "gaiji-wide",
+                    2 => "gaiji-line",
+                    _ => "gaiji",
+                };
+                replacements.push((
+                    start,
+                    end,
+                    render_image_tag(source, &alt, Some(class_name), None, None),
+                ));
+                cursor = end;
+                continue;
+            }
+
+            let page_fit = image_page_fit(dimensions, config, has_caption, page_type);
+            let float_type = image_float_type(dimensions, config);
+            let page_float =
+                page_type.is_page() && image_setting_bool(config, "ImageFloatPage", false);
+            let block_float =
+                !page_type.is_page() && image_setting_bool(config, "ImageFloatBlock", false);
+            let (wrapper_replacement, image_class, image_style, image_dimensions) = if page_float {
+                let style = match page_fit {
+                    ImagePageFit::Width => Some("width:100%;".to_owned()),
+                    ImagePageFit::Height => Some("height:100%;".to_owned()),
+                    ImagePageFit::HeightPercent(value) => {
+                        Some(format!("height:{value:.1}%; min-height:{value:.1}%;"))
+                    }
+                    ImagePageFit::None => None,
+                };
+                (
+                    Some("<span class=\"img fpage\">".to_owned()),
+                    None,
+                    style,
+                    None,
                 )
+            } else if page_type.is_page() {
+                let style = match page_fit {
+                    ImagePageFit::HeightPercent(value) => {
+                        Some(format!("height:{value:.1}%; min-height:{value:.1}%;"))
+                    }
+                    ImagePageFit::Width => Some("width:100%;".to_owned()),
+                    ImagePageFit::Height | ImagePageFit::None => None,
+                };
+                let dimensions = rotation
+                    .filter(|_| should_rotate(dimensions, display_width, display_height))
+                    .map(|_| dimensions);
+                (Some("<span>".to_owned()), Some("fit"), style, dimensions)
+            } else if let Some((float_type, _)) = float_type {
+                let class = if float_type == 1 { "ft" } else { "fb" };
+                if ratio > 0.0 {
+                    (
+                        Some(format!(
+                            "<span class=\"img {class}\" style=\"width:{ratio}%\">"
+                        )),
+                        None,
+                        Some("width:100%".to_owned()),
+                        None,
+                    )
+                } else {
+                    let class = if float_type == 1 {
+                        "float-start m-end-1em"
+                    } else {
+                        "float-end m-start-1em"
+                    };
+                    (
+                        Some(format!("<span class=\"{class}\">")),
+                        Some("fit"),
+                        None,
+                        None,
+                    )
+                }
+            } else if block_float {
+                if ratio > 0.0 {
+                    (
+                        Some(format!(
+                            "<span class=\"img fblk\" style=\"width:{ratio}%\">"
+                        )),
+                        None,
+                        Some("width:100%".to_owned()),
+                        None,
+                    )
+                } else {
+                    (
+                        Some("<span class=\"img fblk\">".to_owned()),
+                        Some("fit"),
+                        None,
+                        None,
+                    )
+                }
             } else if ratio > 0.0 {
-                format!(
-                    "<img style=\"width:100%\" src=\"{}\" alt=\"{}\"/>",
-                    escape_html(source),
-                    alt
+                (
+                    Some(format!("<span class=\"img\" style=\"width:{ratio}%\">")),
+                    None,
+                    Some("width:100%".to_owned()),
+                    None,
                 )
             } else {
-                format!(
-                    "<img class=\"fit\" src=\"{}\" alt=\"{}\"/>",
-                    escape_html(source),
-                    alt
-                )
+                (None, Some("fit"), None, None)
             };
-            if ratio > 0.0
-                && let Some(span_start) = original[..start].rfind("<span")
-                && let Some(span_end_offset) = original[span_start..].find('>')
+            let angle = rotation
+                .filter(|_| page_type.is_page())
+                .filter(|_| should_rotate(dimensions, display_width, display_height));
+            let image_style = if let Some(angle) = angle {
+                Some(format!(
+                    "{}transform: rotate({angle}deg); transform-origin: center;",
+                    image_style.as_deref().unwrap_or_default()
+                ))
+            } else {
+                image_style
+            };
+            if let Some((span_start, span_end)) = wrapper
+                && let Some(wrapper_replacement) = wrapper_replacement
             {
-                let span_end = span_start + span_end_offset + 1;
-                if &original[span_start..span_end] == "<span>" {
-                    replacements.push((
-                        span_start,
-                        span_end,
-                        format!("<span class=\"img\" style=\"width:{ratio}%\">"),
-                    ));
-                }
+                replacements.push((span_start, span_end, wrapper_replacement));
             }
-            replacements.push((start, end, new_tag));
+            replacements.push((
+                start,
+                end,
+                render_image_tag(
+                    source,
+                    &alt,
+                    image_class,
+                    image_style.as_deref(),
+                    image_dimensions,
+                ),
+            ));
             cursor = end;
         }
 
@@ -1050,6 +1297,33 @@ fn decorate_image_tags(sections: &mut [String], assets: &[EpubAsset], config: &A
         for (start, end, replacement) in replacements {
             section.replace_range(start..end, &replacement);
         }
+    }
+}
+
+fn image_orientation(dimensions: ImageDimensions, config: &AozoraConfig) -> i32 {
+    if (config.vertical && dimensions.width <= 64) || (!config.vertical && dimensions.height <= 64)
+    {
+        return -1;
+    }
+    let dimensions = if image_rotation(config).is_some()
+        && should_rotate(
+            dimensions,
+            image_setting_f32(config, "DispW", 600.0),
+            image_setting_f32(config, "DispH", 800.0),
+        ) {
+        ImageDimensions {
+            width: dimensions.height,
+            height: dimensions.width,
+        }
+    } else {
+        dimensions
+    };
+    if dimensions.width == dimensions.height {
+        0
+    } else if dimensions.width > dimensions.height {
+        1
+    } else {
+        2
     }
 }
 
@@ -1083,9 +1357,9 @@ fn should_rotate(dimensions: ImageDimensions, display_width: f32, display_height
     let image_ratio = dimensions.width as f32 / dimensions.height as f32;
     let display_ratio = display_width / display_height;
     if display_width < display_height {
-        image_ratio > 1.0 && 1.0 / image_ratio < display_ratio
+        image_ratio > 1.1 && 1.0 / image_ratio < display_ratio
     } else {
-        image_ratio < 1.0 && 1.0 / image_ratio > display_ratio
+        image_ratio < 1.0 / 1.1 && 1.0 / image_ratio > display_ratio
     }
 }
 
@@ -1652,6 +1926,50 @@ mod tests {
         assert!(sections[0].contains("<span class=\"img\" style=\"width:76.5%\">"));
         assert!(sections[0].contains("<img style=\"width:100%\""));
         assert!(!sections[0].contains("width=\"459\""));
+    }
+
+    #[test]
+    fn applies_java_float_image_classes() {
+        let mut png = vec![0; 24];
+        png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        png[16..20].copy_from_slice(&500u32.to_be_bytes());
+        png[20..24].copy_from_slice(&300u32.to_be_bytes());
+        let asset = EpubAsset::new("image/float.png", "image/png", png);
+        let config = AozoraConfig::from_ini(
+            IniSettings::parse(
+                "DispW=600\nDispH=800\nImageFloatType=1\nImageFloatW=600\nImageFloatH=400\n",
+            )
+            .unwrap(),
+        );
+        let mut sections = vec![
+            "<p><span><img class=\"fit\" src=\"../image/float.png\" alt=\"\"/></span></p>"
+                .to_owned(),
+        ];
+        decorate_image_tags(&mut sections, &[asset], &config);
+        assert!(sections[0].contains("<span class=\"img ft\""));
+        assert!(sections[0].contains("style=\"width:83.33333%\""));
+    }
+
+    #[test]
+    fn emits_height_fit_for_landscape_image_pages() {
+        let mut png = vec![0; 24];
+        png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        png[16..20].copy_from_slice(&1200u32.to_be_bytes());
+        png[20..24].copy_from_slice(&600u32.to_be_bytes());
+        let asset = EpubAsset::new("image/page.png", "image/png", png);
+        let config = AozoraConfig::from_ini(
+            IniSettings::parse(
+                "DispW=600\nDispH=800\nFitImage=1\nImageSizeType=2\nSinglePageWidth=550\n",
+            )
+            .unwrap(),
+        );
+        let mut sections = vec![
+            "<p><span><img class=\"fit\" src=\"../image/page.png\" alt=\"\"/></span></p>"
+                .to_owned(),
+        ];
+        decorate_image_tags(&mut sections, &[asset], &config);
+        assert!(sections[0].contains("height:37.5%"));
+        assert!(sections[0].contains("<img class=\"fit\""));
     }
     #[test]
     fn removes_unresolved_local_anchor_targets() {

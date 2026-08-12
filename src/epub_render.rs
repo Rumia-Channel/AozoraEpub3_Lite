@@ -134,8 +134,13 @@ pub(super) fn render_package(
             spine_sections.push_str("    <itemref idref=\"title\"/>\n");
         } else {
             body_number += 1;
+            let properties = if svg_image_body(section.body_fragment.trim()).is_some() {
+                " properties=\"svg\""
+            } else {
+                ""
+            };
             manifest_sections.push_str(&format!(
-                "    <item id=\"section-{body_number:04}\" href=\"xhtml/{body_number:04}.xhtml\" media-type=\"application/xhtml+xml\"/>\n"
+                "    <item id=\"section-{body_number:04}\" href=\"xhtml/{body_number:04}.xhtml\" media-type=\"application/xhtml+xml\"{properties}/>\n"
             ));
             spine_sections.push_str(&format!(
                 "    <itemref idref=\"section-{body_number:04}\"/>\n"
@@ -414,6 +419,30 @@ pub(super) fn render_section(
             kindle_class = kindle_class,
         );
     }
+    if let Some(svg) = svg_image_body(&body_fragment) {
+        let (width, height) = svg_view_box(svg).unwrap_or((1, 1));
+        return format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{language}">
+<head>
+  <meta charset="UTF-8"/>
+  <title>{title}</title>
+  <link rel="stylesheet" type="text/css" href="../style/fixed-layout-jp.css"/>
+  <meta name="viewport" content="width={width}, height={height}"/>
+</head>
+<body>
+  <div class="main">{svg}</div>
+</body>
+</html>
+"#,
+            language = xml_escape(&metadata.language),
+            title = xml_escape(&metadata.title),
+            width = width,
+            height = height,
+            svg = svg,
+        );
+    }
 
     let layout_class = if vertical { "vrtl" } else { "hltr" };
     let page_class = body_class(page_class, kindle);
@@ -509,6 +538,22 @@ fn tag_name(tag: &str) -> (bool, Option<&str>) {
         .find(|&index| !bytes[index].is_ascii_alphanumeric())
         .unwrap_or(bytes.len());
     (closing, (end > start).then(|| &tag[start..end]))
+}
+
+fn svg_image_body(body: &str) -> Option<&str> {
+    let body = body.trim();
+    (body.starts_with("<svg ") && body.ends_with("</svg>")).then_some(body)
+}
+
+fn svg_view_box(svg: &str) -> Option<(u32, u32)> {
+    let marker = "viewBox=\"0 0 ";
+    let start = svg.find(marker)? + marker.len();
+    let value = &svg[start..];
+    let end = value.find('"')?;
+    let mut parts = value[..end].split_whitespace();
+    let width = parts.next()?.parse().ok()?;
+    let height = parts.next()?.parse().ok()?;
+    Some((width, height))
 }
 
 fn replace_tag_name(tag: &str, replacement: &str) -> String {
