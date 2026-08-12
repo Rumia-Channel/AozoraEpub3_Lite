@@ -410,7 +410,7 @@ impl EpubBook {
         write_entry(
             &mut archive,
             "item/nav.xhtml",
-            render_nav(&self.metadata, &self.sections).as_bytes(),
+            render_nav(&self.metadata, &self.sections, self.vertical).as_bytes(),
             CompressionMethod::Deflated,
         )?;
         write_entry(

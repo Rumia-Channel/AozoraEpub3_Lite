@@ -298,8 +298,33 @@ pub(super) fn render_package(
     )
 }
 
-pub(super) fn render_nav(metadata: &EpubMetadata, sections: &[EpubSection]) -> String {
+pub(super) fn render_nav(
+    metadata: &EpubMetadata,
+    sections: &[EpubSection],
+    vertical: bool,
+) -> String {
     let nav_items = render_nav_items(&nav_entries(sections));
+    let toc_style = if vertical {
+        r#"@page {margin:.5em .5em 0 0;}
+html {
+	writing-mode: vertical-rl;
+	-webkit-writing-mode: vertical-rl;
+	-epub-writing-mode: vertical-rl;
+}
+h1 {font-size:1.5em; padding-top:1em;}
+li {padding:0 .25em 0 0;}
+li a {text-decoration:none; border-right-width:1px; border-right-style:solid; padding-right: 1px;}"#
+    } else {
+        r#"@page {margin:.5em 0 0 .5em;}
+html {
+	writing-mode:horizontal-tb;
+	-webkit-writing-mode:horizontal-tb;
+	-epub-writing-mode:horizontal-tb;
+}
+h1 {font-size:1.5em; text-align:center;}
+li {padding:.25em 0 0 0;}
+li a {text-decoration:none; border-bottom-width:1px; border-bottom-style:solid; padding-right: 1px;}"#
+    };
     let first_body = sections
         .iter()
         .enumerate()
@@ -324,15 +349,7 @@ pub(super) fn render_nav(metadata: &EpubMetadata, sections: &[EpubSection]) -> S
 <meta charset="UTF-8"/>
 <title>{title}</title>
 <style type="text/css">
-@page {{margin:.5em 0 0 .5em;}}
-html {{
-	writing-mode:horizontal-tb;
-	-webkit-writing-mode:horizontal-tb;
-	-epub-writing-mode:horizontal-tb;
-}}
-h1 {{font-size:1.5em; text-align:center;}}
-li {{padding:.25em 0 0 0;}}
-li a {{text-decoration:none; border-bottom-width:1px; border-bottom-style:solid; padding-right: 1px;}}
+{toc_style}
 li {{list-style:none;}}
 li.chapter {{list-style:disc; line-height:1.75em;}}
 nav#landmarks {{ display:none; }}
@@ -355,6 +372,7 @@ nav#landmarks {{ display:none; }}
 "#,
         language = xml_escape(&metadata.language),
         title = xml_escape(&metadata.title),
+        toc_style = toc_style,
         landmark = landmark,
         items = nav_items,
     )
