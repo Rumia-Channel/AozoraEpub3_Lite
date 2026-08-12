@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package
+ xmlns="http://www.idpf.org/2007/opf"
+ version="3.0"
+ xml:lang="ja"
+ unique-identifier="unique-id"
+ prefix="rendition: http://www.idpf.org/vocab/rendition/#
+         ebpaj: http://www.ebpaj.jp/
+         fixed-layout-jp: http://www.digital-comic.jp/
+         ibooks: http://vocabulary.itunes.apple.com/rdf/ibooks/vocabulary-extensions-1.0/"
+>
+		<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+<!-- 作品名 -->
+		<dc:title id="title">${title}</dc:title>
+#if (${titleAs})
+		<meta refines="#title" property="file-as">${titleAs}</meta>
+#end
+#if (${creator})
+
+<!-- 著者名 -->
+		<dc:creator id="creator01">${creator}</dc:creator>
+#if (${creatorAs})
+		<meta refines="#creator01" property="role" scheme="marc:relators">aut</meta>
+		<meta refines="#creator01" property="file-as">${creatorAs}</meta>
+		<meta refines="#creator01" property="display-seq">1</meta>
+#end
+#end
+#if (${publisher})
+<!-- 出版社名 -->
+		<dc:publisher id="publisher">${publisher}</dc:publisher>
+#end
+<!-- 言語 -->
+		<dc:language id="pub-lang">${language}</dc:language>
+<!-- ファイルid -->
+		<dc:identifier id="unique-id">urn:uuid:${identifier}</dc:identifier>
+<!-- 更新日 -->
+		<meta property="dcterms:modified">${modified}</meta>
+
+#if (${bookInfo.ImageOnly})
+		<!-- Fixed-Layout Documents指定 -->
+		<meta property="rendition:layout">pre-paginated</meta>
+		<meta property="rendition:spread">landscape</meta>
+		<meta name="original-resolution" content="${coverImage.Width}x${coverImage.Height}"/>
+
+#if (${bookInfo.Vertical})
+		<meta name="primary-writing-mode" content="horizontal-rl"/>
+#else
+		<meta name="primary-writing-mode" content="horizontal-lr"/>
+#end
+#end
+<!-- etc. -->
+<meta property="ebpaj:guide-version">1.1.3</meta>
+<meta property="ibooks:version">1.1.2</meta>
+	</metadata>
+
+	<manifest>
+<!-- navigation -->
+		<item media-type="application/xhtml+xml" id="nav" href="nav.xhtml" properties="nav"/>
+<!-- style -->
+#if (${bookInfo.ImageOnly})
+		<item id="svg_image" href="style/fixed-layout-jp.css" media-type="text/css"/>
+#else
+		<item id="vertical" href="style/aozora.css" media-type="text/css"/>
+		<item id="v_font" href="style/font.css" media-type="text/css"/>
+		<item id="v_text" href="style/text.css" media-type="text/css"/>
+		<item id="fixed-layout-jp" href="style/fixed-layout-jp.css" media-type="text/css"/>
+		<item id="book-style" href="style/book-style.css" media-type="text/css"/>
+		<item id="style-reset" href="style/style-reset.css" media-type="text/css"/>
+		<item id="style-standard" href="style/style-standard.css" media-type="text/css"/>
+		<item id="style-advance" href="style/style-advance.css" media-type="text/css"/>
+#end
+<!-- image -->
+#foreach($image in ${images})
+#if ($image.IsCover)
+		<item media-type="${image.Format}" id="img${image.Id}" href="image/${image.OutFileName}" properties="cover-image"/>
+#else
+		<item id="img${image.Id}" href="image/${image.OutFileName}" media-type="${image.Format}"/>
+#end
+#end
+<!-- xhtml -->
+#if (${bookInfo.InsertCoverPage})
+		<item media-type="application/xhtml+xml" id="cover-page" href="xhtml/cover.xhtml" properties="svg"/>
+
+#end
+#if (${title_page})
+		<item id="title-page" href="xhtml/title.xhtml" media-type="application/xhtml+xml"/>
+#end
+
+#if (${bookInfo.ImageOnly})
+#foreach(${sectionInfo} in ${sections})
+		<item media-type="application/xhtml+xml" id="sec${sectionInfo.SectionId}" href="xhtml/${sectionInfo.SectionId}.xhtml" properties="svg"/>
+#end
+#else
+#foreach(${sectionInfo} in ${sections})
+		<item id="sec${sectionInfo.SectionId}" href="xhtml/${sectionInfo.SectionId}.xhtml" media-type="application/xhtml+xml"/>
+#end
+#end
+#foreach(${gaijiInfo} in ${vecGaijiInfo})
+		<item id="gaiji_$foreach.count" href="gaiji/${gaijiInfo.FileName}" media-type="application/font-sfnt"/>
+#end
+		<item href="toc.ncx" id="ncx" media-type="application/x-dtbncx+xml"/>
+	</manifest>
+
+#if (${bookInfo.Vertical})
+	<spine page-progression-direction="rtl" toc="ncx">
+#else
+	<spine page-progression-direction="ltr" toc="ncx">
+#end
+#if (${bookInfo.InsertCoverPage})
+		   <itemref linear="yes" idref="cover-page" properties="rendition:page-spread-center"/>
+#end
+#if (${title_page})
+		<itemref idref="title-page" linear="yes"/>
+#end
+#if (${bookInfo.InsertTocPage})
+		<itemref idref="nav" linear="yes"/>
+#end
+
+#foreach(${sectionInfo} in ${sections})
+#if (${bookInfo.ImageOnly} && ${bookInfo.Vertical})
+#if ($foreach.count % 2 == 0)
+		<itemref linear="yes" idref="sec${sectionInfo.SectionId}" properties="page-spread-left"/>
+#else
+		<itemref linear="yes" idref="sec${sectionInfo.SectionId}" properties="page-spread-right"/>
+#end
+#elseif (${bookInfo.ImageOnly} && !${bookInfo.Vertical})
+#if ($foreach.count % 2 == 0)
+		<itemref linear="yes" idref="sec${sectionInfo.SectionId}" properties="page-spread-right"/>
+#else
+		<itemref linear="yes" idref="sec${sectionInfo.SectionId}" properties="page-spread-left"/>
+#end
+#else
+		<itemref linear="yes" idref="sec${sectionInfo.SectionId}"/>
+#end
+#end
+	</spine>
+
+</package>

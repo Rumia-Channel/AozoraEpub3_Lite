@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html
+ xmlns="http://www.w3.org/1999/xhtml"
+ xmlns:epub="http://www.idpf.org/2007/ops"
+ xml:lang="ja"
+#if (${sectionInfo.ImagePage} || ${sectionInfo.Middle})
+ class="hltr"
+#elseif (${bookInfo.Vertical})
+ class="vrtl"
+#else
+ class="hltr"
+#end
+>
+<head>
+<meta charset="UTF-8"/>
+<title>${title}</title>
+<link rel="stylesheet" type="text/css" href="../style/book-style.css"/>
+
+#if (${sectionInfo.ImageHeight} > 0)
+<style type="text/css">
+body .img img {
+height: ${sectionInfo.ImageHeightPercent}%;
+min-height: ${sectionInfo.ImageHeightPercent}%;
+}
+</style>
+#end
+</head>
+#set ($body_class = "")
+#set ($sep = "")
+#if ($sectionInfo.ImageFitW || $sectionInfo.ImageFitH)
+#set ($body_class = "p-image")
+#set ($sep = " ")
+#elseif ($sectionInfo.Middle || $sectionInfo.Bottom)
+#set ($body_class = "p-text")
+#set ($sep = " ")
+#end
+#if ($kindle)
+#set ($body_class = "$!{body_class}$!{sep}kindle")
+#set ($sep = " ")
+#end
+#if ($body_class != "")
+#set ($body_class = " class=""${body_class}""")
+#end
+<body$!{body_class}>
+#if ($sectionInfo.Middle)
+<div class="main vrtl block-align-center">
+<div class="start-2em">
+#elseif ($sectionInfo.Bottom)
+<div class="main vrtl block-align-end">
+<div class="start-2em">
+#else
+<div class="main">
+#end
