@@ -1,4 +1,5 @@
 use super::{AozoraConfig, heading_spec};
+const WRC_BREAK_MARKER: char = '\u{0001}';
 
 pub(super) fn convert_inline(input: &str, config: &AozoraConfig) -> String {
     convert_inline_with_auto_yoko(input, config, true)
@@ -11,6 +12,7 @@ fn convert_inline_without_auto_yoko(input: &str, config: &AozoraConfig) -> Strin
 fn convert_inline_with_auto_yoko(input: &str, config: &AozoraConfig, auto_yoko: bool) -> String {
     let input = rewrite_character_replacements(input, config);
     let input = rewrite_suffix_notes(&input, config);
+    let input = rewrite_warichu_breaks(&input);
     let input = rewrite_alternative_gaiji(&input, config);
     let input = if auto_yoko {
         rewrite_auto_yoko(&input, config)
@@ -22,6 +24,17 @@ fn convert_inline_with_auto_yoko(input: &str, config: &AozoraConfig, auto_yoko: 
     let mut index = 0;
     let mut tcy_depth = 0usize;
     while index < chars.len() {
+        if chars[index] == WRC_BREAK_MARKER {
+            output.push_str(
+                config
+                    .inline_notes
+                    .get("改行")
+                    .map(String::as_str)
+                    .unwrap_or("<br/>"),
+            );
+            index += 1;
+            continue;
+        }
         if chars[index] == '※'
             && let Some((end, replacement)) = parse_gaiji_note(&chars, index, config)
         {
@@ -151,9 +164,106 @@ fn convert_inline_with_auto_yoko(input: &str, config: &AozoraConfig, auto_yoko: 
 
         index += push_text_char(&mut output, &chars, index, config, tcy_depth == 0);
     }
-
     output
 }
+fn rewrite_warichu_breaks(input: &str) -> String {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    while index < chars.len() {
+        let Some((open_end, note)) = note_range(&chars, index) else {
+            output.push(chars[index]);
+            index += 1;
+            continue;
+        };
+        if !note.ends_with("割り注") || note.ends_with("終わり") {
+            output.extend(chars[index..open_end].iter());
+            index = open_end;
+            continue;
+        }
+        let close_note = if note.starts_with("ここから") {
+            "ここで割り注終わり"
+        } else {
+            "割り注終わり"
+        };
+        let Some((close_start, close_end)) = find_note(&chars, open_end, close_note) else {
+            output.extend(chars[index..open_end].iter());
+            index = open_end;
+            continue;
+        };
+        output.extend(chars[index..open_end].iter());
+        output.push_str(&rewrite_warichu_body(&chars[open_end..close_start]));
+        output.extend(chars[close_start..close_end].iter());
+        index = close_end;
+    }
+    output
+}
+
+fn rewrite_warichu_body(body: &[char]) -> String {
+    let explicit_break = body.iter().enumerate().find_map(|(index, _)| {
+        let (end, note) = note_range(body, index)?;
+        (note == "改行").then_some((index, end))
+    });
+    if let Some((break_start, break_end)) = explicit_break {
+        let mut output = String::with_capacity(body.len());
+        output.extend(body[..break_start].iter());
+        output.push(WRC_BREAK_MARKER);
+        output.extend(body[break_end..].iter());
+        return output;
+    }
+
+    let mut units = Vec::new();
+    let mut index = 0;
+    while index < body.len() {
+        if let Some((end, _)) = note_range(body, index) {
+            index = end;
+            continue;
+        }
+        if body[index] == '｜' {
+            index += 1;
+            continue;
+        }
+        if body[index] == '《'
+            && let Some(close) = find_closing_ruby(body, index)
+        {
+            index = close + 1;
+            continue;
+        }
+        let width = if is_halfwidth_for_tcy(body[index]) {
+            1
+        } else {
+            2
+        };
+        units.push((index, width));
+        index += 1;
+    }
+    if units.len() < 2 {
+        return body.iter().collect();
+    }
+    if units.last().is_some_and(|(index, _)| body[*index] == '。') {
+        units.pop();
+    }
+    let total = units.iter().map(|(_, width)| *width).sum::<usize>();
+    let half = total.div_ceil(2);
+    let mut width = 0;
+    let break_index = units.iter().find_map(|(index, unit_width)| {
+        if width >= half {
+            Some(*index)
+        } else {
+            width += *unit_width;
+            None
+        }
+    });
+    let Some(break_index) = break_index.filter(|index| *index > 0) else {
+        return body.iter().collect();
+    };
+    let mut output = String::with_capacity(body.len() + 1);
+    output.extend(body[..break_index].iter());
+    output.push(WRC_BREAK_MARKER);
+    output.extend(body[break_index..].iter());
+    output
+}
+
 fn rewrite_character_replacements(input: &str, config: &AozoraConfig) -> String {
     if config.character_replacements.is_empty() {
         return input.to_owned();

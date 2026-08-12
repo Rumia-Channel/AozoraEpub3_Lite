@@ -278,6 +278,40 @@ fn converts_default_grounding_and_special_brackets() {
 }
 
 #[test]
+fn inserts_warichu_line_breaks_like_java() {
+    let output = plain_text_to_xhtml(
+        "［＃割り注］ヒロソヒイ［＃割り注終わり］\n\
+         ［＃割り注］東は字大林四三七［＃改行］西は字神内一一一ノ一［＃割り注終わり］",
+    )
+    .unwrap();
+    assert!(output.contains("<span class=\"wrc\">ヒロソ<br/>ヒイ</span>"));
+    assert!(
+        output.contains("<span class=\"wrc\">東は字大林四三七<br/>西は字神内一一一ノ一</span>")
+    );
+    assert!(!output.contains("［＃"));
+}
+
+#[test]
+fn renders_java_compound_indent_blocks() {
+    let output = plain_text_to_xhtml(
+        "［＃ここから５字下げ、折り返して２字下げ］\n\
+         折り返し本文\n\
+         ［＃ここで字下げ終わり］\n\
+         ［＃ここから３字下げ、４字詰め］\n\
+         字詰め本文\n\
+         ［＃ここで字下げ終わり］\n\
+         ［＃ここから２字下げ、罫囲みと中央揃え］\n\
+         複合本文\n\
+         ［＃ここで字下げ終わり］",
+    )
+    .unwrap();
+    assert!(output.contains("<div class=\"pt2 idt3\">折り返し本文\n</div>"));
+    assert!(output.contains("<div class=\"pt3 jzm4\">字詰め本文\n</div>"));
+    assert!(output.contains("<div class=\"mt2 border center\">複合本文\n</div>"));
+    assert!(!output.contains("［＃"));
+}
+
+#[test]
 fn nests_configured_blocks_and_handles_single_tags_inside() {
     let mut config = AozoraConfig::default();
     config.load_tag_text(

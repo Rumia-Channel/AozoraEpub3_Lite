@@ -243,6 +243,7 @@ struct HeadingSpec {
 
 enum OpenBlock {
     Hardcoded(HeadingSpec),
+    Generated { close_tag: String },
     Configured { fallback_close_tag: String },
 }
 
@@ -312,11 +313,26 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
                     continue;
                 }
 
+                let closes_generated = matches!(blocks.last(), Some(OpenBlock::Generated { .. }))
+                    && is_indent_close_note(note);
+                if closes_generated {
+                    if let Some(OpenBlock::Generated { close_tag }) = blocks.pop() {
+                        fragment.push_str(&close_tag);
+                        fragment.push('\n');
+                    }
+                    continue;
+                }
+
                 let closes_configured = matches!(blocks.last(), Some(OpenBlock::Configured { .. }));
                 if closes_configured && let Some(close_tag) = config.block_close_tags.get(note) {
                     fragment.push_str(close_tag);
                     fragment.push('\n');
                     blocks.pop();
+                    continue;
+                }
+                if let Some((open_tag, close_tag)) = generated_indent_block(note) {
+                    fragment.push_str(&open_tag);
+                    blocks.push(OpenBlock::Generated { close_tag });
                     continue;
                 }
 
@@ -368,6 +384,15 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
                 } else {
                     append_heading(&mut fragment, spec, content.trim_start(), config);
                 }
+                continue;
+            }
+            if let Some((open_tag, close_tag)) = generated_indent_block(note) {
+                fragment.push_str(&open_tag);
+                if !rest.trim().is_empty() {
+                    fragment.push_str(&convert_inline(rest.trim_start(), config));
+                    fragment.push('\n');
+                }
+                blocks.push(OpenBlock::Generated { close_tag });
                 continue;
             }
             if let Some(spec) = block_heading_spec(note) {
@@ -424,6 +449,10 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
                 fragment.push_str("</");
                 fragment.push_str(spec.element);
                 fragment.push_str(">\n");
+            }
+            OpenBlock::Generated { close_tag } => {
+                fragment.push_str(&close_tag);
+                fragment.push('\n');
             }
             OpenBlock::Configured { fallback_close_tag } => {
                 fragment.push_str(&fallback_close_tag);
@@ -599,6 +628,62 @@ fn heading_spec(note: &str) -> Option<HeadingSpec> {
         }),
         _ => None,
     }
+}
+
+fn generated_indent_block(note: &str) -> Option<(String, String)> {
+    let rest = note.strip_prefix("ここから")?;
+    let (indent, rest) = parse_fullwidth_number(rest)?;
+    let rest = rest.strip_prefix("字下げ")?;
+    let rest = rest.strip_prefix('、')?;
+
+    let (class_name, _) = if let Some(rest) = rest.strip_prefix("折り返して") {
+        let (wrapped, rest) = parse_fullwidth_number(rest)?;
+        let rest = rest.strip_prefix("字下げ")?;
+        (
+            format!("pt{wrapped} idt{}", indent.saturating_sub(wrapped)),
+            rest,
+        )
+    } else if let Some(width) = parse_fullwidth_number(rest)
+        .and_then(|(width, rest)| rest.strip_prefix("字詰め").map(|_| width))
+    {
+        (format!("pt{indent} jzm{width}"), "")
+    } else {
+        let mut classes = vec![format!("mt{indent}")];
+        for (needle, class) in [
+            ("破線罫囲み", "dashed_border"),
+            ("罫囲み", "border"),
+            ("破線枠囲み", "dashed_border"),
+            ("枠囲み", "border"),
+            ("中央揃え", "center"),
+            ("横書き", "yoko"),
+        ] {
+            if rest.contains(needle) {
+                classes.push(class.to_owned());
+            }
+        }
+        (classes.join(" "), rest)
+    };
+    Some((format!("<div class=\"{class_name}\">"), "</div>".to_owned()))
+}
+
+fn parse_fullwidth_number(input: &str) -> Option<(usize, &str)> {
+    let mut value = 0usize;
+    let mut end = 0;
+    for (index, character) in input.char_indices() {
+        let digit = match character {
+            '０'..='９' => character as u32 - '０' as u32,
+            '0'..='9' => character as u32 - '0' as u32,
+            _ => break,
+        };
+        value = value.checked_mul(10)?.checked_add(digit as usize)?;
+        end = index + character.len_utf8();
+    }
+    (end > 0).then_some((value, &input[end..]))
+}
+
+fn is_indent_close_note(note: &str) -> bool {
+    note.strip_prefix("ここで字下げ")
+        .is_some_and(|rest| rest == "終わり" || rest == "終り" || rest.ends_with("終わり"))
 }
 
 fn block_heading_spec(note: &str) -> Option<HeadingSpec> {
