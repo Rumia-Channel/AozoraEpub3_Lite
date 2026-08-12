@@ -65,7 +65,7 @@ pub fn plain_text_to_xhtml_with_config(
 
 fn visible_lines(input: &str, config: &AozoraConfig) -> Vec<String> {
     let mut in_comment = false;
-    input
+    let lines = input
         .lines()
         .filter_map(|line| {
             if is_comment_line(line) {
@@ -82,7 +82,50 @@ fn visible_lines(input: &str, config: &AozoraConfig) -> Vec<String> {
             }
             Some(line.to_owned())
         })
-        .collect()
+        .collect::<Vec<_>>();
+    normalize_empty_lines(lines, config)
+}
+
+fn normalize_empty_lines(lines: Vec<String>, config: &AozoraConfig) -> Vec<String> {
+    if config.remove_empty_line == 0 && config.max_empty_line == 0 {
+        return lines;
+    }
+    let mut output = Vec::with_capacity(lines.len());
+    let mut empty_count = 0usize;
+    let mut after_heading = false;
+    for line in lines {
+        let is_empty = line.trim().is_empty()
+            || (config.remove_empty_line > 0 && line.chars().all(char::is_whitespace));
+        if is_empty {
+            empty_count += 1;
+            continue;
+        }
+        append_empty_lines(&mut output, empty_count, config, after_heading);
+        empty_count = 0;
+        after_heading = line.contains("見出し");
+        output.push(line);
+    }
+    append_empty_lines(&mut output, empty_count, config, after_heading);
+    output
+}
+
+fn append_empty_lines(
+    output: &mut Vec<String>,
+    empty_count: usize,
+    config: &AozoraConfig,
+    after_heading: bool,
+) {
+    if empty_count == 0 {
+        return;
+    }
+    let mut keep = empty_count.saturating_sub(config.remove_empty_line);
+    if config.max_empty_line > 0 {
+        keep = keep.min(config.max_empty_line);
+    }
+    if after_heading && keep == 0 {
+        keep = 1;
+    }
+    output.extend(std::iter::repeat_with(String::new).take(keep));
 }
 
 fn escape_comment_line(line: &str) -> String {
@@ -172,6 +215,18 @@ fn append_section_line(
     if line.trim().is_empty() && current.is_empty() && page_marker.is_some() {
         return;
     }
+    if should_force_page_break(current, line, config) {
+        trim_trailing_empty_lines(current);
+        if !current.is_empty() {
+            sections.push(render_marked_lines(
+                current.iter().map(String::as_str),
+                config,
+                *page_marker,
+            ));
+            current.clear();
+        }
+        *page_marker = None;
+    }
     if config.split_page_breaks
         && let Some((prefix, image, suffix)) = split_image_line(line)
     {
@@ -199,6 +254,39 @@ fn append_section_line(
         return;
     }
     current.push(line.to_owned());
+}
+fn should_force_page_break(current: &[String], line: &str, config: &AozoraConfig) -> bool {
+    if !config.force_page_break || current.is_empty() || line.trim().is_empty() {
+        return false;
+    }
+    let page_size = current
+        .iter()
+        .map(|value| value.len().saturating_add(8))
+        .sum::<usize>();
+    if page_size > config.force_page_break_size {
+        return true;
+    }
+    let empty_lines = current
+        .iter()
+        .rev()
+        .take_while(|value| value.trim().is_empty())
+        .count();
+    if config.force_page_break_empty_line > 0
+        && empty_lines >= config.force_page_break_empty_line
+        && page_size > config.force_page_break_empty_size
+    {
+        return true;
+    }
+    config.force_page_break_chapter_level > 0
+        && page_size > config.force_page_break_chapter_size
+        && is_chapter_line(line)
+}
+
+fn is_chapter_line(line: &str) -> bool {
+    let Some((note, _)) = heading_note_at_start(line) else {
+        return false;
+    };
+    heading_spec(note).is_some() || block_heading_spec(note).is_some() || note.contains("見出し")
 }
 
 fn trim_trailing_empty_lines(lines: &mut Vec<String>) {

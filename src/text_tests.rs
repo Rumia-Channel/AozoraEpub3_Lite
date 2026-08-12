@@ -1,4 +1,7 @@
-use super::{aozora_text_to_xhtml_sections, decode_input, image_references, plain_text_to_xhtml};
+use super::{
+    aozora_text_to_xhtml_sections, aozora_text_to_xhtml_sections_with_config, decode_input,
+    image_references, plain_text_to_xhtml,
+};
 use crate::config::{AozoraConfig, IniSettings};
 use encoding_rs::SHIFT_JIS;
 
@@ -27,6 +30,22 @@ fn preserves_or_converts_comment_blocks_per_config() {
         AozoraConfig::from_ini(IniSettings::parse("CommentPrint=1\nCommentConvert=1\n").unwrap());
     let converted = super::plain_text_to_xhtml_with_config(input, &converted_config).unwrap();
     assert!(converted.contains("<span class=\"bold\">注記</span>"));
+}
+
+#[test]
+fn applies_empty_line_limits_and_force_page_breaks() {
+    let config = AozoraConfig::from_ini(
+        IniSettings::parse("RemoveEmptyLine=1\nMaxEmptyLine=2\nPageBreak=1\nPageBreakSize=1\n")
+            .unwrap(),
+    );
+    let output = super::plain_text_to_xhtml_with_config("前\n\n\n\n後", &config).unwrap();
+    assert_eq!(output.matches("<p><br/></p>").count(), 2);
+
+    let long_line = "あ".repeat(600);
+    let sections =
+        aozora_text_to_xhtml_sections_with_config(&format!("{long_line}\n後"), &config).unwrap();
+    assert_eq!(sections.len(), 2);
+    assert!(sections[1].contains("<p>後</p>"));
 }
 
 #[test]

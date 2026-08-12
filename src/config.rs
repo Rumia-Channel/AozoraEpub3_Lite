@@ -137,6 +137,15 @@ pub struct AozoraConfig {
     pub comment_convert: bool,
     pub title_page_write: bool,
     pub split_page_breaks: bool,
+    pub remove_empty_line: usize,
+    pub max_empty_line: usize,
+    pub force_indent: bool,
+    pub force_page_break: bool,
+    pub force_page_break_size: usize,
+    pub force_page_break_empty_line: usize,
+    pub force_page_break_empty_size: usize,
+    pub force_page_break_chapter_level: usize,
+    pub force_page_break_chapter_size: usize,
     pub auto_yoko: bool,
     pub auto_yoko_num1: bool,
     pub auto_yoko_num3: bool,
@@ -264,6 +273,15 @@ impl Default for AozoraConfig {
             comment_convert: false,
             title_page_write: false,
             split_page_breaks: true,
+            remove_empty_line: 0,
+            max_empty_line: 0,
+            force_indent: false,
+            force_page_break: false,
+            force_page_break_size: 0,
+            force_page_break_empty_line: 0,
+            force_page_break_empty_size: 0,
+            force_page_break_chapter_level: 0,
+            force_page_break_chapter_size: 0,
             auto_yoko: true,
             auto_yoko_num1: true,
             auto_yoko_num3: true,
@@ -284,9 +302,46 @@ impl Default for AozoraConfig {
         config
     }
 }
+
 impl AozoraConfig {
     pub fn from_ini(ini: IniSettings) -> Self {
+        let get_usize = |key: &str| ini.get(key).and_then(|value| value.parse::<usize>().ok());
         let split_page_breaks = ini.get_bool("PageBreak").unwrap_or(false);
+        let remove_empty_line = get_usize("RemoveEmptyLine").unwrap_or(0);
+        let max_empty_line = get_usize("MaxEmptyLine").unwrap_or(0);
+        let force_indent = ini.get_bool("ForceIndent").unwrap_or(false);
+        let force_page_break_empty_line =
+            if split_page_breaks && ini.get_bool("PageBreakEmpty").unwrap_or(false) {
+                get_usize("PageBreakEmptyLine").unwrap_or(0)
+            } else {
+                0
+            };
+        let force_page_break_empty_size = get_usize("PageBreakEmptySize")
+            .unwrap_or(0)
+            .saturating_mul(1024);
+        let force_page_break_chapter_level =
+            if split_page_breaks && ini.get_bool("PageBreakChapter").unwrap_or(false) {
+                1
+            } else {
+                0
+            };
+        let force_page_break_chapter_size = get_usize("PageBreakChapterSize")
+            .unwrap_or(0)
+            .saturating_mul(1024);
+        let mut force_page_break_size = if split_page_breaks {
+            get_usize("PageBreakSize").unwrap_or(0).saturating_mul(1024)
+        } else {
+            0
+        };
+        if force_page_break_empty_line > 0 {
+            force_page_break_size = force_page_break_size.max(force_page_break_empty_size);
+        }
+        if force_page_break_chapter_level > 0 {
+            force_page_break_size = force_page_break_size.max(force_page_break_chapter_size);
+        }
+        let force_page_break = force_page_break_size > 0
+            || (force_page_break_empty_line > 0 && force_page_break_empty_size > 0)
+            || (force_page_break_chapter_level > 0 && force_page_break_chapter_size > 0);
         let comment_print = ini.get_bool("CommentPrint").unwrap_or(false);
         let comment_convert = ini.get_bool("CommentConvert").unwrap_or(false);
         let title_page_write = ini.get_bool("TitlePageWrite").unwrap_or(false);
@@ -306,6 +361,15 @@ impl AozoraConfig {
         Self {
             ini,
             split_page_breaks,
+            remove_empty_line,
+            max_empty_line,
+            force_indent,
+            force_page_break,
+            force_page_break_size,
+            force_page_break_empty_line,
+            force_page_break_empty_size,
+            force_page_break_chapter_level,
+            force_page_break_chapter_size,
             comment_print,
             title_page_write,
             comment_convert,
@@ -321,7 +385,6 @@ impl AozoraConfig {
             ..Self::default()
         }
     }
-
     pub fn load(
         config_dir: Option<&Path>,
         preset_path: Option<&Path>,
