@@ -90,9 +90,9 @@ fn converts_explicit_and_implicit_ruby() {
 }
 
 #[test]
-fn groups_extended_kanji_in_implicit_ruby_bases() {
+fn groups_java_kanji_in_implicit_ruby_bases() {
     let output = plain_text_to_xhtml("〆切《しめきり》 漢字𥈽漢字《かんじがいじかんじ》").unwrap();
-    assert!(output.contains("<ruby>〆切<rt>しめきり</rt></ruby>"));
+    assert!(output.contains("〆<ruby>切<rt>しめきり</rt></ruby>"));
     assert!(output.contains("<ruby>漢字𥈽漢字<rt>かんじがいじかんじ</rt></ruby>"));
 }
 
@@ -208,18 +208,22 @@ fn keeps_suffix_tcy_notes_outside_following_ruby() {
 }
 
 #[test]
-fn converts_gaiji_notes_inside_ruby_readings() {
-    let output = plain_text_to_xhtml("｜漢字《※［＃米印］》").unwrap();
-    assert!(output.contains("<ruby>漢字<rt>※</rt></ruby>"));
-    assert!(!output.contains("［＃米印］"));
+fn preserves_gaiji_notes_inside_ruby_readings() {
+    let input = "｜漢字《※［＃米印］》";
+    let output = plain_text_to_xhtml(input).unwrap();
+    assert!(output.contains("<ruby>漢字<rt>※［＃米印］</rt></ruby>"));
 }
+
 #[test]
 fn keeps_gaiji_brackets_literal_inside_ruby() {
     let output = plain_text_to_xhtml(
         "｜※［＃始め二重山括弧］29※［＃終わり二重山括弧］《※［＃始め二重山括弧］29※［＃終わり二重山括弧］》",
     )
     .unwrap();
-    assert!(output.contains("<ruby>《29》<rt>《29》</rt></ruby>"));
+    assert!(
+        output
+            .contains("<ruby>《29》<rt>※［＃始め二重山括弧］29※［＃終わり二重山括弧］</rt></ruby>")
+    );
     assert!(!output.contains("<ruby>《29<rt>"));
 }
 
@@ -565,15 +569,13 @@ fn drops_java_unsupported_left_ruby_notes() {
 }
 
 #[test]
-fn drops_unhandled_aozora_notes_instead_of_emitting_markup() {
+fn preserves_java_unconverted_notes_and_drops_unknown_markers() {
     let output = plain_text_to_xhtml(
         "大空文庫［＃「大空文庫」に「ママ」の注記］\n\
          本文［＃注記未定義］",
     )
     .unwrap();
-    assert!(output.contains("<p>大空文庫</p>"));
+    assert!(output.contains("大空文庫［＃「大空文庫」に「ママ」の注記］"));
     assert!(output.contains("<p>本文</p>"));
-    assert!(!output.contains("ママ"));
     assert!(!output.contains("注記未定義"));
-    assert!(!output.contains("［＃"));
 }

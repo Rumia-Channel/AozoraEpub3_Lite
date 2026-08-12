@@ -38,6 +38,7 @@ fn convert_inline_with_auto_yoko(input: &str, config: &AozoraConfig, auto_yoko: 
         if chars[index] == '※'
             && let Some((end, replacement)) = parse_image_note(&chars, index + 1, config)
         {
+            output.push('※');
             output.push_str(&replacement);
             index = end;
             continue;
@@ -145,30 +146,27 @@ fn convert_inline_with_auto_yoko(input: &str, config: &AozoraConfig, auto_yoko: 
 
         if chars[index] == '《'
             && let Some(close) = find_closing_ruby(&chars, index)
+            && index > 0
+            && ruby_base_kind(chars[index - 1]) == Some(0)
         {
-            if let Some(base_kind) = index
-                .checked_sub(1)
-                .and_then(|base_index| ruby_base_kind(chars[base_index]))
-            {
-                let mut base_start = index - 1;
-                while base_start > 0 && ruby_base_kind(chars[base_start - 1]) == Some(base_kind) {
-                    base_start -= 1;
-                }
-                let base = chars[base_start..index].iter().collect::<String>();
-                let escaped_base = escape_html(&base);
-                if output.ends_with(&escaped_base) {
-                    output.truncate(output.len() - escaped_base.len());
-                    let reading = chars[index + 1..close].iter().collect::<String>();
-                    push_ruby(
-                        &mut output,
-                        &base,
-                        &reading,
-                        config,
-                        auto_yoko && tcy_depth == 0,
-                    );
-                    index = close + 1;
-                    continue;
-                }
+            let mut base_start = index - 1;
+            while base_start > 0 && ruby_base_kind(chars[base_start - 1]) == Some(0) {
+                base_start -= 1;
+            }
+            let base = chars[base_start..index].iter().collect::<String>();
+            let escaped_base = escape_html(&base);
+            if output.ends_with(&escaped_base) {
+                output.truncate(output.len() - escaped_base.len());
+                let reading = chars[index + 1..close].iter().collect::<String>();
+                push_ruby(
+                    &mut output,
+                    &base,
+                    &reading,
+                    config,
+                    auto_yoko && tcy_depth == 0,
+                );
+                index = close + 1;
+                continue;
             }
         }
 
@@ -488,22 +486,8 @@ fn contains_literal_gaiji_note(input: &str) -> bool {
     false
 }
 
-fn convert_ruby_reading(reading: &str, config: &AozoraConfig) -> String {
-    let chars = reading.chars().collect::<Vec<_>>();
-    let mut output = String::with_capacity(reading.len());
-    let mut index = 0;
-    while index < chars.len() {
-        if chars[index] == '※'
-            && let Some((end, replacement)) = parse_gaiji_note(&chars, index, config)
-        {
-            output.push_str(&escape_html(&replacement));
-            index = end;
-            continue;
-        }
-        push_escaped_char(&mut output, chars[index]);
-        index += 1;
-    }
-    output
+fn convert_ruby_reading(reading: &str, _config: &AozoraConfig) -> String {
+    escape_html(reading)
 }
 fn rewrite_auto_yoko(input: &str, config: &AozoraConfig) -> String {
     if !config.vertical || !config.auto_yoko {
@@ -877,6 +861,9 @@ fn parse_gaiji_note(
         .and_then(|value| value.strip_suffix('］'))
         .unwrap_or(&note);
     let key = bare_note.split('、').next().unwrap_or(bare_note);
+    if bare_note.contains("※［＃") {
+        return Some((end, escape_html(&note)));
+    }
     let normalized_note = crate::config::normalize_gaiji_key(&note);
     if let Some(replacement) = config
         .gaiji
@@ -890,22 +877,7 @@ fn parse_gaiji_note(
     if let Some(replacement) = unicode_replacement(bare_note, config) {
         return Some((end, replacement));
     }
-    let opening = config
-        .inline_notes
-        .get("行右小書き")
-        .or_else(|| config.inline_notes.get("上付き小文字"))
-        .map(String::as_str)
-        .unwrap_or("<span class=\"super\">");
-    let closing = config
-        .inline_notes
-        .get("行右小書き終わり")
-        .or_else(|| config.inline_notes.get("上付き小文字終わり"))
-        .map(String::as_str)
-        .unwrap_or("</span>");
-    Some((
-        end,
-        format!("〓{opening}（{}）{closing}", escape_html(key.trim())),
-    ))
+    Some((end, escape_html(&note)))
 }
 
 fn gaiji_note_range(chars: &[char], start: usize) -> Option<(usize, String)> {
@@ -915,13 +887,24 @@ fn gaiji_note_range(chars: &[char], start: usize) -> Option<(usize, String)> {
     {
         return None;
     }
-    let close = chars
-        .iter()
-        .enumerate()
-        .skip(start + 3)
-        .find_map(|(index, character)| (*character == '］').then_some(index))?;
-    let note = chars[start..=close].iter().collect::<String>();
-    Some((close + 1, note))
+    let mut depth = 1usize;
+    let mut index = start + 3;
+    while index < chars.len() {
+        if chars.get(index) == Some(&'［') && chars.get(index + 1) == Some(&'＃') {
+            depth += 1;
+            index += 2;
+            continue;
+        }
+        if chars[index] == '］' {
+            depth -= 1;
+            if depth == 0 {
+                let note = chars[start..=index].iter().collect::<String>();
+                return Some((index + 1, note));
+            }
+        }
+        index += 1;
+    }
+    None
 }
 
 fn parse_hex_code(input: &str, start: usize) -> Option<(u32, usize)> {
@@ -1233,8 +1216,19 @@ fn parse_inline_note(
         .skip(start + 2)
         .find_map(|(index, character)| (*character == '］').then_some(index))?;
     let note = chars[start + 2..close].iter().collect::<String>();
-    let replacement = config.inline_notes.get(&note).cloned().unwrap_or_default();
+    let replacement = config
+        .inline_notes
+        .get(&note)
+        .cloned()
+        .or_else(|| should_preserve_unconverted_note(&note).then(|| format!("［＃{note}］")))
+        .unwrap_or_default();
     Some((close + 1, replacement))
+}
+
+fn should_preserve_unconverted_note(note: &str) -> bool {
+    note.contains('「')
+        && note.contains('」')
+        && !(note.contains("左に") && (note.contains("ルビ") || note.contains("注記付き")))
 }
 fn parse_configured_markup(
     chars: &[char],
@@ -1436,14 +1430,7 @@ fn is_half_space(character: char) -> bool {
 
 fn ruby_base_kind(character: char) -> Option<u8> {
     match character as u32 {
-        0x3400..=0x4dbf
-        | 0x4e00..=0x9fff
-        | 0xf900..=0xfaff
-        | 0x20000..=0x2ffff
-        | 0x3005
-        | 0x3006
-        | 0x3013
-        | 0x303b => Some(0),
+        0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff | 0x20000..=0x2ffff => Some(0),
         0x3041..=0x3096 => Some(1),
         0x30a1..=0x30fa | 0xff61..=0xff9f => Some(2),
         0x20..=0x7e => Some(3),
