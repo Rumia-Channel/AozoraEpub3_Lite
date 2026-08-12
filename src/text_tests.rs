@@ -33,6 +33,14 @@ fn preserves_or_converts_comment_blocks_per_config() {
 }
 
 #[test]
+fn normalizes_java_vertical_text_characters() {
+    let output = plain_text_to_xhtml("≪≫“”〝〟―").unwrap();
+    assert!(output.contains("《》〝〟〝〟─"));
+    assert!(!output.contains("≪"));
+    assert!(!output.contains("≫"));
+}
+
+#[test]
 fn applies_empty_line_limits_and_force_page_breaks() {
     let config = AozoraConfig::from_ini(
         IniSettings::parse("RemoveEmptyLine=1\nMaxEmptyLine=2\nPageBreak=1\nPageBreakSize=1\n")

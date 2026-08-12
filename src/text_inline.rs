@@ -1190,10 +1190,13 @@ fn push_text_char(
     config: &AozoraConfig,
     allow_upright: bool,
 ) -> usize {
+    let next_mark = chars
+        .get(index + 1)
+        .copied()
+        .and_then(normalize_dakuten_mark);
     if config.vertical
         && config.dakuten_type == 1
-        && let Some(mark) = chars.get(index + 1).copied()
-        && matches!(mark, '゛' | '゜')
+        && let Some(mark) = next_mark
         && is_dakuten_base(chars[index])
     {
         if let Some(composed) = compose_dakuten(chars[index], mark) {
@@ -1208,7 +1211,7 @@ fn push_text_char(
         return 2;
     }
 
-    let character = chars[index];
+    let character = normalize_vertical_character(chars[index], config.vertical);
     if allow_upright && is_upright_character(character) {
         output.push_str("<span class=\"upr\">");
         push_escaped_char(output, character);
@@ -1217,6 +1220,27 @@ fn push_text_char(
         push_escaped_char(output, character);
     }
     1
+}
+
+fn normalize_dakuten_mark(character: char) -> Option<char> {
+    match character {
+        '゛' | '゙' => Some('゛'),
+        '゜' | '゚' => Some('゜'),
+        _ => None,
+    }
+}
+
+fn normalize_vertical_character(character: char, vertical: bool) -> char {
+    match (vertical, character) {
+        (true, '≪') | (false, '≪') => '《',
+        (true, '≫') | (false, '≫') => '》',
+        (true, '“') => '〝',
+        (true, '”') => '〟',
+        (_, '―') => '─',
+        (_, '゙') => '゛',
+        (_, '゚') => '゜',
+        _ => character,
+    }
 }
 
 fn is_dakuten_base(character: char) -> bool {
