@@ -185,6 +185,13 @@ fn auto_combines_ruby_bases_when_auto_yoko_is_enabled() {
     assert!(explicit.contains("<span class=\"tcy\"><ruby>29<rt>二十九</rt></ruby></span>"));
     assert!(!explicit.contains("<ruby><span class=\"tcy\">29</span>"));
 }
+#[test]
+fn keeps_auto_yoko_markup_inside_horizontal_blocks() {
+    let output =
+        plain_text_to_xhtml("［＃ここから横組み］\n横組み100円\n［＃ここで横組み終わり］").unwrap();
+    assert!(output.contains("<span class=\"tcy\">100</span>"));
+    assert!(!output.contains("&lt;span class=&quot;tcy&quot;"));
+}
 
 #[test]
 fn keeps_suffix_tcy_notes_outside_following_ruby() {
