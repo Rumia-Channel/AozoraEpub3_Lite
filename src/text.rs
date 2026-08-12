@@ -92,6 +92,9 @@ fn visible_lines(input: &str, config: &AozoraConfig) -> Vec<String> {
 }
 
 fn force_indent_line(line: &mut String) {
+    if line.starts_with(RAW_COMMENT_PREFIX) {
+        return;
+    }
     let mut chars = line.chars();
     let Some(first) = chars.next() else {
         return;
