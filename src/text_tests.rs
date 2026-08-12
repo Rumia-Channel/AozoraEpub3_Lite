@@ -90,6 +90,13 @@ fn converts_explicit_and_implicit_ruby() {
 }
 
 #[test]
+fn groups_extended_kanji_in_implicit_ruby_bases() {
+    let output = plain_text_to_xhtml("〆切《しめきり》 漢字𥈽漢字《かんじがいじかんじ》").unwrap();
+    assert!(output.contains("<ruby>〆切<rt>しめきり</rt></ruby>"));
+    assert!(output.contains("<ruby>漢字𥈽漢字<rt>かんじがいじかんじ</rt></ruby>"));
+}
+
+#[test]
 fn splits_sections_at_page_break_tags() {
     let sections = aozora_text_to_xhtml_sections("前\n［＃改ページ］\n後").unwrap();
     assert_eq!(sections.len(), 2);

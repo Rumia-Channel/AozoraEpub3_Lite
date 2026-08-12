@@ -1436,7 +1436,14 @@ fn is_half_space(character: char) -> bool {
 
 fn ruby_base_kind(character: char) -> Option<u8> {
     match character as u32 {
-        0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff => Some(0),
+        0x3400..=0x4dbf
+        | 0x4e00..=0x9fff
+        | 0xf900..=0xfaff
+        | 0x20000..=0x2ffff
+        | 0x3005
+        | 0x3006
+        | 0x3013
+        | 0x303b => Some(0),
         0x3041..=0x3096 => Some(1),
         0x30a1..=0x30fa | 0xff61..=0xff9f => Some(2),
         0x20..=0x7e => Some(3),
