@@ -706,24 +706,24 @@ fn parse_raw_anchor(chars: &[char], start: usize) -> Option<(usize, String)> {
         .skip(start + 1)
         .find_map(|(index, character)| (*character == '>').then_some(index))?;
     let raw = chars[start..=end].iter().collect::<String>();
-    let replacement = if raw == "<a>" || raw == "</a>" {
+    let lower = raw.to_ascii_lowercase();
+    let replacement = if lower == "<a>" || lower == "</a>" {
         raw
-    } else if let Some(url) = raw
-        .strip_prefix("<a href=\"")
-        .and_then(|value| value.strip_suffix("\">"))
-    {
-        if url.contains('"') || url.contains('<') || url.contains('>') {
+    } else if lower.starts_with("<a") {
+        if let Some(name) = raw_tag_attribute(&raw, "name") {
+            let name = name.trim();
+            if name.is_empty() || name.contains('<') || name.contains('>') {
+                return None;
+            }
+            format!("<a id=\"{}\">", escape_html(name))
+        } else if let Some(href) = raw_tag_attribute(&raw, "href") {
+            if href.contains('"') || href.contains('<') || href.contains('>') {
+                return None;
+            }
+            format!("<a href=\"{}\">", escape_html(href))
+        } else {
             return None;
         }
-        format!("<a href=\"{}\">", escape_html(url))
-    } else if let Some(url) = raw
-        .strip_prefix("<a href='")
-        .and_then(|value| value.strip_suffix("'>"))
-    {
-        if url.contains('\'') || url.contains('<') || url.contains('>') {
-            return None;
-        }
-        format!("<a href=\"{}\">", escape_html(url))
     } else {
         return None;
     };
@@ -790,7 +790,7 @@ fn image_path_from_note(chars: &[char], start: usize) -> Option<(usize, String)>
 pub(super) fn split_image_line(line: &str) -> Option<(String, String, String)> {
     let chars = line.chars().collect::<Vec<_>>();
     for start in 0..chars.len() {
-        let Some((end, _)) = image_path_from_note(&chars, start) else {
+        let Some((end, _, _description)) = image_note_parts(&chars, start) else {
             continue;
         };
         let prefix = chars[..start].iter().collect::<String>();

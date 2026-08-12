@@ -69,12 +69,13 @@ fn run() -> Result<(), Box<dyn Error>> {
         .as_deref()
         .or(options.ini.as_deref())
         .map(Path::new);
-    let config_dirs = options
-        .config_dirs
-        .iter()
-        .map(|dir| Path::new(dir.as_str()))
-        .collect::<Vec<_>>();
-    let config = AozoraConfig::load_from_dirs(&config_dirs, preset)?;
+    let config_dirs = if options.config_dirs.is_empty() {
+        vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/aozora")]
+    } else {
+        options.config_dirs.iter().map(PathBuf::from).collect()
+    };
+    let config_dir_refs = config_dirs.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let config = AozoraConfig::load_from_dirs(&config_dir_refs, preset)?;
     let vertical = options
         .horizontal
         .unwrap_or_else(|| config.ini.get_bool("Vertical").unwrap_or(true));
@@ -171,6 +172,7 @@ fn convert_input(
             .into_iter()
             .map(|item| item.asset)
             .collect::<Vec<_>>();
+        sanitize_anchor_links(&mut sections);
         decorate_image_tags(&mut sections, &assets, config);
 
         let metadata = build_metadata(
@@ -546,6 +548,74 @@ fn tag_attribute<'a>(tag: &'a str, attribute: &str) -> Option<&'a str> {
     let start = tag.find(&marker)? + marker.len();
     let end = tag[start..].find('"')?;
     Some(&tag[start..start + end])
+}
+
+/// Makes local EPUB fragment links self-contained by removing references to
+/// missing external documents. Named anchors are emitted as XHTML `id`s by
+/// the inline converter, so fragment links remain valid across sections.
+fn sanitize_anchor_links(sections: &mut [String]) {
+    let mut ids = std::collections::BTreeMap::new();
+    for (section_index, section) in sections.iter().enumerate() {
+        let mut cursor = 0;
+        while let Some(offset) = section[cursor..].find(" id=\"") {
+            let start = cursor + offset + 5;
+            let Some(end) = section[start..].find('"') else {
+                break;
+            };
+            ids.insert(section[start..start + end].to_owned(), section_index);
+            cursor = start + end + 1;
+        }
+    }
+    for (section_index, section) in sections.iter_mut().enumerate() {
+        let mut cursor = 0;
+        while let Some(offset) = section[cursor..].find("<a href=\"") {
+            let start = cursor + offset;
+            let href_start = start + "<a href=\"".len();
+            let Some(href_end) = section[href_start..].find('"') else {
+                break;
+            };
+            let href_end = href_start + href_end;
+            let href = &section[href_start..href_end];
+            let replacement = if let Some(fragment) = href.strip_prefix('#') {
+                ids.get(fragment).map(|target_index| {
+                    if *target_index == section_index {
+                        format!("<a href=\"#{fragment}\">")
+                    } else {
+                        format!("<a href=\"{:04}.xhtml#{fragment}\">", target_index + 1)
+                    }
+                })
+            } else if href.starts_with("http://")
+                || href.starts_with("https://")
+                || href.starts_with("mailto:")
+            {
+                None
+            } else {
+                ids.get(href).map(|target_index| {
+                    if *target_index == section_index {
+                        format!("<a href=\"#{href}\">")
+                    } else {
+                        format!("<a href=\"{:04}.xhtml#{href}\">", target_index + 1)
+                    }
+                })
+            };
+            if let Some(replacement) = replacement {
+                let tag_end = section[start..].find('>').map(|value| start + value + 1);
+                if let Some(tag_end) = tag_end {
+                    section.replace_range(start..tag_end, &replacement);
+                    cursor = start + replacement.len();
+                    continue;
+                }
+            } else if href.starts_with('#') || !href.contains(':') {
+                let tag_end = section[start..].find('>').map(|value| start + value + 1);
+                if let Some(tag_end) = tag_end {
+                    section.replace_range(start..tag_end, "<a>");
+                    cursor = start + 3;
+                    continue;
+                }
+            }
+            cursor = href_end + 1;
+        }
+    }
 }
 /// Rewrites `<img src="../image/REF">` to the resolved asset path in all
 /// sections (needed when an archive stores the image under the text entry's
@@ -1035,7 +1105,7 @@ mod tests {
     use super::{
         AozoraConfig, CliOptions, EpubAsset, ImageDimensions, TitleType, decorate_image_tags,
         detect_meta, image_dimensions, output_path, parse_args, remove_metadata_lines,
-        should_rotate,
+        sanitize_anchor_links, should_rotate,
     };
     use aozora_epub3_lite::IniSettings;
     use std::path::Path;
@@ -1249,6 +1319,17 @@ mod tests {
             vec!["<p><img class=\"fit\" src=\"../image/fig.png\" alt=\"図\"/></p>".to_owned()];
         decorate_image_tags(&mut sections, &[asset], &config);
         assert!(sections[0].contains("width=\"1600\" height=\"900\""));
+
         assert!(sections[0].contains("transform: rotate(90deg)"));
+    }
+    #[test]
+    fn removes_unresolved_local_anchor_targets() {
+        let mut sections = vec![
+            r##"<p><a href="#missing">参照</a></p>"##.to_owned(),
+            r##"<p><a id="present">本文</a><a href="#present">参照</a></p>"##.to_owned(),
+        ];
+        sanitize_anchor_links(&mut sections);
+        assert_eq!(sections[0], "<p><a>参照</a></p>");
+        assert!(sections[1].contains(r##"<a href="#present">参照</a>"##));
     }
 }

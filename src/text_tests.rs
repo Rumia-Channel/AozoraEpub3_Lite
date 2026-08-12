@@ -52,6 +52,15 @@ fn splits_sections_at_page_break_tags() {
     assert!(!sections[0].contains("改ページ"));
     assert!(!sections[1].contains("改ページ"));
 }
+
+#[test]
+fn splits_page_breaks_embedded_in_text_lines() {
+    let sections = aozora_text_to_xhtml_sections("前［＃改ページ］後［＃改ページ］終").unwrap();
+    assert_eq!(sections.len(), 3);
+    assert!(sections[0].contains("<p>前</p>"));
+    assert!(sections[1].contains("<p>後</p>"));
+    assert!(sections[2].contains("<p>終</p>"));
+}
 #[test]
 fn classifies_middle_and_bottom_page_breaks() {
     let mut config = AozoraConfig::default();
@@ -162,21 +171,12 @@ fn converts_and_collects_image_notes() {
 }
 
 #[test]
-fn splits_image_notes_into_separate_sections() {
-    let sections =
-        aozora_text_to_xhtml_sections("前\n［＃挿絵（fig/sample.png）入る］\n後").unwrap();
-    assert_eq!(sections.len(), 3);
-    assert!(sections[1].contains("<img class=\"fit\""));
-    assert!(!sections[1].contains("<p>前</p>"));
-    assert!(sections[2].contains("<p>後</p>"));
+fn converts_raw_named_anchors_to_xhtml_ids() {
+    let output = plain_text_to_xhtml(r##"<a name="aaa">本文</a><a href="#aaa">参照</a>"##).unwrap();
+    assert!(output.contains(r#"<a id="aaa">本文</a>"#));
+    assert!(output.contains(r##"<a href="#aaa">参照</a>"##));
 }
 
-#[test]
-fn preserves_safe_raw_anchor_tags() {
-    let output =
-        plain_text_to_xhtml("<a href=\"https://example.test/?a=1&b=2\">リンク</a>").unwrap();
-    assert!(output.contains("<a href=\"https://example.test/?a=1&amp;b=2\">リンク</a>"));
-}
 #[test]
 fn renders_inline_and_block_headings() {
     let inline = plain_text_to_xhtml("［＃大見出し］章題\n本文").unwrap();

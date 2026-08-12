@@ -108,11 +108,29 @@ pub fn aozora_text_to_xhtml_sections_with_config(
     let mut page_marker = None;
 
     for line in visible_lines(input, config).iter() {
-        if let Some(note) = page_break_note(line)
-            && config.page_break_notes.contains(note)
-        {
+        let mut remainder = line.as_str();
+        loop {
+            let Some((offset, end, note)) = find_page_break_note(remainder, config) else {
+                append_section_line(
+                    remainder,
+                    &mut sections,
+                    &mut current,
+                    &mut page_marker,
+                    config,
+                );
+                break;
+            };
+
+            append_section_line(
+                &remainder[..offset],
+                &mut sections,
+                &mut current,
+                &mut page_marker,
+                config,
+            );
             if config.split_page_breaks {
-                if !current.is_empty() || sections.is_empty() {
+                trim_trailing_empty_lines(&mut current);
+                if !current.is_empty() {
                     sections.push(render_marked_lines(
                         current.iter().map(String::as_str),
                         config,
@@ -120,44 +138,19 @@ pub fn aozora_text_to_xhtml_sections_with_config(
                     ));
                     current.clear();
                 }
-                page_marker = if config.page_middle_notes.contains(note) {
+                page_marker = if config.page_middle_notes.contains(&note) {
                     Some(PAGE_MIDDLE_MARKER)
-                } else if config.page_bottom_notes.contains(note) {
+                } else if config.page_bottom_notes.contains(&note) {
                     Some(PAGE_BOTTOM_MARKER)
                 } else {
                     None
                 };
             }
-            continue;
+            remainder = &remainder[end..];
         }
-        if config.split_page_breaks
-            && let Some((prefix, image, suffix)) = split_image_line(line)
-        {
-            if !prefix.trim().is_empty() {
-                current.push(prefix);
-            }
-            if !current.is_empty() || sections.is_empty() {
-                sections.push(render_marked_lines(
-                    current.iter().map(String::as_str),
-                    config,
-                    page_marker,
-                ));
-                current.clear();
-            }
-            sections.push(render_marked_lines(
-                std::iter::once(image.as_str()),
-                config,
-                None,
-            ));
-            page_marker = None;
-            if !suffix.trim().is_empty() {
-                current.push(suffix);
-            }
-            continue;
-        }
-        current.push(line.to_owned());
     }
 
+    trim_trailing_empty_lines(&mut current);
     if !current.is_empty() || sections.is_empty() {
         sections.push(render_marked_lines(
             current.iter().map(String::as_str),
@@ -167,6 +160,63 @@ pub fn aozora_text_to_xhtml_sections_with_config(
     }
 
     Ok(sections)
+}
+
+fn append_section_line(
+    line: &str,
+    sections: &mut Vec<String>,
+    current: &mut Vec<String>,
+    page_marker: &mut Option<&'static str>,
+    config: &AozoraConfig,
+) {
+    if line.trim().is_empty() && current.is_empty() && page_marker.is_some() {
+        return;
+    }
+    if config.split_page_breaks
+        && let Some((prefix, image, suffix)) = split_image_line(line)
+    {
+        if !prefix.trim().is_empty() {
+            current.push(prefix);
+        }
+        trim_trailing_empty_lines(current);
+        if !current.is_empty() {
+            sections.push(render_marked_lines(
+                current.iter().map(String::as_str),
+                config,
+                *page_marker,
+            ));
+            current.clear();
+        }
+        sections.push(render_marked_lines(
+            std::iter::once(image.as_str()),
+            config,
+            None,
+        ));
+        *page_marker = None;
+        if !suffix.trim().is_empty() {
+            current.push(suffix);
+        }
+        return;
+    }
+    current.push(line.to_owned());
+}
+
+fn trim_trailing_empty_lines(lines: &mut Vec<String>) {
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+}
+
+fn find_page_break_note(line: &str, config: &AozoraConfig) -> Option<(usize, usize, String)> {
+    config
+        .page_break_notes
+        .iter()
+        .filter_map(|note| {
+            let marker = format!("［＃{note}］");
+            line.find(&marker)
+                .map(|offset| (offset, offset + marker.len(), note.clone()))
+        })
+        .min_by_key(|(offset, _, _)| *offset)
 }
 
 const PAGE_MIDDLE_MARKER: &str = "<!-- aozora-page-middle -->";
