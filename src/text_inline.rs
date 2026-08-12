@@ -1233,7 +1233,7 @@ fn parse_inline_note(
         .skip(start + 2)
         .find_map(|(index, character)| (*character == '］').then_some(index))?;
     let note = chars[start + 2..close].iter().collect::<String>();
-    let replacement = config.inline_notes.get(&note)?.clone();
+    let replacement = config.inline_notes.get(&note).cloned().unwrap_or_default();
     Some((close + 1, replacement))
 }
 fn parse_configured_markup(

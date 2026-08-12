@@ -556,3 +556,17 @@ fn drops_java_unsupported_left_ruby_notes() {
     assert!(!output.contains("左に"));
     assert!(!output.contains("のルビ"));
 }
+
+#[test]
+fn drops_unhandled_aozora_notes_instead_of_emitting_markup() {
+    let output = plain_text_to_xhtml(
+        "大空文庫［＃「大空文庫」に「ママ」の注記］\n\
+         本文［＃注記未定義］",
+    )
+    .unwrap();
+    assert!(output.contains("<p>大空文庫</p>"));
+    assert!(output.contains("<p>本文</p>"));
+    assert!(!output.contains("ママ"));
+    assert!(!output.contains("注記未定義"));
+    assert!(!output.contains("［＃"));
+}
