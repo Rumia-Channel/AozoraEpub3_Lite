@@ -151,7 +151,8 @@ fn convert_input(
         let creator = options.creator.as_deref().or(creator.as_deref());
 
         let mut sections = aozora_text_to_xhtml_sections_with_config(&body_text, config)?;
-        let (assets, cover) = collect_assets(&input, entry, &text, options.cover.as_deref())?;
+        let cover_setting = options.cover.as_deref().or_else(|| config.ini.get("Cover"));
+        let (assets, cover) = collect_assets(&input, entry, &text, cover_setting)?;
         for collected in &assets {
             for reference in &collected.references {
                 if collected.resolved != *reference {
@@ -401,7 +402,7 @@ fn collect_assets(
             )
         })?;
         let epub_path = format!("image/{source_path}");
-        if cover == Some("0")
+        if is_auto_cover(cover)
             && cover_asset.is_none()
             && image_dimensions(&data, media_type)
                 .is_some_and(|dimensions| dimensions.width > 64 && dimensions.height > 64)
@@ -420,8 +421,8 @@ fn collect_assets(
     }
 
     match cover {
-        Some("0") => {}
-        Some("1") => {
+        Some(value) if is_auto_cover(Some(value)) || is_no_cover(value) => {}
+        Some(value) if is_same_name_cover(value) => {
             let Some((source, extension)) = same_name_image(input.path()) else {
                 eprintln!(
                     "[WARN] cover image not found next to: {}",
@@ -570,6 +571,21 @@ fn is_external_reference(value: &str) -> bool {
                 character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
             }
         })
+}
+
+fn is_auto_cover(value: Option<&str>) -> bool {
+    value.is_some_and(|value| matches!(value.trim(), "0" | "先頭の挿絵" | "[先頭の挿絵]"))
+}
+
+fn is_same_name_cover(value: &str) -> bool {
+    matches!(
+        value.trim(),
+        "1" | "入力ファイル名と同じ画像(png,jpg,webp)" | "[入力ファイル名と同じ画像(png,jpg,webp)]"
+    )
+}
+
+fn is_no_cover(value: &str) -> bool {
+    matches!(value.trim(), "" | "表紙無し" | "[表紙無し]")
 }
 
 fn sanitize_anchor_links(sections: &mut [String]) {
@@ -943,44 +959,121 @@ fn reflow_image_sections(sections: &mut Vec<String>, assets: &[EpubAsset], confi
 }
 
 fn decorate_image_tags(sections: &mut [String], assets: &[EpubAsset], config: &AozoraConfig) {
-    let display_width = config
-        .ini
-        .get("DispW")
-        .and_then(|value| value.parse::<f32>().ok())
-        .unwrap_or(658.0);
-    let display_height = config
-        .ini
-        .get("DispH")
-        .and_then(|value| value.parse::<f32>().ok())
-        .unwrap_or(905.0);
+    let display_width = image_setting_f32(config, "DispW", 600.0);
+    let display_height = image_setting_f32(config, "DispH", 800.0);
     let rotation = match config.ini.get("RotateImage") {
         Some("1") => Some(90),
         Some("2") => Some(-90),
         _ => None,
     };
 
-    for asset in assets {
-        let Some(dimensions) = image_dimensions(&asset.data, &asset.media_type) else {
-            continue;
-        };
-        let rotate = rotation.filter(|_| should_rotate(dimensions, display_width, display_height));
-        let source = format!("src=\"../{}\"", escape_html(&asset.path));
-        let attributes = match rotate {
-            Some(angle) => format!(
-                "width=\"{}\" height=\"{}\" style=\"transform: rotate({angle}deg); transform-origin: center;\" {source}",
-                dimensions.width, dimensions.height
-            ),
-            None => format!(
-                "width=\"{}\" height=\"{}\" {source}",
-                dimensions.width, dimensions.height
-            ),
-        };
-        for section in sections.iter_mut() {
-            if section.contains(&source) {
-                *section = section.replace(&source, &attributes);
+    for section in sections.iter_mut() {
+        let original = section.clone();
+        let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+        let mut cursor = 0;
+        while let Some(offset) = original[cursor..].find("<img") {
+            let start = cursor + offset;
+            let Some(end_offset) = original[start..].find('>') else {
+                break;
+            };
+            let end = start + end_offset + 1;
+            let tag = &original[start..end];
+            let Some(source) = tag_attribute(tag, "src") else {
+                cursor = end;
+                continue;
+            };
+            let Some(asset) = source
+                .strip_prefix("../")
+                .and_then(|path| assets.iter().find(|asset| asset.path == path))
+            else {
+                cursor = end;
+                continue;
+            };
+            let Some(dimensions) = image_dimensions(&asset.data, &asset.media_type) else {
+                cursor = end;
+                continue;
+            };
+            let line_start = original[..start].rfind('\n').map_or(0, |index| index + 1);
+            let line_end = original[end..]
+                .find('\n')
+                .map_or(original.len(), |index| end + index);
+            let line = &original[line_start..line_end];
+            let has_caption = line.contains("キャプション") || line.contains("caption");
+            let page_type = image_page_type(dimensions, config, has_caption, 0);
+            let ratio = if page_type.is_page() {
+                0.0
+            } else {
+                image_width_ratio(dimensions, config, has_caption)
+            };
+            let rotate =
+                rotation.filter(|_| should_rotate(dimensions, display_width, display_height));
+            let alt = escape_html(tag_attribute(tag, "alt").unwrap_or_default().trim());
+            let new_tag = if let Some(angle) = rotate.filter(|_| page_type.is_page()) {
+                format!(
+                    "<img class=\"fit\" width=\"{}\" height=\"{}\" style=\"transform: rotate({angle}deg); transform-origin: center;\" src=\"{}\" alt=\"{}\"/>",
+                    dimensions.width,
+                    dimensions.height,
+                    escape_html(source),
+                    alt
+                )
+            } else if ratio > 0.0 {
+                format!(
+                    "<img style=\"width:100%\" src=\"{}\" alt=\"{}\"/>",
+                    escape_html(source),
+                    alt
+                )
+            } else {
+                format!(
+                    "<img class=\"fit\" src=\"{}\" alt=\"{}\"/>",
+                    escape_html(source),
+                    alt
+                )
+            };
+            if ratio > 0.0
+                && let Some(span_start) = original[..start].rfind("<span")
+                && let Some(span_end_offset) = original[span_start..].find('>')
+            {
+                let span_end = span_start + span_end_offset + 1;
+                if &original[span_start..span_end] == "<span>" {
+                    replacements.push((
+                        span_start,
+                        span_end,
+                        format!("<span class=\"img\" style=\"width:{ratio}%\">"),
+                    ));
+                }
             }
+            replacements.push((start, end, new_tag));
+            cursor = end;
+        }
+
+        replacements.sort_unstable_by_key(|replacement| std::cmp::Reverse(replacement.0));
+        for (start, end, replacement) in replacements {
+            section.replace_range(start..end, &replacement);
         }
     }
+}
+
+fn image_width_ratio(dimensions: ImageDimensions, config: &AozoraConfig, has_caption: bool) -> f32 {
+    let scale = image_setting_f32(config, "ImageScale", 1.0);
+    if scale == 0.0 {
+        return 0.0;
+    }
+    if config.vertical && dimensions.width <= 64 || !config.vertical && dimensions.height <= 64 {
+        return -1.0;
+    }
+    let display_width = image_setting_f32(config, "DispW", 600.0);
+    let display_height = image_setting_f32(config, "DispH", 800.0);
+    if display_width <= 0.0 || display_height <= 0.0 {
+        return 0.0;
+    }
+    let mut width_ratio = dimensions.width as f32 / display_width * scale * 100.0;
+    let height_ratio = dimensions.height as f32 / display_height * scale * 100.0;
+    if has_caption && height_ratio >= 90.0 {
+        width_ratio *= 100.0 / height_ratio * 0.9;
+    } else if height_ratio >= 100.0 {
+        width_ratio *= 100.0 / height_ratio;
+    }
+    width_ratio.min(100.0)
 }
 
 fn should_rotate(dimensions: ImageDimensions, display_width: f32, display_height: f32) -> bool {
@@ -1538,6 +1631,27 @@ mod tests {
         assert!(sections[0].contains("width=\"1600\" height=\"900\""));
 
         assert!(sections[0].contains("transform: rotate(90deg)"));
+    }
+
+    #[test]
+    fn decorates_inline_images_with_java_width_ratio() {
+        let mut png = vec![0; 24];
+        png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        png[16..20].copy_from_slice(&459u32.to_be_bytes());
+        png[20..24].copy_from_slice(&350u32.to_be_bytes());
+        let asset = EpubAsset::new("image/fig.png", "image/png", png);
+        let config = AozoraConfig::from_ini(
+            IniSettings::parse("DispW=600\nDispH=800\nSinglePageWidth=1000\nImageScale=1\n")
+                .unwrap(),
+        );
+        let mut sections = vec![
+            "<p><span><img class=\"fit\" src=\"../image/fig.png\" alt=\"図\"/></span></p>"
+                .to_owned(),
+        ];
+        decorate_image_tags(&mut sections, &[asset], &config);
+        assert!(sections[0].contains("<span class=\"img\" style=\"width:76.5%\">"));
+        assert!(sections[0].contains("<img style=\"width:100%\""));
+        assert!(!sections[0].contains("width=\"459\""));
     }
     #[test]
     fn removes_unresolved_local_anchor_targets() {

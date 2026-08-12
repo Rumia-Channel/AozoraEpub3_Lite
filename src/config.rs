@@ -83,7 +83,7 @@ impl IniSettings {
                 Some(section) => format!("{section}.{key}"),
                 None => key.to_owned(),
             };
-            values.insert(key, value.trim().to_owned());
+            values.insert(key, decode_unicode_escapes(value.trim()));
         }
 
         Ok(Self { values })
@@ -110,6 +110,40 @@ impl IniSettings {
             .iter()
             .map(|(key, value)| (key.as_str(), value.as_str()))
     }
+}
+
+fn decode_unicode_escapes(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.char_indices().peekable();
+    while let Some((index, character)) = chars.next() {
+        if character != '\\' || chars.peek().map(|(_, value)| *value) != Some('u') {
+            output.push(character);
+            continue;
+        }
+        let escape_start = index;
+        chars.next();
+        let mut digits = String::new();
+        let mut valid = true;
+        for _ in 0..4 {
+            match chars.next() {
+                Some((_, digit)) if digit.is_ascii_hexdigit() => digits.push(digit),
+                _ => {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+        if valid
+            && let Ok(codepoint) = u32::from_str_radix(&digits, 16)
+            && let Some(decoded) = char::from_u32(codepoint)
+        {
+            output.push(decoded);
+        } else {
+            output.push_str(&value[escape_start..]);
+            break;
+        }
+    }
+    output
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -623,6 +657,7 @@ fn load_gaiji_rows(target: &mut BTreeMap<String, String>, input: &str) {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
+
         let fields = line.split('\t').collect::<Vec<_>>();
         if fields.len() < 4 {
             continue;
@@ -649,6 +684,13 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{AozoraConfig, IniSettings};
+    #[test]
+    fn decodes_java_unicode_escapes_in_ini_values() {
+        let ini = IniSettings::parse(r"Cover=[\u5148\u982D\u306E\u633F\u7D75]").unwrap();
+        assert_eq!(ini.get("Cover"), Some("[先頭の挿絵]"));
+        let malformed = IniSettings::parse(r"Value=\u12").unwrap();
+        assert_eq!(malformed.get("Value"), Some(r"\u12"));
+    }
 
     #[test]
     fn parses_flat_and_sectioned_ini_values() {
