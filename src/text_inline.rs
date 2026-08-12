@@ -1,0 +1,1084 @@
+use super::{AozoraConfig, heading_spec};
+
+pub(super) fn convert_inline(input: &str, config: &AozoraConfig) -> String {
+    convert_inline_with_auto_yoko(input, config, true)
+}
+
+fn convert_inline_without_auto_yoko(input: &str, config: &AozoraConfig) -> String {
+    convert_inline_with_auto_yoko(input, config, false)
+}
+
+fn convert_inline_with_auto_yoko(input: &str, config: &AozoraConfig, auto_yoko: bool) -> String {
+    let input = rewrite_character_replacements(input, config);
+    let input = rewrite_suffix_notes(&input, config);
+    let input = rewrite_alternative_gaiji(&input, config);
+    let input = if auto_yoko {
+        rewrite_auto_yoko(&input, config)
+    } else {
+        input
+    };
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::new();
+    let mut index = 0;
+    let mut tcy_depth = 0usize;
+    while index < chars.len() {
+        if chars[index] == '※'
+            && let Some((end, replacement)) = parse_gaiji_note(&chars, index, config)
+        {
+            output.push_str(&replacement);
+            index = end;
+            continue;
+        }
+        if chars[index] == '※'
+            && let Some((end, replacement)) = parse_unicode_note(&chars, index + 1, config)
+        {
+            output.push_str(&replacement);
+            index = end;
+            continue;
+        }
+        if let Some((end, replacement)) = parse_unicode_note(&chars, index, config) {
+            output.push_str(&replacement);
+            index = end;
+            continue;
+        }
+        if let Some((end, replacement)) = parse_image_note(&chars, index, config) {
+            output.push_str(&replacement);
+            index = end;
+            continue;
+        }
+        if let Some((end, replacement)) = parse_inline_heading(&chars, index, config) {
+            output.push_str(&replacement);
+            index = end;
+            continue;
+        }
+        if let Some((end, replacement)) = parse_configured_inline_block(&chars, index, config) {
+            output.push_str(&replacement);
+            index = end;
+            continue;
+        }
+        if let Some((end, replacement)) = parse_inline_note(&chars, index, config) {
+            if is_tcy_open(&replacement, config) {
+                tcy_depth += 1;
+            } else if is_tcy_close(&replacement, config) {
+                tcy_depth = tcy_depth.saturating_sub(1);
+            }
+            output.push_str(&replacement);
+            index = end;
+            continue;
+        }
+        if chars[index] == '<'
+            && let Some((end, markup)) = parse_configured_markup(&chars, index, config)
+        {
+            if is_tcy_open(&markup, config) {
+                tcy_depth += 1;
+            } else if is_tcy_close(&markup, config) {
+                tcy_depth = tcy_depth.saturating_sub(1);
+            }
+            output.push_str(&markup);
+            index = end;
+            continue;
+        }
+        if chars[index] == '<'
+            && let Some((end, replacement)) = parse_raw_image(&chars, index)
+        {
+            output.push_str(&replacement);
+            index = end;
+            continue;
+        }
+        if chars[index] == '<'
+            && let Some((end, replacement)) = parse_raw_anchor(&chars, index)
+        {
+            output.push_str(&replacement);
+            index = end;
+            continue;
+        }
+        if chars[index] == '〔'
+            && let Some(close) = find_closing_latin_bracket(&chars, index)
+        {
+            let inner = &chars[index + 1..close];
+            if inner.iter().copied().all(is_half_space) {
+                let separated = inner.iter().collect::<String>();
+                let replacement = convert_latin(&separated, config);
+                output.push_str(&escape_html(&replacement));
+                index = close + 1;
+                continue;
+            }
+        }
+
+        if chars[index] == '｜'
+            && let Some((open, close)) = find_ruby_bounds(&chars, index + 1)
+        {
+            let base = chars[index + 1..open].iter().collect::<String>();
+            if !base.is_empty() {
+                let reading = chars[open + 1..close].iter().collect::<String>();
+                push_ruby(
+                    &mut output,
+                    &base,
+                    &reading,
+                    config,
+                    auto_yoko && tcy_depth == 0,
+                );
+                index = close + 1;
+                continue;
+            }
+        }
+
+        if chars[index] == '《'
+            && let Some(close) = find_closing_ruby(&chars, index)
+        {
+            let mut base_start = index;
+            while base_start > 0 && is_ruby_base(chars[base_start - 1]) {
+                base_start -= 1;
+            }
+            if base_start < index {
+                let base = chars[base_start..index].iter().collect::<String>();
+                let escaped_base = escape_html(&base);
+                if output.ends_with(&escaped_base) {
+                    output.truncate(output.len() - escaped_base.len());
+                    let reading = chars[index + 1..close].iter().collect::<String>();
+                    push_ruby(
+                        &mut output,
+                        &base,
+                        &reading,
+                        config,
+                        auto_yoko && tcy_depth == 0,
+                    );
+                    index = close + 1;
+                    continue;
+                }
+            }
+        }
+
+        index += push_text_char(&mut output, &chars, index, config, tcy_depth == 0);
+    }
+
+    output
+}
+fn rewrite_character_replacements(input: &str, config: &AozoraConfig) -> String {
+    if config.character_replacements.is_empty() {
+        return input.to_owned();
+    }
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    while index < chars.len() {
+        let replacement = [2, 1].into_iter().find_map(|length| {
+            let candidate = chars.get(index..index + length)?;
+            let key = candidate.iter().collect::<String>();
+            config
+                .character_replacements
+                .get(&key)
+                .map(|value| (length, value.as_str()))
+        });
+        if let Some((length, replacement)) = replacement {
+            output.push_str(replacement);
+            index += length;
+        } else {
+            output.push(chars[index]);
+            index += 1;
+        }
+    }
+    output
+}
+
+fn rewrite_suffix_notes(input: &str, config: &AozoraConfig) -> String {
+    let mut current = input.to_owned();
+
+    loop {
+        let chars = current.chars().collect::<Vec<_>>();
+        let mut index = 0;
+        let mut selected = None;
+
+        while index < chars.len() {
+            if let Some((end, target, suffix)) = suffix_note_at(&chars, index) {
+                if let Some(rule) = config.suffix_notes.get(&suffix) {
+                    let prefix = chars[..index].iter().collect::<String>();
+                    if suffix_target_range(&prefix, &target).is_some() {
+                        let target_length = target.chars().count();
+                        let should_select = selected
+                            .as_ref()
+                            .is_none_or(|(_, _, _, _, _, length)| target_length > *length);
+                        if should_select {
+                            selected = Some((
+                                index,
+                                end,
+                                target,
+                                rule.start.clone(),
+                                rule.end.clone(),
+                                target_length,
+                            ));
+                        }
+                    }
+                }
+                index = end;
+            } else {
+                index += 1;
+            }
+        }
+
+        let Some((start, end, target, start_tag, end_tag, _)) = selected else {
+            return current;
+        };
+        let prefix = chars[..start].iter().collect::<String>();
+        let suffix = chars[end..].iter().collect::<String>();
+        let (target_start, target_end) = suffix_target_range(&prefix, &target).unwrap();
+        let target_at_end = target_end == prefix.len();
+        let start_note = format!("［＃{start_tag}］");
+        let end_note = format!("［＃{end_tag}］");
+        let mut rewritten = prefix;
+        rewritten.insert_str(target_start, &start_note);
+
+        // A suffix note may appear between an explicit ruby base and its
+        // reading marker. Keep the generated tcy span outside the complete
+        // ruby instead of placing the closing note before <rt>.
+        let ruby_end = suffix.strip_prefix('《').and_then(|reading| {
+            reading
+                .find('》')
+                .map(|offset| '《'.len_utf8() + offset + '》'.len_utf8())
+        });
+        if target_at_end && let Some(ruby_end) = ruby_end {
+            rewritten.push_str(&suffix[..ruby_end]);
+            rewritten.push_str(&end_note);
+            rewritten.push_str(&suffix[ruby_end..]);
+        } else {
+            rewritten.insert_str(target_end + start_note.len(), &end_note);
+            rewritten.push_str(&suffix);
+        }
+        current = rewritten;
+    }
+}
+
+fn rewrite_alternative_gaiji(input: &str, config: &AozoraConfig) -> String {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+
+    while index < chars.len() {
+        if let Some((end, note)) = gaiji_note_range(&chars, index) {
+            if let Some(replacement) = config.gaiji_alternatives.get(&note) {
+                output.push_str(replacement);
+            } else {
+                output.extend(chars[index..end].iter());
+            }
+            index = end;
+        } else {
+            output.push(chars[index]);
+            index += 1;
+        }
+    }
+
+    output
+}
+fn rewrite_auto_yoko(input: &str, config: &AozoraConfig) -> String {
+    if !config.vertical || !config.auto_yoko {
+        return input.to_owned();
+    }
+    let open = config
+        .inline_notes
+        .get("縦中横")
+        .map(String::as_str)
+        .unwrap_or("<span class=\"tcy\">");
+    let close = config
+        .inline_notes
+        .get("縦中横終わり")
+        .map(String::as_str)
+        .unwrap_or("</span>");
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    let mut explicit_tcy = false;
+
+    while index < chars.len() {
+        if chars[index] == '［'
+            && chars.get(index + 1) == Some(&'＃')
+            && let Some(close_index) = chars
+                .iter()
+                .enumerate()
+                .skip(index + 2)
+                .find_map(|(candidate, character)| (*character == '］').then_some(candidate))
+        {
+            let note = chars[index + 2..close_index].iter().collect::<String>();
+            output.extend(chars[index..=close_index].iter());
+            explicit_tcy = match note.as_str() {
+                "縦中横" => true,
+                "縦中横終わり" => false,
+                _ => explicit_tcy,
+            };
+            index = close_index + 1;
+            continue;
+        }
+        if explicit_tcy {
+            output.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        if chars[index] == '<'
+            && let Some(close_index) = chars
+                .iter()
+                .enumerate()
+                .skip(index + 1)
+                .find_map(|(candidate, character)| (*character == '>').then_some(candidate))
+        {
+            output.extend(chars[index..=close_index].iter());
+            index = close_index + 1;
+            continue;
+        }
+        if chars[index] == '《'
+            && let Some(close_index) = chars
+                .iter()
+                .enumerate()
+                .skip(index + 1)
+                .find_map(|(candidate, character)| (*character == '》').then_some(candidate))
+        {
+            output.extend(chars[index..=close_index].iter());
+            index = close_index + 1;
+            continue;
+        }
+
+        let is_digit = chars[index].is_ascii_digit();
+        let is_equation = matches!(chars[index], '!' | '?');
+        if is_digit || is_equation {
+            let run_end = chars
+                .iter()
+                .enumerate()
+                .skip(index)
+                .find_map(|(candidate, character)| {
+                    let same_kind = if is_digit {
+                        character.is_ascii_digit()
+                    } else {
+                        matches!(character, '!' | '?')
+                    };
+                    (!same_kind).then_some(candidate)
+                })
+                .unwrap_or(chars.len());
+            let run_length = run_end - index;
+            let take = if is_digit {
+                if run_length >= 3 && config.auto_yoko_num3 {
+                    3
+                } else if run_length == 2 {
+                    2
+                } else if run_length == 1 && config.auto_yoko_num1 {
+                    1
+                } else {
+                    0
+                }
+            } else if run_length >= 3 && config.auto_yoko_eq3 {
+                3
+            } else if run_length == 2 {
+                2
+            } else if run_length == 1 && config.auto_yoko_eq1 {
+                1
+            } else {
+                0
+            };
+            if take > 0
+                && tcy_boundary_before(&chars, index)
+                && tcy_boundary_after(&chars, index + take)
+            {
+                output.push_str(open);
+                output.extend(chars[index..index + take].iter());
+                output.push_str(close);
+                index += take;
+                continue;
+            }
+        }
+
+        output.push(chars[index]);
+        index += 1;
+    }
+    output
+}
+
+fn tcy_boundary_before(chars: &[char], index: usize) -> bool {
+    let mut index = index;
+    while index > 0 {
+        index -= 1;
+        if chars[index].is_ascii_whitespace() {
+            continue;
+        }
+        return !is_halfwidth_for_tcy(chars[index]);
+    }
+    true
+}
+
+fn tcy_boundary_after(chars: &[char], mut index: usize) -> bool {
+    while index < chars.len() {
+        if chars[index].is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        return !is_halfwidth_for_tcy(chars[index]);
+    }
+    true
+}
+
+fn is_halfwidth_for_tcy(character: char) -> bool {
+    character.is_ascii() || (('\u{ff61}'..='\u{ff9f}').contains(&character))
+}
+
+fn suffix_note_at(chars: &[char], start: usize) -> Option<(usize, String, String)> {
+    if chars.get(start) != Some(&'［')
+        || chars.get(start + 1) != Some(&'＃')
+        || chars.get(start + 2) != Some(&'「')
+    {
+        return None;
+    }
+    let target_end = chars
+        .iter()
+        .enumerate()
+        .skip(start + 3)
+        .find_map(|(index, character)| (*character == '」').then_some(index))?;
+    let close = chars
+        .iter()
+        .enumerate()
+        .skip(target_end + 1)
+        .find_map(|(index, character)| (*character == '］').then_some(index))?;
+    let target = chars[start + 3..target_end].iter().collect::<String>();
+    let suffix = chars[target_end + 1..close].iter().collect::<String>();
+    (!target.is_empty() && !suffix.is_empty()).then_some((close + 1, target, suffix))
+}
+
+fn suffix_target_range(output: &str, target: &str) -> Option<(usize, usize)> {
+    let indexed_chars = output.char_indices().collect::<Vec<_>>();
+    let mut visible = Vec::new();
+    let mut index = 0;
+
+    while index < indexed_chars.len() {
+        let (byte_index, character) = indexed_chars[index];
+        if character == '［' && indexed_chars.get(index + 1).map(|(_, value)| *value) == Some('＃')
+        {
+            index = indexed_chars
+                .iter()
+                .enumerate()
+                .skip(index + 2)
+                .find_map(|(candidate, (_, value))| (*value == '］').then_some(candidate + 1))
+                .unwrap_or(index + 1);
+            continue;
+        }
+        if character == '｜' {
+            index += 1;
+            continue;
+        }
+        if character == '《' {
+            index = indexed_chars
+                .iter()
+                .enumerate()
+                .skip(index + 1)
+                .find_map(|(candidate, (_, value))| (*value == '》').then_some(candidate + 1))
+                .unwrap_or(index + 1);
+            continue;
+        }
+        let end = byte_index + character.len_utf8();
+        visible.push((character, byte_index, end));
+        index += 1;
+    }
+
+    let target_chars = target.chars().collect::<Vec<_>>();
+    if target_chars.is_empty() || target_chars.len() > visible.len() {
+        return None;
+    }
+    let match_start = visible.len() - target_chars.len();
+    if !visible[match_start..]
+        .iter()
+        .zip(target_chars)
+        .all(|((character, _, _), target)| *character == target)
+    {
+        return None;
+    }
+
+    let mut start = visible[match_start].1;
+    if start >= '｜'.len_utf8() && output[..start].ends_with('｜') {
+        start -= '｜'.len_utf8();
+    }
+    let mut end = visible.last()?.2;
+    if output[end..].starts_with('《')
+        && let Some(ruby_end) = output[end..].find('》')
+    {
+        end += ruby_end + '》'.len_utf8();
+    }
+    Some((start, end))
+}
+
+fn parse_unicode_note(
+    chars: &[char],
+    start: usize,
+    config: &AozoraConfig,
+) -> Option<(usize, String)> {
+    if chars.get(start) != Some(&'［') || chars.get(start + 1) != Some(&'＃') {
+        return None;
+    }
+    let close = chars
+        .iter()
+        .enumerate()
+        .skip(start + 2)
+        .find_map(|(index, character)| (*character == '］').then_some(index))?;
+    let note = chars[start + 2..close].iter().collect::<String>();
+    let upper = note.to_ascii_uppercase();
+    let (marker, prefix_len) = [
+        upper.find("U+").map(|index| (index, 2)),
+        upper.find("UNICODE").map(|index| (index, 7)),
+        upper.find("UCS").map(|index| (index, 3)),
+    ]
+    .into_iter()
+    .flatten()
+    .min_by_key(|(index, _)| *index)?;
+    let (code, mut end) = parse_hex_code(&upper, marker + prefix_len)?;
+    let mut replacement = String::from(char::from_u32(code)?);
+    if upper.get(end..).is_some_and(|tail| tail.starts_with("-U+")) {
+        let (variation, variation_end) = parse_hex_code(&upper, end + 1 + 2)?;
+        let keep = match variation {
+            0xfe00..=0xfe0f => config.print_ivs_bmp,
+            0xe0100..=0xe01ef => config.print_ivs_ssp,
+            _ => true,
+        };
+        if keep {
+            replacement.push(char::from_u32(variation)?);
+        }
+        end = variation_end;
+    }
+    let _ = end;
+    Some((close + 1, replacement))
+}
+
+fn parse_gaiji_note(
+    chars: &[char],
+    start: usize,
+    config: &AozoraConfig,
+) -> Option<(usize, String)> {
+    let (end, note) = gaiji_note_range(chars, start)?;
+    let bare_note = note
+        .strip_prefix("※［＃")
+        .and_then(|value| value.strip_suffix('］'))
+        .unwrap_or(&note);
+    let key = bare_note.split('、').next().unwrap_or(bare_note);
+    let replacement = config
+        .gaiji
+        .get(&note)
+        .or_else(|| config.gaiji.get(bare_note))
+        .or_else(|| config.gaiji.get(key))?;
+    Some((end, replacement.to_owned()))
+}
+
+fn gaiji_note_range(chars: &[char], start: usize) -> Option<(usize, String)> {
+    if chars.get(start) != Some(&'※')
+        || chars.get(start + 1) != Some(&'［')
+        || chars.get(start + 2) != Some(&'＃')
+    {
+        return None;
+    }
+    let close = chars
+        .iter()
+        .enumerate()
+        .skip(start + 3)
+        .find_map(|(index, character)| (*character == '］').then_some(index))?;
+    let note = chars[start..=close].iter().collect::<String>();
+    Some((close + 1, note))
+}
+
+fn parse_hex_code(input: &str, start: usize) -> Option<(u32, usize)> {
+    let end = input[start..]
+        .char_indices()
+        .find_map(|(offset, character)| (!character.is_ascii_hexdigit()).then_some(start + offset))
+        .unwrap_or(input.len());
+    if end == start {
+        return None;
+    }
+    Some((u32::from_str_radix(&input[start..end], 16).ok()?, end))
+}
+
+fn parse_image_note(
+    chars: &[char],
+    start: usize,
+    config: &AozoraConfig,
+) -> Option<(usize, String)> {
+    let (end, path, description) = image_note_parts(chars, start)?;
+    let source = format!("../image/{}", escape_html(&path));
+    let alt = if config.inline_notes.contains_key("画像") && !description.is_empty() {
+        escape_html(&description)
+    } else {
+        "挿絵".to_owned()
+    };
+    let mut replacement = config
+        .inline_notes
+        .get("画像")
+        .map(|template| format_image_template(template, &source, &alt))
+        .unwrap_or_else(|| format!("<img class=\"fit\" src=\"{source}\" alt=\"{alt}\"/>"));
+    if !description.contains("キャプション付き")
+        && let Some(close) = config.inline_notes.get("画像終わり")
+    {
+        replacement.push_str(close);
+    }
+    Some((end, replacement))
+}
+
+fn format_image_template(template: &str, source: &str, alt: &str) -> String {
+    let mut parts = template.split("%s");
+    let mut output = parts.next().unwrap_or_default().to_owned();
+    if let Some(part) = parts.next() {
+        output.push_str(source);
+        output.push_str(part);
+    }
+    if let Some(part) = parts.next() {
+        output.push_str(alt);
+        output.push_str(part);
+    }
+    output
+}
+
+fn parse_inline_heading(
+    chars: &[char],
+    start: usize,
+    config: &AozoraConfig,
+) -> Option<(usize, String)> {
+    let (note_end, note) = note_range(chars, start)?;
+    let spec = heading_spec(&note)?;
+    let close_note = format!("{note}終わり");
+    let (close_start, close_end) = find_note(chars, note_end, &close_note)?;
+    let inner = chars[note_end..close_start].iter().collect::<String>();
+    let mut replacement = format!("<{} class=\"{}\">", spec.element, spec.class_name);
+    replacement.push_str(&convert_inline(&inner, config));
+    replacement.push_str("</");
+    replacement.push_str(spec.element);
+    replacement.push('>');
+    Some((close_end, replacement))
+}
+
+fn parse_configured_inline_block(
+    chars: &[char],
+    start: usize,
+    config: &AozoraConfig,
+) -> Option<(usize, String)> {
+    let (note_end, note) = note_range(chars, start)?;
+    let (open_tag, close_tag) = config.block_inline_tags.get(&note)?;
+    let close_note = format!("{note}終わり");
+    let (close_start, close_end) = find_note(chars, note_end, &close_note)?;
+    let inner = chars[note_end..close_start].iter().collect::<String>();
+    let mut replacement = open_tag.clone();
+    replacement.push_str(&convert_inline(&inner, config));
+    replacement.push_str(close_tag);
+    Some((close_end, replacement))
+}
+
+fn parse_raw_image(chars: &[char], start: usize) -> Option<(usize, String)> {
+    let end = chars
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find_map(|(index, character)| (*character == '>').then_some(index))?;
+    let raw = chars[start..=end].iter().collect::<String>();
+    let lower = raw.to_ascii_lowercase();
+    if !lower.starts_with("<img") {
+        return None;
+    }
+    let source = raw_tag_attribute(&raw, "src")?;
+    let source = normalize_image_path(source.trim())?;
+    let alt = raw_tag_attribute(&raw, "alt").unwrap_or_default();
+    Some((
+        end + 1,
+        format!(
+            "<img class=\"fit\" src=\"../image/{}\" alt=\"{}\"/>",
+            escape_html(&source),
+            escape_html(alt.trim()),
+        ),
+    ))
+}
+fn raw_tag_attribute<'a>(tag: &'a str, attribute: &str) -> Option<&'a str> {
+    let lower = tag.to_ascii_lowercase();
+    let marker = format!("{attribute}=");
+    let start = lower.match_indices(&marker).find_map(|(index, _)| {
+        let before = lower[..index].chars().next_back();
+        (before.is_none() || before.is_some_and(|character| character.is_ascii_whitespace()))
+            .then_some(index + marker.len())
+    })?;
+    let quote = tag[start..].chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let value = tag[start..].strip_prefix(quote)?;
+    let end = value.find(quote)?;
+    Some(&value[..end])
+}
+
+fn parse_raw_anchor(chars: &[char], start: usize) -> Option<(usize, String)> {
+    let end = chars
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find_map(|(index, character)| (*character == '>').then_some(index))?;
+    let raw = chars[start..=end].iter().collect::<String>();
+    let replacement = if raw == "<a>" || raw == "</a>" {
+        raw
+    } else if let Some(url) = raw
+        .strip_prefix("<a href=\"")
+        .and_then(|value| value.strip_suffix("\">"))
+    {
+        if url.contains('"') || url.contains('<') || url.contains('>') {
+            return None;
+        }
+        format!("<a href=\"{}\">", escape_html(url))
+    } else if let Some(url) = raw
+        .strip_prefix("<a href='")
+        .and_then(|value| value.strip_suffix("'>"))
+    {
+        if url.contains('\'') || url.contains('<') || url.contains('>') {
+            return None;
+        }
+        format!("<a href=\"{}\">", escape_html(url))
+    } else {
+        return None;
+    };
+    Some((end + 1, replacement))
+}
+
+fn note_range(chars: &[char], start: usize) -> Option<(usize, String)> {
+    if chars.get(start) != Some(&'［') || chars.get(start + 1) != Some(&'＃') {
+        return None;
+    }
+    let close = chars
+        .iter()
+        .enumerate()
+        .skip(start + 2)
+        .find_map(|(index, character)| (*character == '］').then_some(index))?;
+    let note = chars[start + 2..close].iter().collect::<String>();
+    Some((close + 1, note))
+}
+
+fn find_note(chars: &[char], start: usize, note: &str) -> Option<(usize, usize)> {
+    let marker = format!("［＃{note}］").chars().collect::<Vec<_>>();
+    if marker.is_empty() || start >= chars.len() {
+        return None;
+    }
+    (start..=chars.len().saturating_sub(marker.len())).find_map(|index| {
+        (chars.get(index..index + marker.len()) == Some(marker.as_slice()))
+            .then_some((index, index + marker.len()))
+    })
+}
+
+fn image_note_parts(chars: &[char], start: usize) -> Option<(usize, String, String)> {
+    if chars.get(start) != Some(&'［') || chars.get(start + 1) != Some(&'＃') {
+        return None;
+    }
+    let close = chars
+        .iter()
+        .enumerate()
+        .skip(start + 2)
+        .find_map(|(index, character)| (*character == '］').then_some(index))?;
+    let note = chars[start + 2..close].iter().collect::<String>();
+    let open_paren = note.find('（')?;
+    let close_paren = note.rfind('）')?;
+    if open_paren >= close_paren {
+        return None;
+    }
+    let inside = &note[open_paren + '（'.len_utf8()..close_paren];
+    let path = inside.split('、').next()?.trim();
+    if !path.contains('.') {
+        return None;
+    }
+    let path = normalize_image_path(path)?;
+    let description = note[..open_paren]
+        .trim()
+        .strip_suffix("入る")
+        .unwrap_or(note[..open_paren].trim())
+        .to_owned();
+    Some((close + 1, path, description))
+}
+
+fn image_path_from_note(chars: &[char], start: usize) -> Option<(usize, String)> {
+    let (end, path, _) = image_note_parts(chars, start)?;
+    Some((end, path))
+}
+pub(super) fn split_image_line(line: &str) -> Option<(String, String, String)> {
+    let chars = line.chars().collect::<Vec<_>>();
+    for start in 0..chars.len() {
+        let Some((end, _)) = image_path_from_note(&chars, start) else {
+            continue;
+        };
+        let prefix = chars[..start].iter().collect::<String>();
+        let image = chars[start..end].iter().collect::<String>();
+        let suffix = chars[end..].iter().collect::<String>();
+        if !prefix.trim().is_empty() || !suffix.trim().is_empty() {
+            continue;
+        }
+        return Some((prefix, image, suffix));
+    }
+    None
+}
+
+fn normalize_image_path(path: &str) -> Option<String> {
+    let path = path.trim().replace('\\', "/");
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return None;
+        }
+        parts.push(part);
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+pub fn image_references(input: &str) -> Vec<String> {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut references = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if let Some((end, path)) = image_path_from_note(&chars, index) {
+            if !references.contains(&path) {
+                references.push(path);
+            }
+            index = end;
+        } else {
+            index += 1;
+        }
+    }
+    let mut search = 0;
+    while let Some(offset) = input[search..].find("<img") {
+        let start = search + offset;
+        let Some(end_offset) = input[start..].find('>') else {
+            break;
+        };
+        let end = start + end_offset + 1;
+        if let Some(source) = raw_tag_attribute(&input[start..end], "src")
+            .and_then(|source| normalize_image_path(source.trim()))
+            && !references.contains(&source)
+        {
+            references.push(source);
+        }
+        search = end;
+    }
+    references
+}
+
+fn parse_inline_note(
+    chars: &[char],
+    start: usize,
+    config: &AozoraConfig,
+) -> Option<(usize, String)> {
+    if chars.get(start) != Some(&'［') || chars.get(start + 1) != Some(&'＃') {
+        return None;
+    }
+    let close = chars
+        .iter()
+        .enumerate()
+        .skip(start + 2)
+        .find_map(|(index, character)| (*character == '］').then_some(index))?;
+    let note = chars[start + 2..close].iter().collect::<String>();
+    let replacement = config.inline_notes.get(&note)?.clone();
+    Some((close + 1, replacement))
+}
+fn parse_configured_markup(
+    chars: &[char],
+    start: usize,
+    config: &AozoraConfig,
+) -> Option<(usize, String)> {
+    if chars.get(start) != Some(&'<') {
+        return None;
+    }
+    let close = chars
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find_map(|(index, character)| (*character == '>').then_some(index))?;
+    let markup = chars[start..=close].iter().collect::<String>();
+    config
+        .inline_notes
+        .values()
+        .any(|value| value == &markup)
+        .then_some((close + 1, markup))
+}
+
+fn is_tcy_open(markup: &str, config: &AozoraConfig) -> bool {
+    config.inline_notes.get("縦中横").map(String::as_str) == Some(markup)
+}
+
+fn is_tcy_close(markup: &str, config: &AozoraConfig) -> bool {
+    config.inline_notes.get("縦中横終わり").map(String::as_str) == Some(markup)
+}
+
+fn push_text_char(
+    output: &mut String,
+    chars: &[char],
+    index: usize,
+    config: &AozoraConfig,
+    allow_upright: bool,
+) -> usize {
+    if config.vertical
+        && config.dakuten_type == 1
+        && let Some(mark) = chars.get(index + 1).copied()
+        && matches!(mark, '゛' | '゜')
+        && is_dakuten_base(chars[index])
+    {
+        if let Some(composed) = compose_dakuten(chars[index], mark) {
+            push_escaped_char(output, composed);
+        } else {
+            output.push_str("<span class=\"dakuten\">");
+            push_escaped_char(output, chars[index]);
+            output.push_str("<span>");
+            push_escaped_char(output, mark);
+            output.push_str("</span></span>");
+        }
+        return 2;
+    }
+
+    let character = chars[index];
+    if allow_upright && is_upright_character(character) {
+        output.push_str("<span class=\"upr\">");
+        push_escaped_char(output, character);
+        output.push_str("</span>");
+    } else {
+        push_escaped_char(output, character);
+    }
+    1
+}
+
+fn is_dakuten_base(character: char) -> bool {
+    matches!(
+        character,
+        'ぁ'..='ゖ'
+            | 'ゝ'
+            | 'ァ'..='ヺ'
+            | 'ヽ'
+            | 'ヿ'
+            | '〻'
+    )
+}
+
+fn compose_dakuten(base: char, mark: char) -> Option<char> {
+    let (from, to) = if mark == '゛' {
+        (
+            "うかきくけこさしすせそたちつてとはひふへほゝウカキクケコサシスセソタチツテトハヒフヘホワヰヱヲヽ",
+            "ゔがぎぐげござじずぜぞだぢづでどばびぶべぼゞヴガギグゲゴザジズゼゾダヂヅデドバビブベボヷヸヹヺヾ",
+        )
+    } else {
+        ("はひふへほハヒフヘホ", "ぱぴぷぺぽパピプペポ")
+    };
+    from.chars()
+        .position(|candidate| candidate == base)
+        .and_then(|position| to.chars().nth(position))
+}
+
+fn is_upright_character(character: char) -> bool {
+    const UPRIGHT: &str = "÷±∞∴∵ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ\
+ⅰⅱⅲⅳⅴⅵⅶⅷⅸⅹⅺⅻ\
+⓪①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳\
+㉑㉒㉓㉔㉕㉖㉗㉘㉙㉚㉛㉜㉝㉞㉟㊱㊲㊳㊴㊵㊶㊷㊸㊹㊺㊻㊼㊽㊾㊿\
+△▽▲▼☆★♂♀♪♭§†‡‼⁇⁉⁈©®⁑⁂◐◑◒◓▷▶◁◀\
+♤♠♢♦♡♥♧♣❤☖☗☎☁☂☃♨▱⊿✿☹☺☻✓✔␣⏎♩♮♫♬ℓ№℡ℵℏ℧";
+    UPRIGHT.contains(character)
+}
+
+fn find_ruby_bounds(chars: &[char], start: usize) -> Option<(usize, usize)> {
+    let open = chars
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find_map(|(index, character)| (*character == '《').then_some(index))?;
+    let close = find_closing_ruby(chars, open)?;
+    Some((open, close))
+}
+
+fn find_closing_ruby(chars: &[char], open: usize) -> Option<usize> {
+    chars
+        .iter()
+        .enumerate()
+        .skip(open + 1)
+        .find_map(|(index, character)| (*character == '》').then_some(index))
+}
+
+fn find_closing_latin_bracket(chars: &[char], open: usize) -> Option<usize> {
+    chars
+        .iter()
+        .enumerate()
+        .skip(open + 1)
+        .find_map(|(index, character)| (*character == '〕').then_some(index))
+}
+
+fn convert_latin(input: &str, config: &AozoraConfig) -> String {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+
+    while index < chars.len() {
+        if let Some(replacement) =
+            find_latin_replacement(&chars, index, 2, &config.latin_replacements)
+        {
+            output.push_str(replacement);
+            index += 2;
+            continue;
+        }
+        if let Some(replacement) =
+            find_latin_replacement(&chars, index, 3, &config.latin_replacements)
+        {
+            output.push_str(replacement);
+            index += 3;
+            continue;
+        }
+
+        output.push(chars[index]);
+        index += 1;
+    }
+
+    output
+}
+
+fn find_latin_replacement<'a>(
+    chars: &[char],
+    index: usize,
+    length: usize,
+    replacements: &'a std::collections::BTreeMap<String, String>,
+) -> Option<&'a str> {
+    let candidate = chars.get(index..index + length)?;
+    replacements.iter().find_map(|(pattern, replacement)| {
+        pattern
+            .chars()
+            .eq(candidate.iter().copied())
+            .then_some(replacement.as_str())
+    })
+}
+
+fn is_half_space(character: char) -> bool {
+    (0x20..=0x02af).contains(&(character as u32))
+}
+
+fn is_ruby_base(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff
+    )
+}
+
+fn push_ruby(
+    output: &mut String,
+    base: &str,
+    reading: &str,
+    config: &AozoraConfig,
+    allow_auto_yoko: bool,
+) {
+    output.push_str("<ruby>");
+    if allow_auto_yoko {
+        output.push_str(&convert_inline(base, config));
+    } else {
+        output.push_str(&convert_inline_without_auto_yoko(base, config));
+    }
+    output.push_str("<rt>");
+    output.push_str(&escape_html(reading));
+    output.push_str("</rt></ruby>");
+}
+
+pub fn escape_html(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for character in input.chars() {
+        push_escaped_char(&mut escaped, character);
+    }
+    escaped
+}
+
+fn push_escaped_char(output: &mut String, character: char) {
+    match character {
+        '&' => output.push_str("&amp;"),
+        '<' => output.push_str("&lt;"),
+        '>' => output.push_str("&gt;"),
+        '"' => output.push_str("&quot;"),
+        '\'' => output.push_str("&apos;"),
+        _ => output.push(character),
+    }
+}
