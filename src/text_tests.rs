@@ -68,6 +68,14 @@ fn applies_java_force_indent_rules() {
 }
 
 #[test]
+fn adds_kobo_bookmark_ids_to_paragraphs() {
+    let config = AozoraConfig::from_ini(IniSettings::parse("MarkId=1").unwrap());
+    let output = super::plain_text_to_xhtml_with_config("本文\n\n次", &config).unwrap();
+    assert!(output.contains("<p id=\"kobo.1.1\">本文</p>"));
+    assert!(output.contains("<p id=\"kobo.2.1\"><br/></p>"));
+    assert!(output.contains("<p id=\"kobo.3.1\">次</p>"));
+}
+#[test]
 fn emits_a_placeholder_for_empty_input() {
     assert_eq!(plain_text_to_xhtml("").unwrap(), "    <p><br/></p>\n");
 }

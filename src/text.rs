@@ -569,7 +569,43 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
     if !has_line {
         fragment.push_str("    <p><br/></p>\n");
     }
+    if config.ini.get_bool("MarkId").unwrap_or(false) {
+        fragment = add_kobo_ids(&fragment);
+    }
     balance_xhtml(&fragment)
+}
+
+fn add_kobo_ids(fragment: &str) -> String {
+    let mut output = String::with_capacity(fragment.len());
+    let mut cursor = 0;
+    let mut line_id = 0usize;
+    while let Some(relative_start) = fragment[cursor..].find("<p") {
+        let start = cursor + relative_start;
+        let Some(relative_end) = fragment[start..].find('>') else {
+            break;
+        };
+        let end = start + relative_end + 1;
+        let tag = &fragment[start..end];
+        let is_paragraph = tag
+            .as_bytes()
+            .get(2)
+            .is_some_and(|character| character.is_ascii_whitespace() || *character == b'>');
+        output.push_str(&fragment[cursor..start]);
+        if is_paragraph {
+            line_id += 1;
+            if tag.contains(" id=") {
+                output.push_str(tag);
+            } else {
+                output.push_str(tag.strip_suffix('>').unwrap_or(tag));
+                output.push_str(&format!(" id=\"kobo.{line_id}.1\">"));
+            }
+        } else {
+            output.push_str(tag);
+        }
+        cursor = end;
+    }
+    output.push_str(&fragment[cursor..]);
+    output
 }
 
 fn balance_xhtml(input: &str) -> String {
