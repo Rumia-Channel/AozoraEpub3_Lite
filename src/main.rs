@@ -1,7 +1,8 @@
 use aozora_epub3_lite::{
     AozoraConfig, BookMeta, EpubAsset, EpubBook, EpubMetadata, Input, TextEntry, TitleType,
     aozora_text_to_xhtml_sections_with_config, decode_text, detect_meta, escape_html,
-    file_title_creator, image::process as process_image, image_references,
+    file_title_creator, image::process as process_image, image_reference_occurrences,
+    image_references,
 };
 use std::env;
 use std::error::Error;
@@ -282,38 +283,36 @@ fn convert_image_only(
     let input_path = input.path();
     let mut sections = Vec::new();
     let mut assets = Vec::new();
-    let cover_path = input.images().keys().next().cloned();
-    for (path, data) in input.images() {
+    let mut cover_path = None;
+    for (index, (path, data)) in input.images().iter().enumerate() {
         let extension = path
             .rsplit_once('.')
             .map(|(_, extension)| extension)
-            .unwrap_or_default();
-        let media_type = media_type_for_extension(extension).ok_or_else(|| {
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let media_type = media_type_for_extension(&extension).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("unsupported image type: {path}"),
             )
         })?;
-        let processed_data = process_image(
-            data,
-            media_type,
-            &config.ini,
-            cover_path.as_deref() == Some(path),
-        )?;
+        let output_name = format!("{:04}.{extension}", index + 1);
+        let is_cover = index == 0;
+        let processed_data = process_image(data, media_type, &config.ini, is_cover)?;
         let fragment = image_dimensions(&processed_data, media_type)
-            .map(|dimensions| svg_image_fragment(path, dimensions))
+            .map(|dimensions| svg_image_fragment(&output_name, dimensions))
             .unwrap_or_else(|| {
                 format!(
                     "<p><img class=\"fit\" src=\"../image/{}\" alt=\"\"/></p>",
-                    escape_html(path)
+                    escape_html(&output_name)
                 )
             });
         sections.push(fragment);
-        assets.push(EpubAsset::new(
-            format!("image/{path}"),
-            media_type,
-            processed_data,
-        ));
+        let epub_path = format!("image/{output_name}");
+        if is_cover {
+            cover_path = Some(epub_path.clone());
+        }
+        assets.push(EpubAsset::new(epub_path, media_type, processed_data));
     }
     if assets.is_empty() {
         return Err(io::Error::new(
@@ -330,7 +329,7 @@ fn convert_image_only(
         options.language.as_deref(),
     );
     decorate_image_tags(&mut sections, &assets, config);
-    let cover = format!("image/{}", input.images().keys().next().unwrap());
+    let cover = cover_path.expect("image-only input has at least one asset");
     let output = output_path(
         input_path,
         options.dst.as_deref().map(Path::new),
@@ -382,8 +381,10 @@ struct CollectedAsset {
     asset: EpubAsset,
     /// Paths as referenced in the text (e.g. `"fig.png"`).
     references: Vec<String>,
+    /// Resolved filesystem or archive path used to deduplicate references.
+    source: String,
     /// Path the asset is stored at inside the EPUB (without the `image/`
-    /// prefix); may include the archive parent directory.
+    /// prefix).
     resolved: String,
 }
 
@@ -401,8 +402,10 @@ fn collect_assets(
     let base = input.path().parent().unwrap_or_else(|| Path::new("."));
     let mut assets: Vec<CollectedAsset> = Vec::new();
     let mut cover_asset = None;
+    let mut image_index = 0usize;
 
-    for reference in image_references(text) {
+    for reference in image_reference_occurrences(text) {
+        image_index += 1;
         let resolved = if input.is_archive() {
             input
                 .resolve_image(entry, &reference)
@@ -417,19 +420,23 @@ fn collect_assets(
         let Some((source_path, data)) = resolved else {
             continue;
         };
-        let media_type = media_type_for_extension(
-            source_path
-                .rsplit_once('.')
-                .map(|(_, extension)| extension)
-                .unwrap_or_default(),
-        )
-        .ok_or_else(|| {
+        let extension = source_path
+            .rsplit_once('.')
+            .map(|(_, extension)| extension)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let media_type = media_type_for_extension(&extension).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("unsupported image type: {reference}"),
             )
         })?;
-        let epub_path = format!("image/{source_path}");
+        if let Some(existing) = assets.iter_mut().find(|asset| asset.source == source_path) {
+            existing.references.push(reference);
+            continue;
+        }
+        let output_name = format!("{:04}.{extension}", image_index);
+        let epub_path = format!("image/{output_name}");
         let is_cover = is_auto_cover(cover)
             && cover_asset.is_none()
             && image_dimensions(&data, media_type)
@@ -438,15 +445,12 @@ fn collect_assets(
             cover_asset = Some(epub_path.clone());
         }
         let data = process_image(&data, media_type, &config.ini, is_cover)?;
-        if let Some(existing) = assets.iter_mut().find(|item| item.asset.path == epub_path) {
-            existing.references.push(reference);
-        } else {
-            assets.push(CollectedAsset {
-                asset: EpubAsset::new(epub_path, media_type, data),
-                references: vec![reference],
-                resolved: source_path,
-            });
-        }
+        assets.push(CollectedAsset {
+            asset: EpubAsset::new(epub_path, media_type, data),
+            references: vec![reference],
+            source: source_path,
+            resolved: output_name,
+        });
     }
 
     match cover {
@@ -460,6 +464,7 @@ fn collect_assets(
                 return Ok((assets, cover_asset));
             };
             let data = fs::read(&source)?;
+            let extension = extension.to_ascii_lowercase();
             let media_type = media_type_for_extension(&extension).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -467,20 +472,14 @@ fn collect_assets(
                 )
             })?;
             let data = process_image(&data, media_type, &config.ini, true)?;
-            let epub_path = format!(
-                "image/{}",
-                source
-                    .file_name()
-                    .and_then(OsStr::to_str)
-                    .unwrap_or("cover")
-            );
-            if !assets.iter().any(|item| item.asset.path == epub_path) {
-                assets.push(CollectedAsset {
-                    asset: EpubAsset::new(epub_path.clone(), media_type, data),
-                    references: Vec::new(),
-                    resolved: String::new(),
-                });
-            }
+            let output_name = format!("{:04}.{extension}", image_index + 1);
+            let epub_path = format!("image/{output_name}");
+            assets.push(CollectedAsset {
+                asset: EpubAsset::new(epub_path.clone(), media_type, data),
+                references: Vec::new(),
+                source: source.to_string_lossy().replace('\\', "/"),
+                resolved: output_name,
+            });
             cover_asset = Some(epub_path);
         }
         Some(path) if !is_external_reference(path) => {
@@ -491,7 +490,7 @@ fn collect_assets(
                     .extension()
                     .and_then(OsStr::to_str)
                     .unwrap_or_default()
-                    .to_owned();
+                    .to_ascii_lowercase();
                 let media_type = media_type_for_extension(&extension).ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -499,14 +498,14 @@ fn collect_assets(
                     )
                 })?;
                 let data = process_image(&fs::read(&source)?, media_type, &config.ini, true)?;
-                let epub_path = format!("image/{normalized}");
-                if !assets.iter().any(|item| item.asset.path == epub_path) {
-                    assets.push(CollectedAsset {
-                        asset: EpubAsset::new(epub_path.clone(), media_type, data),
-                        references: Vec::new(),
-                        resolved: String::new(),
-                    });
-                }
+                let output_name = format!("{:04}.{extension}", image_index + 1);
+                let epub_path = format!("image/{output_name}");
+                assets.push(CollectedAsset {
+                    asset: EpubAsset::new(epub_path.clone(), media_type, data),
+                    references: Vec::new(),
+                    source: normalized,
+                    resolved: output_name,
+                });
                 cover_asset = Some(epub_path);
             } else {
                 eprintln!("[WARN] cover image file not found: {path}");
@@ -1444,16 +1443,11 @@ fn jpeg_dimensions(data: &[u8]) -> Option<ImageDimensions> {
     None
 }
 
-/// Resolves a filesystem image by exact path, then by supported extension.
-/// Aozora test data conventionally keeps referenced images in an `img/`
-/// sibling directory, so that directory is searched when the direct path is
-/// absent.
+/// Resolves a filesystem image by its path relative to the input text,
+/// accepting a supported extension variant in the same directory.
 fn resolve_image_source(base: &Path, image_path: &str) -> io::Result<(PathBuf, String)> {
     let normalized = image_path.replace('\\', "/");
-    let mut requests = vec![base.join(&normalized)];
-    if !normalized.starts_with("img/") {
-        requests.push(base.join("img").join(&normalized));
-    }
+    let requests = [base.join(&normalized)];
 
     for requested in requests {
         if requested.is_file() {

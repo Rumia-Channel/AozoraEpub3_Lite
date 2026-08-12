@@ -6,7 +6,7 @@ use encoding_rs::{Encoding, SHIFT_JIS, UTF_8};
 mod inline;
 
 use inline::convert_inline;
-pub use inline::{escape_html, image_references};
+pub use inline::{escape_html, image_reference_occurrences, image_references};
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum TextError {

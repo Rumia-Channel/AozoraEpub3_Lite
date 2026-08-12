@@ -1,6 +1,6 @@
 use super::{
     aozora_text_to_xhtml_sections, aozora_text_to_xhtml_sections_with_config, decode_input,
-    image_references, plain_text_to_xhtml,
+    image_reference_occurrences, image_references, plain_text_to_xhtml,
 };
 use crate::config::{AozoraConfig, IniSettings};
 use encoding_rs::SHIFT_JIS;
@@ -142,6 +142,17 @@ fn converts_and_collects_safe_raw_image_tags() {
     let output = plain_text_to_xhtml(input).unwrap();
     assert!(output.contains("<img class=\"fit\" src=\"../image/fig/sample.png\" alt=\"図\"/>"));
     assert_eq!(image_references(input), vec!["fig/sample.png"]);
+}
+
+#[test]
+fn preserves_image_reference_order_and_occurrences() {
+    let input =
+        "［＃図（img/note.png）入る］\n<Img Src=\"img/raw.png\">\n［＃図（img/note.png）入る］";
+    assert_eq!(
+        image_reference_occurrences(input),
+        vec!["img/note.png", "img/raw.png", "img/note.png"]
+    );
+    assert_eq!(image_references(input), vec!["img/note.png", "img/raw.png"]);
 }
 
 #[test]

@@ -1170,34 +1170,60 @@ fn normalize_image_path(path: &str) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("/"))
 }
 
-pub fn image_references(input: &str) -> Vec<String> {
+pub fn image_reference_occurrences(input: &str) -> Vec<String> {
     let chars = input.chars().collect::<Vec<_>>();
-    let mut references = Vec::new();
+    let byte_offsets = input
+        .char_indices()
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+
     let mut index = 0;
     while index < chars.len() {
         if let Some((end, path)) = image_path_from_note(&chars, index) {
-            if !references.contains(&path) {
-                references.push(path);
-            }
+            candidates.push((byte_offsets[index], path));
             index = end;
         } else {
             index += 1;
         }
     }
-    let mut search = 0;
-    while let Some(offset) = input[search..].find("<img") {
-        let start = search + offset;
-        let Some(end_offset) = input[start..].find('>') else {
+
+    let mut index = 0;
+    while index + 3 < chars.len() {
+        if chars[index] != '<'
+            || !chars[index + 1].eq_ignore_ascii_case(&'i')
+            || !chars[index + 2].eq_ignore_ascii_case(&'m')
+            || !chars[index + 3].eq_ignore_ascii_case(&'g')
+        {
+            index += 1;
+            continue;
+        }
+        let Some(end_offset) = chars[index..]
+            .iter()
+            .position(|character| *character == '>')
+        else {
             break;
         };
-        let end = start + end_offset + 1;
-        if let Some(source) = raw_tag_attribute(&input[start..end], "src")
-            .and_then(|source| normalize_image_path(source.trim()))
-            && !references.contains(&source)
+        let end = index + end_offset + 1;
+        let raw = chars[index..end].iter().collect::<String>();
+        if let Some(source) =
+            raw_tag_attribute(&raw, "src").and_then(|source| normalize_image_path(source.trim()))
         {
-            references.push(source);
+            candidates.push((byte_offsets[index], source));
         }
-        search = end;
+        index = end;
+    }
+
+    candidates.sort_by_key(|(offset, _)| *offset);
+    candidates.into_iter().map(|(_, path)| path).collect()
+}
+
+pub fn image_references(input: &str) -> Vec<String> {
+    let mut references = Vec::new();
+    for path in image_reference_occurrences(input) {
+        if !references.contains(&path) {
+            references.push(path);
+        }
     }
     references
 }
