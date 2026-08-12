@@ -699,6 +699,24 @@ fn raw_tag_attribute<'a>(tag: &'a str, attribute: &str) -> Option<&'a str> {
     Some(&value[..end])
 }
 
+fn is_external_reference(value: &str) -> bool {
+    let value = value.trim();
+    if value.starts_with("//") {
+        return true;
+    }
+    let Some((scheme, _)) = value.split_once(':') else {
+        return false;
+    };
+    !scheme.is_empty()
+        && scheme.chars().enumerate().all(|(index, character)| {
+            if index == 0 {
+                character.is_ascii_alphabetic()
+            } else {
+                character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+            }
+        })
+}
+
 fn parse_raw_anchor(chars: &[char], start: usize) -> Option<(usize, String)> {
     let end = chars
         .iter()
@@ -720,7 +738,11 @@ fn parse_raw_anchor(chars: &[char], start: usize) -> Option<(usize, String)> {
             if href.contains('"') || href.contains('<') || href.contains('>') {
                 return None;
             }
-            format!("<a href=\"{}\">", escape_html(href))
+            if is_external_reference(href) {
+                "<a>".to_owned()
+            } else {
+                format!("<a href=\"{}\">", escape_html(href))
+            }
         } else {
             return None;
         }

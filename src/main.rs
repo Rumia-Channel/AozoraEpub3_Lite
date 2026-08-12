@@ -451,7 +451,7 @@ fn collect_assets(
             }
             cover_asset = Some(epub_path);
         }
-        Some(path) if !path.starts_with("http://") && !path.starts_with("https://") => {
+        Some(path) if !is_external_reference(path) => {
             let normalized = normalize_relative_path(path)?;
             let source = base.join(&normalized);
             if source.is_file() {
@@ -481,7 +481,7 @@ fn collect_assets(
             }
         }
         Some(_) => {
-            eprintln!("[WARN] URL covers are not supported: {cover:?}");
+            eprintln!("[WARN] external cover references are not supported: {cover:?}");
         }
         None => {}
     }
@@ -553,6 +553,24 @@ fn tag_attribute<'a>(tag: &'a str, attribute: &str) -> Option<&'a str> {
 /// Makes local EPUB fragment links self-contained by removing references to
 /// missing external documents. Named anchors are emitted as XHTML `id`s by
 /// the inline converter, so fragment links remain valid across sections.
+fn is_external_reference(value: &str) -> bool {
+    let value = value.trim();
+    if value.starts_with("//") {
+        return true;
+    }
+    let Some((scheme, _)) = value.split_once(':') else {
+        return false;
+    };
+    !scheme.is_empty()
+        && scheme.chars().enumerate().all(|(index, character)| {
+            if index == 0 {
+                character.is_ascii_alphabetic()
+            } else {
+                character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+            }
+        })
+}
+
 fn sanitize_anchor_links(sections: &mut [String]) {
     let mut ids = std::collections::BTreeMap::new();
     for (section_index, section) in sections.iter().enumerate() {
@@ -584,10 +602,7 @@ fn sanitize_anchor_links(sections: &mut [String]) {
                         format!("<a href=\"{:04}.xhtml#{fragment}\">", target_index + 1)
                     }
                 })
-            } else if href.starts_with("http://")
-                || href.starts_with("https://")
-                || href.starts_with("mailto:")
-            {
+            } else if is_external_reference(href) {
                 None
             } else {
                 ids.get(href).map(|target_index| {
@@ -605,7 +620,7 @@ fn sanitize_anchor_links(sections: &mut [String]) {
                     cursor = start + replacement.len();
                     continue;
                 }
-            } else if href.starts_with('#') || !href.contains(':') {
+            } else {
                 let tag_end = section[start..].find('>').map(|value| start + value + 1);
                 if let Some(tag_end) = tag_end {
                     section.replace_range(start..tag_end, "<a>");
@@ -1331,5 +1346,16 @@ mod tests {
         sanitize_anchor_links(&mut sections);
         assert_eq!(sections[0], "<p><a>参照</a></p>");
         assert!(sections[1].contains(r##"<a href="#present">参照</a>"##));
+    }
+
+    #[test]
+    fn removes_external_anchor_targets() {
+        let mut sections = vec![
+            r##"<p><a href="https://example.com">外部</a></p>"##.to_owned(),
+            r##"<p><a href="//cdn.example.com/book">CDN</a></p>"##.to_owned(),
+        ];
+        sanitize_anchor_links(&mut sections);
+        assert_eq!(sections[0], "<p><a>外部</a></p>");
+        assert_eq!(sections[1], "<p><a>CDN</a></p>");
     }
 }

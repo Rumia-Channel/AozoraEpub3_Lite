@@ -178,6 +178,18 @@ fn converts_raw_named_anchors_to_xhtml_ids() {
 }
 
 #[test]
+fn strips_external_raw_anchor_targets() {
+    let output = plain_text_to_xhtml(
+        r#"<a href="https://example.com/book">外部リンク</a><a href="//cdn.example.com">CDN</a>"#,
+    )
+    .unwrap();
+    assert!(output.contains("<a>外部リンク</a>"));
+    assert!(output.contains("<a>CDN</a>"));
+    assert!(!output.contains("https://"));
+    assert!(!output.contains("//cdn.example.com"));
+}
+
+#[test]
 fn renders_inline_and_block_headings() {
     let inline = plain_text_to_xhtml("［＃大見出し］章題\n本文").unwrap();
     assert!(inline.contains("<h1 class=\"font-1em50\">章題</h1>"));
