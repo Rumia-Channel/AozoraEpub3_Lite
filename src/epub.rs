@@ -515,6 +515,7 @@ mod tests {
             .unwrap();
         assert!(title_page.contains("<body class=\"p-titlepage\">"));
         assert!(title_page.contains("<div class=\"author\"><p>著者</p></div>"));
+        assert!(title_page.contains("<div class=\"book-title\">"));
 
         let mut package = String::new();
         archive

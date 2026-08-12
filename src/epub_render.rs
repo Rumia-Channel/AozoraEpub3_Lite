@@ -543,8 +543,10 @@ pub(super) fn render_section(
 
 </head>
 <body class="p-titlepage{kindle_class}">
-<div class="book-title">{publisher}
+<div class="{main_class}">{publisher}
+<div class="{book_class}">
 <div class="book-title-main"><p>{title}</p></div>{creator}
+</div>
 </div>
 </body>
 </html>
@@ -552,6 +554,16 @@ pub(super) fn render_section(
             language = xml_escape(&metadata.language),
             title = xml_escape(&metadata.title),
             layout_class = if vertical { "vrtl" } else { "hltr" },
+            main_class = if vertical {
+                "main vrtl block-align-center"
+            } else {
+                "main"
+            },
+            book_class = if vertical {
+                "book-title start-2em"
+            } else {
+                "book-title"
+            },
             publisher = publisher,
             creator = creator,
             kindle_class = kindle_class,
