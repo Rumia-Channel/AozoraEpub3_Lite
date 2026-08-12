@@ -230,6 +230,7 @@ fn remove_metadata_lines(input: &str, metadata: &BookMeta) -> String {
         .into_iter()
         .enumerate()
         .filter_map(|(index, line)| (index < remove_start || index > remove_end).then_some(line))
+        .skip_while(|line| line.trim().is_empty())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -1840,7 +1841,7 @@ mod tests {
     fn removes_detected_title_lines_before_body_conversion() {
         let input = "表題\n著者名\n\n本文";
         let metadata = detect_meta(input, TitleType::TitleAuthor, false);
-        assert_eq!(remove_metadata_lines(input, &metadata), "\n本文");
+        assert_eq!(remove_metadata_lines(input, &metadata), "本文");
     }
     #[test]
     fn sanitizes_file_name_hostile_characters() {
