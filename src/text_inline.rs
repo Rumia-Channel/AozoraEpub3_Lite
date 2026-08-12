@@ -36,6 +36,13 @@ fn convert_inline_with_auto_yoko(input: &str, config: &AozoraConfig, auto_yoko: 
             continue;
         }
         if chars[index] == '※'
+            && let Some((end, replacement)) = parse_image_note(&chars, index + 1, config)
+        {
+            output.push_str(&replacement);
+            index = end;
+            continue;
+        }
+        if chars[index] == '※'
             && let Some((end, replacement)) = parse_gaiji_note(&chars, index, config)
         {
             output.push_str(&replacement);
@@ -780,6 +787,11 @@ fn parse_unicode_note(
         .skip(start + 2)
         .find_map(|(index, character)| (*character == '］').then_some(index))?;
     let note = chars[start + 2..close].iter().collect::<String>();
+    let replacement = unicode_replacement(&note, config)?;
+    Some((close + 1, replacement))
+}
+
+fn unicode_replacement(note: &str, config: &AozoraConfig) -> Option<String> {
     let upper = note.to_ascii_uppercase();
     let (marker, prefix_len) = [
         upper.find("U+").map(|index| (index, 2)),
@@ -793,18 +805,21 @@ fn parse_unicode_note(
     let mut replacement = String::from(char::from_u32(code)?);
     if upper.get(end..).is_some_and(|tail| tail.starts_with("-U+")) {
         let (variation, variation_end) = parse_hex_code(&upper, end + 1 + 2)?;
-        let keep = match variation {
-            0xfe00..=0xfe0f => config.print_ivs_bmp,
-            0xe0100..=0xe01ef => config.print_ivs_ssp,
-            _ => true,
-        };
-        if keep {
-            replacement.push(char::from_u32(variation)?);
-        }
+        replacement.push(char::from_u32(variation)?);
         end = variation_end;
     }
     let _ = end;
-    Some((close + 1, replacement))
+    Some(filter_ivs(&replacement, config))
+}
+
+fn filter_ivs(input: &str, config: &AozoraConfig) -> String {
+    input
+        .chars()
+        .filter(|character| {
+            (config.print_ivs_ssp || !('\u{e0100}'..='\u{e01ef}').contains(character))
+                && (config.print_ivs_bmp || !('\u{fe00}'..='\u{fe0f}').contains(character))
+        })
+        .collect()
 }
 
 fn parse_gaiji_note(
@@ -818,12 +833,35 @@ fn parse_gaiji_note(
         .and_then(|value| value.strip_suffix('］'))
         .unwrap_or(&note);
     let key = bare_note.split('、').next().unwrap_or(bare_note);
-    let replacement = config
+    let normalized_note = crate::config::normalize_gaiji_key(&note);
+    if let Some(replacement) = config
         .gaiji
         .get(&note)
+        .or_else(|| config.gaiji.get(&normalized_note))
         .or_else(|| config.gaiji.get(bare_note))
-        .or_else(|| config.gaiji.get(key))?;
-    Some((end, replacement.to_owned()))
+        .or_else(|| config.gaiji.get(key))
+    {
+        return Some((end, filter_ivs(replacement, config)));
+    }
+    if let Some(replacement) = unicode_replacement(bare_note, config) {
+        return Some((end, replacement));
+    }
+    let opening = config
+        .inline_notes
+        .get("行右小書き")
+        .or_else(|| config.inline_notes.get("上付き小文字"))
+        .map(String::as_str)
+        .unwrap_or("<span class=\"super\">");
+    let closing = config
+        .inline_notes
+        .get("行右小書き終わり")
+        .or_else(|| config.inline_notes.get("上付き小文字終わり"))
+        .map(String::as_str)
+        .unwrap_or("</span>");
+    Some((
+        end,
+        format!("〓{opening}（{}）{closing}", escape_html(key.trim())),
+    ))
 }
 
 fn gaiji_note_range(chars: &[char], start: usize) -> Option<(usize, String)> {

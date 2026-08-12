@@ -651,6 +651,16 @@ impl AozoraConfig {
         Ok(())
     }
 }
+pub(crate) fn normalize_gaiji_key(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '―' | '−' => '－',
+            _ => character,
+        })
+        .collect()
+}
+
 fn load_gaiji_rows(target: &mut BTreeMap<String, String>, input: &str) {
     for line in input.lines() {
         let trimmed = line.trim();
@@ -667,12 +677,20 @@ fn load_gaiji_rows(target: &mut BTreeMap<String, String>, input: &str) {
         if character.is_empty() || !note.starts_with('※') {
             continue;
         }
+        let canonical_note = normalize_gaiji_key(note);
         target
             .entry(note.to_owned())
+            .or_insert_with(|| character.to_owned());
+        target
+            .entry(canonical_note)
             .or_insert_with(|| character.to_owned());
         if let Some((prefix, _)) = note.split_once('、') {
             target
                 .entry(format!("{prefix}］"))
+                .or_insert_with(|| character.to_owned());
+            let canonical_prefix = normalize_gaiji_key(prefix);
+            target
+                .entry(format!("{canonical_prefix}］"))
                 .or_insert_with(|| character.to_owned());
         }
     }

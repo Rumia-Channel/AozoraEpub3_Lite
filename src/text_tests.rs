@@ -426,6 +426,14 @@ fn converts_unicode_and_ivs_gaiji_notes() {
     assert!(!output.contains("［＃"));
 }
 #[test]
+fn normalizes_shift_jis_dash_variants_in_gaiji_notes() {
+    let mut config = AozoraConfig::default();
+    config.load_ivs_text("U+0001\tU+E0101\t検\t※［＃「foo－bar」］\n");
+    let output = super::plain_text_to_xhtml_with_config("※［＃「foo―bar」］", &config).unwrap();
+    assert!(output.contains("<p>検</p>"));
+    assert!(!output.contains("行右小書き"));
+}
+#[test]
 fn applies_external_note_and_gaiji_configuration() {
     let mut config = AozoraConfig::default();
     config.load_tag_text("独自注記\t<span class=\"custom\">\t\t\n");
