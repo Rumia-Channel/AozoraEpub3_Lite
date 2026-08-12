@@ -146,11 +146,14 @@ fn convert_inline_with_auto_yoko(input: &str, config: &AozoraConfig, auto_yoko: 
         if chars[index] == '《'
             && let Some(close) = find_closing_ruby(&chars, index)
         {
-            let mut base_start = index;
-            while base_start > 0 && is_ruby_base(chars[base_start - 1]) {
-                base_start -= 1;
-            }
-            if base_start < index {
+            if let Some(base_kind) = index
+                .checked_sub(1)
+                .and_then(|base_index| ruby_base_kind(chars[base_index]))
+            {
+                let mut base_start = index - 1;
+                while base_start > 0 && ruby_base_kind(chars[base_start - 1]) == Some(base_kind) {
+                    base_start -= 1;
+                }
                 let base = chars[base_start..index].iter().collect::<String>();
                 let escaped_base = escape_html(&base);
                 if output.ends_with(&escaped_base) {
@@ -469,6 +472,39 @@ fn rewrite_alternative_gaiji(input: &str, config: &AozoraConfig) -> String {
 
     output
 }
+fn contains_literal_gaiji_note(input: &str) -> bool {
+    let mut remainder = input;
+    while let Some(start) = remainder.find("※［＃") {
+        let after_open = &remainder[start + "※［＃".len()..];
+        let Some(close) = after_open.find('］') else {
+            return false;
+        };
+        let note = &after_open[..close];
+        if !note.contains('（') && !note.contains("#GAIJI#") {
+            return true;
+        }
+        remainder = &after_open[close + '］'.len_utf8()..];
+    }
+    false
+}
+
+fn convert_ruby_reading(reading: &str, config: &AozoraConfig) -> String {
+    let chars = reading.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(reading.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '※'
+            && let Some((end, replacement)) = parse_gaiji_note(&chars, index, config)
+        {
+            output.push_str(&escape_html(&replacement));
+            index = end;
+            continue;
+        }
+        push_escaped_char(&mut output, chars[index]);
+        index += 1;
+    }
+    output
+}
 fn rewrite_auto_yoko(input: &str, config: &AozoraConfig) -> String {
     if !config.vertical || !config.auto_yoko {
         return input.to_owned();
@@ -518,6 +554,14 @@ fn rewrite_auto_yoko(input: &str, config: &AozoraConfig) -> String {
                 .enumerate()
                 .skip(index + 1)
                 .find_map(|(candidate, character)| (*character == '>').then_some(candidate))
+        {
+            output.extend(chars[index..=close_index].iter());
+            index = close_index + 1;
+            continue;
+        }
+        if chars[index] == '｜'
+            && let Some((open_index, close_index)) = find_ruby_bounds(&chars, index + 1)
+            && contains_literal_gaiji_note(&chars[index + 1..open_index].iter().collect::<String>())
         {
             output.extend(chars[index..=close_index].iter());
             index = close_index + 1;
@@ -1390,11 +1434,15 @@ fn is_half_space(character: char) -> bool {
     (0x20..=0x02af).contains(&(character as u32))
 }
 
-fn is_ruby_base(character: char) -> bool {
-    matches!(
-        character as u32,
-        0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff
-    )
+fn ruby_base_kind(character: char) -> Option<u8> {
+    match character as u32 {
+        0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff => Some(0),
+        0x3041..=0x3096 => Some(1),
+        0x30a1..=0x30fa | 0xff61..=0xff9f => Some(2),
+        0x20..=0x7e => Some(3),
+        0xff10..=0xff19 | 0xff21..=0xff3a | 0xff41..=0xff5a => Some(4),
+        _ => None,
+    }
 }
 
 fn push_ruby(
@@ -1405,13 +1453,13 @@ fn push_ruby(
     allow_auto_yoko: bool,
 ) {
     output.push_str("<ruby>");
-    if allow_auto_yoko {
+    if allow_auto_yoko && !contains_literal_gaiji_note(base) {
         output.push_str(&convert_inline(base, config));
     } else {
         output.push_str(&convert_inline_without_auto_yoko(base, config));
     }
     output.push_str("<rt>");
-    output.push_str(&escape_html(reading));
+    output.push_str(&convert_ruby_reading(reading, config));
     output.push_str("</rt></ruby>");
 }
 

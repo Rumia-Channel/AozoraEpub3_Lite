@@ -201,6 +201,22 @@ fn keeps_suffix_tcy_notes_outside_following_ruby() {
 }
 
 #[test]
+fn converts_gaiji_notes_inside_ruby_readings() {
+    let output = plain_text_to_xhtml("｜漢字《※［＃米印］》").unwrap();
+    assert!(output.contains("<ruby>漢字<rt>※</rt></ruby>"));
+    assert!(!output.contains("［＃米印］"));
+}
+#[test]
+fn keeps_gaiji_brackets_literal_inside_ruby() {
+    let output = plain_text_to_xhtml(
+        "｜※［＃始め二重山括弧］29※［＃終わり二重山括弧］《※［＃始め二重山括弧］29※［＃終わり二重山括弧］》",
+    )
+    .unwrap();
+    assert!(output.contains("<ruby>《29》<rt>《29》</rt></ruby>"));
+    assert!(!output.contains("<ruby>《29<rt>"));
+}
+
+#[test]
 fn converts_inline_notes_inside_ruby_bases() {
     let output =
         plain_text_to_xhtml("｜あいう［＃縦中横］1［＃縦中横終わり］《ふりがな》").unwrap();
