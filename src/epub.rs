@@ -6,141 +6,82 @@ use zip::{CompressionMethod, result::ZipError};
 #[path = "epub_render.rs"]
 mod render;
 
-use render::{render_cover, render_nav, render_ncx, render_package, render_section};
+use render::{is_image_only, render_cover, render_nav, render_ncx, render_package, render_section};
 
 const MIMETYPE: &str = "application/epub+zip";
-const CONTAINER_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
-  <rootfiles>
-    <rootfile full-path="item/standard.opf" media-type="application/oebps-package+xml"/>
-  </rootfiles>
+const CONTAINER_XML: &str = r#"<?xml version="1.0"?>
+<container
+ version="1.0"
+ xmlns="urn:oasis:names:tc:opendocument:xmlns:container"
+>
+<rootfiles>
+<rootfile
+ full-path="item/standard.opf"
+ media-type="application/oebps-package+xml"
+/>
+</rootfiles>
 </container>
 "#;
 const BOOK_STYLE_CSS: &str = include_str!("../assets/aozora/template/item/style/book-style.css");
-const TEXT_CSS: &str = r#"@charset "UTF-8";
+const TEXT_CSS: &str = r#"@charset "utf-8";
+@namespace "http://www.w3.org/1999/xhtml";
 
+/** 共通 テキスト用スタイル */
 @page {
-  margin: .5em;
+margin: 0 0 0 0;
+}
+body {
+margin: 0;
+padding: 0;
+display: block;
+color: #000;
+font-size: 100%;
+line-height: 1.8;
+vertical-align: baseline;
+}
+/** 縦書き テキスト用スタイル */
+html.vrtl {
+margin: 0 0 0 0;
+padding: 0;
+writing-mode: vertical-rl;
+-webkit-writing-mode: vertical-rl;
+-epub-writing-mode: vertical-rl;
+-epub-line-break: strict;
+line-break: strict;
+-epub-word-break: normal;
+word-break: normal;
 }
 
-html.vrtl {
-  writing-mode: vertical-rl;
-  -webkit-writing-mode: vertical-rl;
-  -epub-writing-mode: vertical-rl;
-  line-break: strict;
-  word-break: normal;
+
+/** 太字、ゴシック */
+.vrtl .gtc {
+font-family: '@ＭＳ ゴシック','@MS Gothic',sans-serif;
 }
+.b { font-weight: bold; }
+.i { font-style: italic; }
+
+/** 外字フォント */
+
+/** 横書き テキスト用スタイル */
 
 html.hltr {
-  writing-mode: horizontal-tb;
-  -webkit-writing-mode: horizontal-tb;
-  -epub-writing-mode: horizontal-tb;
+margin: 0 0 0 0;
+padding: 0;
+writing-mode: horizontal-tb;
+-webkit-writing-mode: horizontal-tb;
+-epub-writing-mode: horizontal-tb;
+-epub-line-break: strict;
+line-break: strict;
+-epub-word-break: normal;
+word-break: normal;
 }
 
-body {
-  margin: 0;
-  padding: 0;
+/** 太字、ゴシック */
+.hltr .gtc {
+font-family: 'ＭＳ ゴシック','MS Gothic',sans-serif;
 }
-
-.main {
-  margin: 1em;
-}
-
-p {
-  margin: 0;
-  line-height: 1.8;
-}
-
-.p-titlepage {
-  text-align: center;
-}
-
-.book-title {
-  margin-top: 30vh;
-}
-
-.book-title-main {
-  font-size: 2em;
-  font-weight: bold;
-}
-
-.author {
-  margin-top: 2em;
-}
-
-.p-image .main {
-  margin: 0;
-  text-align: center;
-}
-
-.p-image .fit {
-  max-width: 100%;
-  max-height: 100vh;
-  object-fit: contain;
-}
-
-h1, h2, h3, h4, h5, h6 {
-  margin: 0;
-  font-weight: normal;
-}
-
-.vrtl h1, .vrtl h2, .vrtl h3, .vrtl h4, .vrtl h5, .vrtl h6 {
-  font-family: serif;
-}
-
-.hltr h1, .hltr h2, .hltr h3, .hltr h4, .hltr h5, .hltr h6 {
-  font-family: serif;
-}
-
-.font-1em50 { font-size: 1.5em; }
-.font-1em30 { font-size: 1.3em; }
-.font-1em10 { font-size: 1.1em; }
-.bold { font-weight: bold; }
-.italic { font-style: italic; }
-.gfont { font-family: sans-serif; }
-.em-sesame { text-emphasis: filled sesame; -webkit-text-emphasis: filled sesame; }
-.wrc { font-size: .75em; }
-.super { vertical-align: super; font-size: .75em; }
-.sub { vertical-align: sub; font-size: .75em; }
-.kogaki { font-size: .75em; }
-.upr { text-orientation: upright; }
-.swr, .yoko { writing-mode: horizontal-tb; }
-.btm { margin-top: auto; }
-.pt1 { padding-top: 1em; }
-.pt2 { padding-top: 2em; }
-.pt3 { padding-top: 3em; }
-
-hr {
-  border: 0;
-  border-top: 1px solid currentColor;
-  margin: .5em 0;
-}
-
-a {
-  color: inherit;
-}
-
-.mt1 { margin-top: 1em; }
-.mt2 { margin-top: 2em; }
-.mt3 { margin-top: 3em; }
-.introduction, .postscript { margin: 1em 0; }
-.running_head { font-size: .8em; }
-.clear { clear: both; }
-
-.p-middle .main {
-  min-height: calc(100vh - 2em);
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-}
-
-.p-bottom .main {
-  min-height: calc(100vh - 2em);
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-}
-.tcy { text-combine-upright: all; -epub-text-combine: horizontal; }
+.hltr .b { font-weight: bold; }
+.hltr .i { font-style: italic; }
 "#;
 
 const TITLE_PAGE_MARKER: &str = "<!-- aozora-title-page -->";
@@ -340,6 +281,7 @@ impl EpubBook {
             return Err(EpubError::InvalidMetadata("cover asset"));
         }
 
+        let image_only = is_image_only(&self.sections);
         let mut archive = ZipWriter::new(output);
         write_entry(
             &mut archive,
@@ -353,6 +295,105 @@ impl EpubBook {
             CONTAINER_XML.as_bytes(),
             CompressionMethod::Deflated,
         )?;
+
+        if image_only {
+            write_entry(
+                &mut archive,
+                "item/style/fixed-layout-jp.css",
+                include_str!("../assets/aozora/template/item/style/fixed-layout-jp.css").as_bytes(),
+                CompressionMethod::Deflated,
+            )?;
+        } else {
+            for (name, content) in [
+                (
+                    "item/style/font.css",
+                    include_str!("../assets/aozora/template/item/style/font.css"),
+                ),
+                (
+                    "item/style/aozora.css",
+                    include_str!("../assets/aozora/template/item/style/aozora.css"),
+                ),
+                (
+                    "item/style/fixed-layout-jp.css",
+                    include_str!("../assets/aozora/template/item/style/fixed-layout-jp.css"),
+                ),
+                ("item/style/book-style.css", BOOK_STYLE_CSS),
+                (
+                    "item/style/style-reset.css",
+                    include_str!("../assets/aozora/template/item/style/style-reset.css"),
+                ),
+                (
+                    "item/style/style-standard.css",
+                    include_str!("../assets/aozora/template/item/style/style-standard.css"),
+                ),
+                (
+                    "item/style/style-advance.css",
+                    include_str!("../assets/aozora/template/item/style/style-advance.css"),
+                ),
+            ] {
+                write_entry(
+                    &mut archive,
+                    name,
+                    content.as_bytes(),
+                    CompressionMethod::Deflated,
+                )?;
+            }
+        }
+        if image_only {
+            for asset in &self.assets {
+                let path = format!("item/{}", asset.path);
+                write_entry(
+                    &mut archive,
+                    &path,
+                    &asset.data,
+                    CompressionMethod::Deflated,
+                )?;
+            }
+        }
+
+        if let Some(cover_asset) = &self.cover_asset
+            && !image_only
+        {
+            write_entry(
+                &mut archive,
+                "item/cover.xhtml",
+                render_cover(&self.metadata, cover_asset, self.kindle).as_bytes(),
+                CompressionMethod::Deflated,
+            )?;
+        }
+        for (index, section) in self.sections.iter().enumerate() {
+            let path = if is_title_page(section) {
+                "item/xhtml/title.xhtml".to_owned()
+            } else {
+                format!(
+                    "item/xhtml/{:04}.xhtml",
+                    self.sections[..=index]
+                        .iter()
+                        .filter(|section| !is_title_page(section))
+                        .count()
+                )
+            };
+            write_entry(
+                &mut archive,
+                &path,
+                render_section(
+                    &self.metadata,
+                    &section.body_fragment,
+                    self.vertical,
+                    self.kindle,
+                )
+                .as_bytes(),
+                CompressionMethod::Deflated,
+            )?;
+        }
+        if !image_only {
+            write_entry(
+                &mut archive,
+                "item/style/text.css",
+                TEXT_CSS.as_bytes(),
+                CompressionMethod::Deflated,
+            )?;
+        }
         write_entry(
             &mut archive,
             "item/standard.opf",
@@ -372,89 +413,22 @@ impl EpubBook {
             render_nav(&self.metadata, &self.sections).as_bytes(),
             CompressionMethod::Deflated,
         )?;
-        if let Some(cover_asset) = &self.cover_asset {
-            write_entry(
-                &mut archive,
-                "item/cover.xhtml",
-                render_cover(&self.metadata, cover_asset, self.kindle).as_bytes(),
-                CompressionMethod::Deflated,
-            )?;
-        }
         write_entry(
             &mut archive,
             "item/toc.ncx",
             render_ncx(&self.metadata, &self.sections).as_bytes(),
             CompressionMethod::Deflated,
         )?;
-        write_entry(
-            &mut archive,
-            "item/style/book-style.css",
-            BOOK_STYLE_CSS.as_bytes(),
-            CompressionMethod::Deflated,
-        )?;
-        for (name, content) in [
-            (
-                "item/style/style-reset.css",
-                include_str!("../assets/aozora/template/item/style/style-reset.css"),
-            ),
-            (
-                "item/style/style-standard.css",
-                include_str!("../assets/aozora/template/item/style/style-standard.css"),
-            ),
-            (
-                "item/style/style-advance.css",
-                include_str!("../assets/aozora/template/item/style/style-advance.css"),
-            ),
-            (
-                "item/style/aozora.css",
-                include_str!("../assets/aozora/template/item/style/aozora.css"),
-            ),
-            (
-                "item/style/font.css",
-                include_str!("../assets/aozora/template/item/style/font.css"),
-            ),
-            ("item/style/text.css", TEXT_CSS),
-            (
-                "item/style/fixed-layout-jp.css",
-                include_str!("../assets/aozora/template/item/style/fixed-layout-jp.css"),
-            ),
-        ] {
-            write_entry(
-                &mut archive,
-                name,
-                content.as_bytes(),
-                CompressionMethod::Deflated,
-            )?;
-        }
-        let mut body_index = 0;
-        for section in &self.sections {
-            let path = if is_title_page(section) {
-                "item/xhtml/title.xhtml".to_owned()
-            } else {
-                body_index += 1;
-                format!("item/xhtml/{body_index:04}.xhtml")
-            };
-            write_entry(
-                &mut archive,
-                &path,
-                render_section(
-                    &self.metadata,
-                    &section.body_fragment,
-                    self.vertical,
-                    self.kindle,
-                )
-                .as_bytes(),
-                CompressionMethod::Deflated,
-            )?;
-        }
-        for asset in &self.assets {
-            let path = format!("item/{}", asset.path);
-            write_entry(
-                &mut archive,
-                &path,
-                &asset.data,
-                CompressionMethod::Deflated,
-            )?;
+        if !image_only {
+            for asset in &self.assets {
+                let path = format!("item/{}", asset.path);
+                write_entry(
+                    &mut archive,
+                    &path,
+                    &asset.data,
+                    CompressionMethod::Deflated,
+                )?;
+            }
         }
 
         Ok(archive.finish()?)
@@ -550,7 +524,7 @@ mod tests {
             .unwrap();
         assert!(package.contains("href=\"xhtml/title.xhtml\""));
         assert!(package.contains("href=\"xhtml/0001.xhtml\""));
-        assert!(package.contains("</manifest>\n  <spine"));
+        assert!(package.contains("<spine page-progression-direction=\"rtl\""));
 
         let mut nav = String::new();
         archive
@@ -577,8 +551,7 @@ mod tests {
             .read_to_string(&mut section)
             .unwrap();
         assert!(section.contains(
-            "<html xmlns=\"http://www.w3.org/1999/xhtml\" \
-             xmlns:epub=\"http://www.idpf.org/2007/ops\" xml:lang=\"ja\" class=\"hltr\">"
+            "<html\n xmlns=\"http://www.w3.org/1999/xhtml\"\n xmlns:epub=\"http://www.idpf.org/2007/ops\"\n xml:lang=\"ja\"\n class=\"hltr\"\n>"
         ));
         assert!(section.contains("<body class=\"p-image\">"));
         assert!(section.contains("<img class=\"fit\" src=\"../image/fig.png\""));
@@ -629,8 +602,8 @@ mod tests {
             .read_to_string(&mut middle)
             .unwrap();
         assert!(middle.contains("class=\"hltr\""));
-        assert!(middle.contains("<body class=\"p-middle\">"));
-        assert!(!middle.contains("aozora-page-middle"));
+        assert!(middle.contains("<body class=\"p-text\">"));
+        assert!(middle.contains("block-align-center"));
     }
 
     #[test]

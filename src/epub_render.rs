@@ -118,12 +118,18 @@ pub(super) fn render_package(
     cover_asset: Option<&str>,
     vertical: bool,
 ) -> String {
+    let identifier = metadata
+        .identifier
+        .strip_prefix("urn:uuid:")
+        .or_else(|| metadata.identifier.strip_prefix("urn:"))
+        .unwrap_or(&metadata.identifier);
+    let image_only = is_image_only(sections);
     let creator = metadata
         .creator
         .as_deref()
         .map(|value| {
             format!(
-                "\n    <dc:creator id=\"creator\">{}</dc:creator>",
+                "\n\n<!-- 著者名 -->\n\t\t<dc:creator id=\"creator01\">{}</dc:creator>",
                 xml_escape(value)
             )
         })
@@ -131,125 +137,238 @@ pub(super) fn render_package(
     let publisher = metadata
         .publisher
         .as_deref()
-        .map(|value| format!("\n    <dc:publisher>{}</dc:publisher>", xml_escape(value)))
+        .map(|value| {
+            format!(
+                "\n<!-- 出版社名 -->\n\t\t<dc:publisher id=\"publisher\">{}</dc:publisher>",
+                xml_escape(value)
+            )
+        })
         .unwrap_or_default();
+    let fixed_metadata = if image_only {
+        format!(
+            "\n\n\t\t<!-- Fixed-Layout Documents指定 -->\n\
+\t\t<meta property=\"rendition:layout\">pre-paginated</meta>\n\
+\t\t<meta property=\"rendition:spread\">landscape</meta>\n\
+\t\t<meta name=\"original-resolution\" content=\"${{coverImage.Width}}x${{coverImage.Height}}\"/>\n\
+\n\
+\t\t<meta name=\"primary-writing-mode\" content=\"{}\"/>",
+            if vertical {
+                "horizontal-rl"
+            } else {
+                "horizontal-lr"
+            }
+        )
+    } else {
+        String::new()
+    };
+    let styles = if image_only {
+        "\t\t<item id=\"svg_image\" href=\"style/fixed-layout-jp.css\" media-type=\"text/css\"/>\n"
+    } else {
+        "\t\t<item id=\"vertical\" href=\"style/aozora.css\" media-type=\"text/css\"/>\n\
+        \t\t<item id=\"v_font\" href=\"style/font.css\" media-type=\"text/css\"/>\n\
+        \t\t<item id=\"v_text\" href=\"style/text.css\" media-type=\"text/css\"/>\n\
+        \t\t<item id=\"fixed-layout-jp\" href=\"style/fixed-layout-jp.css\" media-type=\"text/css\"/>\n\
+        \t\t<item id=\"book-style\" href=\"style/book-style.css\" media-type=\"text/css\"/>\n\
+        \t\t<item id=\"style-reset\" href=\"style/style-reset.css\" media-type=\"text/css\"/>\n\
+        \t\t<item id=\"style-standard\" href=\"style/style-standard.css\" media-type=\"text/css\"/>\n\
+        \t\t<item id=\"style-advance\" href=\"style/style-advance.css\" media-type=\"text/css\"/>\n"
+    };
     let mut body_number = 0;
     let mut manifest_sections = String::new();
     let mut spine_sections = String::new();
-    for section in sections {
+    for (index, section) in sections.iter().enumerate() {
         if is_title_page(section) {
             manifest_sections.push_str(
-                "    <item id=\"title\" href=\"xhtml/title.xhtml\" media-type=\"application/xhtml+xml\"/>\n",
+                "\t\t<item id=\"title-page\" href=\"xhtml/title.xhtml\" media-type=\"application/xhtml+xml\"/>\n",
             );
-            spine_sections.push_str("    <itemref idref=\"title\"/>\n");
-        } else {
-            body_number += 1;
-            let properties = if svg_image_body(section.body_fragment.trim()).is_some() {
-                " properties=\"svg\""
-            } else {
-                ""
-            };
+            spine_sections.push_str("\t\t<itemref idref=\"title-page\" linear=\"yes\"/>\n");
+            continue;
+        }
+        body_number += 1;
+        if image_only {
             manifest_sections.push_str(&format!(
-                "    <item id=\"section-{body_number:04}\" href=\"xhtml/{body_number:04}.xhtml\" media-type=\"application/xhtml+xml\"{properties}/>\n"
+                "\t\t<item media-type=\"application/xhtml+xml\" id=\"sec{body_number:04}\" href=\"xhtml/{body_number:04}.xhtml\" properties=\"svg\"/>\n"
             ));
-            spine_sections.push_str(&format!(
-                "    <itemref idref=\"section-{body_number:04}\"/>\n"
+        } else {
+            manifest_sections.push_str(&format!(
+                "\t\t<item id=\"sec{body_number:04}\" href=\"xhtml/{body_number:04}.xhtml\" media-type=\"application/xhtml+xml\"/>\n"
             ));
         }
+        let spread = if image_only {
+            let right = if vertical {
+                index % 2 == 0
+            } else {
+                index % 2 != 0
+            };
+            if right {
+                " properties=\"page-spread-right\""
+            } else {
+                " properties=\"page-spread-left\""
+            }
+        } else {
+            ""
+        };
+        spine_sections.push_str(&format!(
+            "\t\t<itemref linear=\"yes\" idref=\"sec{body_number:04}\"{spread}/>\n"
+        ));
     }
     let mut manifest_assets = String::new();
     for (index, asset) in assets.iter().enumerate() {
-        let properties = if cover_asset == Some(asset.path.as_str()) {
+        let properties = if !image_only && cover_asset == Some(asset.path.as_str()) {
             " properties=\"cover-image\""
         } else {
             ""
         };
         manifest_assets.push_str(&format!(
-            "    <item id=\"asset-{index:04}\" href=\"{}\" media-type=\"{}\"{properties}/>\n",
+            "\t\t<item id=\"img{:04}\" href=\"{}\" media-type=\"{}\"{properties}/>\n",
+            index + 1,
             xml_escape(&asset.path),
             xml_escape(&asset.media_type),
         ));
     }
-    let cover_manifest = if cover_asset.is_some() {
-        "    <item id=\"cover\" href=\"cover.xhtml\" media-type=\"application/xhtml+xml\"/>\n"
+    let cover_manifest = if !image_only && cover_asset.is_some() {
+        "\t\t<item media-type=\"application/xhtml+xml\" id=\"cover-page\" href=\"xhtml/cover.xhtml\" properties=\"svg\"/>\n"
     } else {
         ""
     };
-    let cover_spine = if cover_asset.is_some() {
-        "    <itemref idref=\"cover\"/>\n"
+    let cover_spine = if !image_only && cover_asset.is_some() {
+        "\t\t<itemref linear=\"yes\" idref=\"cover-page\" properties=\"rendition:page-spread-center\"/>\n"
     } else {
         ""
     };
-
     let progression = if vertical { "rtl" } else { "ltr" };
-
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id">
-  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <dc:title>{}</dc:title>{}{}
-    <dc:language>{}</dc:language>
-    <dc:identifier id="pub-id">{}</dc:identifier>
-    <meta property="dcterms:modified">{}</meta>
-  </metadata>
-  <manifest>
-    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
-    <item id="style" href="style/book-style.css" media-type="text/css"/>
-    <item id="style-reset" href="style/style-reset.css" media-type="text/css"/>
-    <item id="style-standard" href="style/style-standard.css" media-type="text/css"/>
-    <item id="style-advance" href="style/style-advance.css" media-type="text/css"/>
-    <item id="aozora-style" href="style/aozora.css" media-type="text/css"/>
-    <item id="font-style" href="style/font.css" media-type="text/css"/>
-    <item id="text-style" href="style/text.css" media-type="text/css"/>
-    <item id="fixed-layout-style" href="style/fixed-layout-jp.css" media-type="text/css"/>
-{}{}{}    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
-  </manifest>
-  <spine page-progression-direction="{progression}" toc="ncx">
-{}{}  </spine>
+<package
+ xmlns="http://www.idpf.org/2007/opf"
+ version="3.0"
+ xml:lang="{language}"
+ unique-identifier="unique-id"
+ prefix="rendition: http://www.idpf.org/vocab/rendition/#
+         ebpaj: http://www.ebpaj.jp/
+         fixed-layout-jp: http://www.digital-comic.jp/
+         ibooks: http://vocabulary.itunes.apple.com/rdf/ibooks/vocabulary-extensions-1.0/"
+>
+		<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+<!-- 作品名 -->
+		<dc:title id="title">{title}</dc:title>{creator}{publisher}
+<!-- 言語 -->
+		<dc:language id="pub-lang">{language}</dc:language>
+<!-- ファイルid -->
+		<dc:identifier id="unique-id">urn:uuid:{identifier}</dc:identifier>
+<!-- 更新日 -->
+		<meta property="dcterms:modified">{modified}</meta>{fixed_metadata}
+
+<!-- etc. -->
+<meta property="ebpaj:guide-version">1.1.3</meta>
+<meta property="ibooks:version">1.1.2</meta>
+	</metadata>
+
+	<manifest>
+<!-- navigation -->
+		<item media-type="application/xhtml+xml" id="nav" href="nav.xhtml" properties="nav"/>
+<!-- style -->
+{styles}<!-- image -->
+{assets}<!-- xhtml -->
+
+{cover}{sections}
+		<item href="toc.ncx" id="ncx" media-type="application/x-dtbncx+xml"/>
+	</manifest>
+
+	<spine page-progression-direction="{progression}" toc="ncx">
+
+{cover_spine}{spine}	</spine>
+
 </package>
 "#,
-        xml_escape(&metadata.title),
-        creator,
-        publisher,
-        xml_escape(&metadata.language),
-        xml_escape(&metadata.identifier),
-        xml_escape(&metadata.modified),
-        manifest_sections,
-        manifest_assets,
-        cover_manifest,
-        cover_spine,
-        spine_sections,
+        language = xml_escape(&metadata.language),
+        title = xml_escape(&metadata.title),
+        creator = creator,
+        publisher = publisher,
+        identifier = xml_escape(identifier),
+        modified = xml_escape(&metadata.modified),
+        fixed_metadata = fixed_metadata,
+        styles = styles,
+        assets = manifest_assets,
+        cover = cover_manifest,
+        sections = manifest_sections.trim_end(),
+        cover_spine = cover_spine,
+        spine = spine_sections,
         progression = progression,
     )
 }
 
 pub(super) fn render_nav(metadata: &EpubMetadata, sections: &[EpubSection]) -> String {
     let nav_items = render_nav_items(&nav_entries(sections));
-
+    let first_body = sections
+        .iter()
+        .enumerate()
+        .find(|(_, section)| !is_title_page(section))
+        .map(|(index, _)| {
+            let body_number = sections[..=index]
+                .iter()
+                .filter(|section| !is_title_page(section))
+                .count();
+            format!("xhtml/{body_number:04}.xhtml")
+        });
+    let landmark = first_body
+        .map(|path| {
+            format!("\t\t\t<li><a epub:type=\"bodymatter\" href=\"{path}\">本文</a></li>\n")
+        })
+        .unwrap_or_default();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{language}">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="{language}" xml:lang="{language}">
 <head>
-  <meta charset="UTF-8"/>
-  <title>{title}</title>
+<meta charset="UTF-8"/>
+<title>{title}</title>
+<style type="text/css">
+@page {{margin:.5em 0 0 .5em;}}
+html {{
+	writing-mode:horizontal-tb;
+	-webkit-writing-mode:horizontal-tb;
+	-epub-writing-mode:horizontal-tb;
+}}
+h1 {{font-size:1.5em; text-align:center;}}
+li {{padding:.25em 0 0 0;}}
+li a {{text-decoration:none; border-bottom-width:1px; border-bottom-style:solid; padding-right: 1px;}}
+li {{list-style:none;}}
+li.chapter {{list-style:disc; line-height:1.75em;}}
+nav#landmarks {{ display:none; }}
+</style>
 </head>
+
 <body>
-  <nav epub:type="toc" id="toc">
-    <h1>目次</h1>
-    <ol>
-{items}    </ol>
-  </nav>
+	<nav epub:type="landmarks" id="landmarks" hidden="">
+		<h2>Guide</h2>
+		<ol>
+{landmark}		</ol>
+	</nav>
+	<nav epub:type="toc" id="toc">
+		<h1>目　次</h1>
+		<ol>
+{items}		</ol>
+	</nav>
 </body>
 </html>
 "#,
         language = xml_escape(&metadata.language),
         title = xml_escape(&metadata.title),
+        landmark = landmark,
         items = nav_items,
     )
 }
 
 fn render_nav_items(entries: &[NavEntry]) -> String {
+    if entries.len() == 1 && entries[0].level == 1 {
+        let entry = &entries[0];
+        return format!(
+            "\t\t\t<li><a href=\"{}\">{}</a></li>\n\n",
+            xml_escape(&entry.path),
+            xml_escape(&entry.label),
+        );
+    }
     let mut output = String::new();
     let mut depth = 1usize;
     let mut has_item = false;
@@ -258,28 +377,27 @@ fn render_nav_items(entries: &[NavEntry]) -> String {
         if has_item {
             if level > depth {
                 for _ in depth..level {
-                    output.push_str("      <ol>\n");
+                    output.push_str("\t\t<ol>\n");
                 }
             } else {
-                output.push_str("      </li>\n");
+                output.push_str("</li>\n");
                 for _ in level..depth {
-                    output.push_str("      </ol>\n      </li>\n");
+                    output.push_str("</ol>\n</li>\n");
                 }
             }
         }
         output.push_str(&format!(
-            "      <li><a href=\"{}\">{}</a>",
+            "\t\t\t<li><a href=\"{}\">{}</a>\n",
             xml_escape(&entry.path),
             xml_escape(&entry.label),
         ));
         depth = level;
         has_item = true;
-        output.push('\n');
     }
     if has_item {
-        output.push_str("      </li>\n");
+        output.push_str("</li>\n");
         for _ in 1..depth {
-            output.push_str("      </ol>\n      </li>\n");
+            output.push_str("</ol>\n</li>\n");
         }
     }
     output
@@ -287,44 +405,57 @@ fn render_nav_items(entries: &[NavEntry]) -> String {
 
 pub(super) fn render_ncx(metadata: &EpubMetadata, sections: &[EpubSection]) -> String {
     let entries = nav_entries(sections);
+    let identifier = metadata
+        .identifier
+        .strip_prefix("urn:uuid:")
+        .or_else(|| metadata.identifier.strip_prefix("urn:"))
+        .unwrap_or(&metadata.identifier);
     let mut nav_points = String::new();
     let mut current_depth = 0usize;
+    let simple_fallback = entries.len() == 1 && entries[0].level == 1;
     for (index, entry) in entries.iter().enumerate() {
         while current_depth >= entry.level && current_depth > 0 {
-            let indent = "    ".repeat(current_depth);
-            nav_points.push_str(&format!("{indent}</navPoint>\n"));
+            nav_points.push_str("</navPoint>\n");
             current_depth -= 1;
         }
-        let indent = "    ".repeat(entry.level);
+        let indent = if simple_fallback {
+            String::new()
+        } else {
+            "\t".repeat(entry.level)
+        };
         let play_order = index + 1;
         nav_points.push_str(&format!(
-            "{indent}<navPoint id=\"navpoint-{play_order}\" playOrder=\"{play_order}\">\n\
-{indent}  <navLabel><text>{}</text></navLabel>\n\
-{indent}  <content src=\"{}\"/>\n",
+            "{indent}<navPoint id=\"toc{play_order}\" playOrder=\"{play_order}\">\n\
+{indent}<navLabel>\n\
+{indent}<text>{}</text>\n\
+{indent}</navLabel>\n\
+{indent}<content src=\"{}\"/>\n",
             xml_escape(&entry.label),
             xml_escape(&entry.path),
         ));
         current_depth = entry.level;
     }
     while current_depth > 0 {
-        let indent = "    ".repeat(current_depth);
-        nav_points.push_str(&format!("{indent}</navPoint>\n"));
+        nav_points.push_str("</navPoint>\n");
         current_depth -= 1;
     }
-
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
-  <head>
-    <meta name="dtb:uid" content="{identifier}"/>
-  </head>
-  <docTitle><text>{title}</text></docTitle>
-  <navMap>
-{nav_points}  </navMap>
+<head>
+<meta name="dtb:uid" content="urn:uuid:{identifier}"/>
+<meta name="dtb:depth" content="1"/>
+<meta name="dtb:totalPageCount" content="0"/>
+<meta name="dtb:maxPageNumber" content="0"/>
+</head>
+<docTitle>
+	<text>{title}</text>
+</docTitle>
+<navMap>
+{nav_points}</navMap>
 </ncx>
 "#,
-        identifier = xml_escape(&metadata.identifier),
+        identifier = xml_escape(identifier),
         title = xml_escape(&metadata.title),
         nav_points = nav_points,
     )
@@ -368,7 +499,7 @@ pub(super) fn render_section(
             .as_deref()
             .map(|value| {
                 format!(
-                    "\n    <div class=\"publisher\"><p>{}</p></div>",
+                    "\n<div class=\"publisher\"><p>{}</p></div>",
                     xml_escape(value)
                 )
             })
@@ -376,26 +507,27 @@ pub(super) fn render_section(
         let creator = metadata
             .creator
             .as_deref()
-            .map(|value| {
-                format!(
-                    "\n    <div class=\"author\"><p>{}</p></div>",
-                    xml_escape(value)
-                )
-            })
+            .map(|value| format!("\n<div class=\"author\"><p>{}</p></div>", xml_escape(value)))
             .unwrap_or_default();
         return format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{language}" class="hltr">
+<html
+ xmlns="http://www.w3.org/1999/xhtml"
+ xmlns:epub="http://www.idpf.org/2007/ops"
+ xml:lang="{language}"
+ class="hltr"
+>
 <head>
-  <meta charset="UTF-8"/>
-  <title>{title}</title>
-  <link rel="stylesheet" type="text/css" href="../style/book-style.css"/>
+<meta charset="UTF-8"/>
+<title>{title}</title>
+<link rel="stylesheet" type="text/css" href="../style/book-style.css"/>
+
 </head>
 <body class="p-titlepage{kindle_class}">
-  <div class="book-title">{publisher}
-    <div class="book-title-main"><p>{title}</p></div>{creator}
-  </div>
+<div class="book-title">{publisher}
+<div class="book-title-main"><p>{title}</p></div>{creator}
+</div>
 </body>
 </html>
 "#,
@@ -408,18 +540,27 @@ pub(super) fn render_section(
     }
 
     let (page_class, raw_body_fragment) = section_page_mode(trimmed);
-    let body_fragment = sanitize_xhtml_fragment(raw_body_fragment);
+    let body_fragment = dedent_fragment(&sanitize_xhtml_fragment(raw_body_fragment));
     if let Some(image) = image_page_body(&body_fragment) {
         return format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{language}" class="hltr">
+<!DOCTYPE html>
+<html
+ xmlns="http://www.w3.org/1999/xhtml"
+ xmlns:epub="http://www.idpf.org/2007/ops"
+ xml:lang="{language}"
+ class="hltr"
+>
 <head>
-  <meta charset="UTF-8"/>
-  <title>{title}</title>
-  <link rel="stylesheet" type="text/css" href="../style/book-style.css"/>
+<meta charset="UTF-8"/>
+<title>{title}</title>
+<link rel="stylesheet" type="text/css" href="../style/book-style.css"/>
+
 </head>
 <body class="p-image{kindle_class}">
-  <div class="main">{image}</div>
+<div class="main">
+{image}
+</div>
 </body>
 </html>
 "#,
@@ -434,15 +575,21 @@ pub(super) fn render_section(
         return format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{language}">
+<html
+xmlns="http://www.w3.org/1999/xhtml"
+xmlns:epub="http://www.idpf.org/2007/ops"
+xml:lang="{language}"
+>
 <head>
-  <meta charset="UTF-8"/>
-  <title>{title}</title>
-  <link rel="stylesheet" type="text/css" href="../style/fixed-layout-jp.css"/>
-  <meta name="viewport" content="width={width}, height={height}"/>
+<meta charset="UTF-8"/>
+<title>{title}</title>
+<link rel="stylesheet" type="text/css" href="../style/fixed-layout-jp.css"/>
+<meta name="viewport" content="width={width}, height={height}"/>
 </head>
 <body>
-  <div class="main">{svg}</div>
+<div class="main">
+{svg}
+</div>
 </body>
 </html>
 "#,
@@ -455,28 +602,48 @@ pub(super) fn render_section(
     }
 
     let layout_class = if vertical { "vrtl" } else { "hltr" };
-    let page_class = body_class(page_class, kindle);
+    let page_text = page_class.contains("p-middle") || page_class.contains("p-bottom");
+    let rendered_page_class = if page_text {
+        format!(" class=\"p-text{kindle_class}\"")
+    } else {
+        body_class("", kindle)
+    };
+    let body = if page_class.contains("p-middle") {
+        format!(
+            "<div class=\"main vrtl block-align-center\">\n<div class=\"start-2em\">\n{body_fragment}\n</div>\n</div>"
+        )
+    } else if page_class.contains("p-bottom") {
+        format!(
+            "<div class=\"main vrtl block-align-end\">\n<div class=\"start-2em\">\n{body_fragment}\n</div>\n</div>"
+        )
+    } else {
+        format!("<div class=\"main\">\n{body_fragment}\n</div>")
+    };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{language}" class="{layout_class}">
+<html
+ xmlns="http://www.w3.org/1999/xhtml"
+ xmlns:epub="http://www.idpf.org/2007/ops"
+ xml:lang="{language}"
+ class="{layout_class}"
+>
 <head>
-  <meta charset="UTF-8"/>
-  <title>{title}</title>
-  <link rel="stylesheet" type="text/css" href="../style/book-style.css"/>
+<meta charset="UTF-8"/>
+<title>{title}</title>
+<link rel="stylesheet" type="text/css" href="../style/book-style.css"/>
+
 </head>
-<body{page_class}>
-  <div class="main">
+<body{rendered_page_class}>
 {body}
-  </div>
 </body>
 </html>
 "#,
         language = xml_escape(&metadata.language),
         title = xml_escape(&metadata.title),
         layout_class = layout_class,
-        page_class = page_class,
-        body = body_fragment,
+        rendered_page_class = rendered_page_class,
+        body = body,
     )
 }
 
@@ -499,6 +666,15 @@ fn body_class(page_class: &str, kindle: bool) -> String {
             kindle_class
         )
     }
+}
+
+fn dedent_fragment(fragment: &str) -> String {
+    fragment
+        .lines()
+        .map(|line| line.strip_prefix("    ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + if fragment.ends_with('\n') { "\n" } else { "" }
 }
 
 fn sanitize_xhtml_fragment(fragment: &str) -> String {
@@ -553,6 +729,12 @@ fn tag_name(tag: &str) -> (bool, Option<&str>) {
 fn svg_image_body(body: &str) -> Option<&str> {
     let body = body.trim();
     (body.starts_with("<svg ") && body.ends_with("</svg>")).then_some(body)
+}
+pub(super) fn is_image_only(sections: &[EpubSection]) -> bool {
+    !sections.is_empty()
+        && sections
+            .iter()
+            .all(|section| svg_image_body(section.body_fragment.trim()).is_some())
 }
 
 fn svg_view_box(svg: &str) -> Option<(u32, u32)> {
