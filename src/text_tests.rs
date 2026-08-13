@@ -4,6 +4,7 @@ use super::{
 };
 use crate::config::{AozoraConfig, IniSettings};
 use encoding_rs::SHIFT_JIS;
+use std::path::PathBuf;
 
 #[test]
 fn escapes_text_and_preserves_empty_lines() {
@@ -478,6 +479,31 @@ fn converts_unicode_and_ivs_gaiji_notes() {
     assert!(output.contains("葛"));
     assert!(output.contains("丈\u{e0101}"));
     assert!(!output.contains("［＃"));
+}
+
+#[test]
+fn emits_configured_dakuten_glyph_font() {
+    let mut config = AozoraConfig {
+        dakuten_type: 2,
+        ..Default::default()
+    };
+    config.gaiji_fonts.insert(
+        "u3048-u3099".to_owned(),
+        PathBuf::from("dakuten/u3048-u3099.ttf"),
+    );
+    let output =
+        super::plain_text_to_xhtml_with_config("※［＃濁点付き平仮名え］", &config).unwrap();
+    assert!(output.contains("<span class=\"glyph u3048-u3099\">え</span>"));
+}
+
+#[test]
+fn emits_configured_unicode_glyph_font() {
+    let mut config = AozoraConfig::default();
+    config
+        .gaiji_fonts
+        .insert("u845b".to_owned(), PathBuf::from("u845b.ttf"));
+    let output = super::plain_text_to_xhtml_with_config("※［＃U+845B］", &config).unwrap();
+    assert!(output.contains("<span class=\"glyph u845b\">〓</span>"));
 }
 #[test]
 fn normalizes_shift_jis_dash_variants_in_gaiji_notes() {

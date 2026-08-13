@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -158,6 +158,7 @@ pub struct AozoraConfig {
     pub suffix_notes: BTreeMap<String, SuffixNoteRule>,
     pub gaiji: BTreeMap<String, String>,
     pub gaiji_alternatives: BTreeMap<String, String>,
+    pub gaiji_fonts: BTreeMap<String, PathBuf>,
     pub latin_replacements: BTreeMap<String, String>,
     pub character_replacements: BTreeMap<String, String>,
     pub block_open_tags: BTreeMap<String, String>,
@@ -248,6 +249,7 @@ impl Default for AozoraConfig {
                 ("くの字点（濁点付き）".to_owned(), "／″＼".to_owned()),
             ]),
             gaiji_alternatives: BTreeMap::new(),
+            gaiji_fonts: BTreeMap::new(),
             latin_replacements: BTreeMap::new(),
             character_replacements: BTreeMap::new(),
             block_open_tags: BTreeMap::from([(
@@ -455,7 +457,41 @@ impl AozoraConfig {
         self.load_optional_file(directory.join("chuki_alt.txt"), Self::load_alt_text)?;
         self.load_optional_file(directory.join("chuki_latin.txt"), Self::load_latin_text)?;
         self.load_optional_file(directory.join("replace.txt"), Self::load_replace_text)?;
+        self.load_gaiji_fonts(&directory.join("gaiji"))?;
         Ok(())
+    }
+
+    fn load_gaiji_fonts(&mut self, directory: &Path) -> Result<(), ConfigError> {
+        if !directory.is_dir() {
+            return Ok(());
+        }
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                self.load_gaiji_fonts(&path)?;
+                continue;
+            }
+            let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if !matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "ttf" | "ttc" | "otf"
+            ) {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let class_name = stem.to_ascii_lowercase();
+            self.gaiji_fonts.entry(class_name).or_insert(path);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn gaiji_font(&self, class_name: &str) -> Option<&Path> {
+        self.gaiji_fonts.get(class_name).map(PathBuf::as_path)
     }
 
     pub fn load_tag_text(&mut self, input: &str) {

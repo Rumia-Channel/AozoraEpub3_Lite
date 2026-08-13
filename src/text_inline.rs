@@ -846,17 +846,80 @@ fn unicode_replacement(note: &str, config: &AozoraConfig) -> Option<String> {
         end = variation_end;
     }
     let _ = end;
-    Some(filter_ivs(&replacement, config))
+    Some(render_gaiji_replacement(&replacement, config))
 }
 
-fn filter_ivs(input: &str, config: &AozoraConfig) -> String {
-    input
-        .chars()
-        .filter(|character| {
-            (config.print_ivs_ssp || !('\u{e0100}'..='\u{e01ef}').contains(character))
-                && (config.print_ivs_bmp || !('\u{fe00}'..='\u{fe0f}').contains(character))
-        })
-        .collect()
+fn render_gaiji_replacement(input: &str, config: &AozoraConfig) -> String {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if let Some((class_name, consumed)) = glyph_font_for_sequence(&chars, index, config) {
+            output.push_str(&glyph_span(&class_name, '〓'));
+            index += consumed;
+            continue;
+        }
+        if is_bmp_variation(chars[index]) && !config.print_ivs_bmp
+            || is_ssp_variation(chars[index]) && !config.print_ivs_ssp
+        {
+            index += 1;
+            continue;
+        }
+        index += push_text_char(&mut output, &chars, index, config, false);
+    }
+    output
+}
+
+fn glyph_font_for_sequence(
+    chars: &[char],
+    index: usize,
+    config: &AozoraConfig,
+) -> Option<(String, usize)> {
+    let base = *chars.get(index)?;
+    if let Some(variation) = chars.get(index + 1).copied().and_then(variation_code) {
+        let ivs_class = format!("u{:x}-u{:x}", base as u32, variation);
+        if config.gaiji_font(&ivs_class).is_some() {
+            return Some((ivs_class, 2));
+        }
+        let base_class = format!("u{:x}", base as u32);
+        if config.gaiji_font(&base_class).is_some() {
+            return Some((base_class, 2));
+        }
+    }
+    let base_class = format!("u{:x}", base as u32);
+    config.gaiji_font(&base_class).map(|_| (base_class, 1))
+}
+
+fn variation_code(character: char) -> Option<u32> {
+    is_bmp_variation(character)
+        .then_some(character as u32)
+        .or_else(|| is_ssp_variation(character).then_some(character as u32))
+}
+
+fn is_bmp_variation(character: char) -> bool {
+    ('\u{fe00}'..='\u{fe0f}').contains(&character)
+}
+
+fn is_ssp_variation(character: char) -> bool {
+    ('\u{e0100}'..='\u{e01ef}').contains(&character)
+}
+
+fn glyph_span(class_name: &str, base: char) -> String {
+    format!(
+        "<span class=\"glyph {class_name}\">{}</span>",
+        escape_html(&base.to_string())
+    )
+}
+
+fn parse_hex_code(input: &str, start: usize) -> Option<(u32, usize)> {
+    let end = input[start..]
+        .char_indices()
+        .find_map(|(offset, character)| (!character.is_ascii_hexdigit()).then_some(start + offset))
+        .unwrap_or(input.len());
+    if end == start {
+        return None;
+    }
+    Some((u32::from_str_radix(&input[start..end], 16).ok()?, end))
 }
 
 fn parse_gaiji_note(
@@ -881,7 +944,7 @@ fn parse_gaiji_note(
         .or_else(|| config.gaiji.get(bare_note))
         .or_else(|| config.gaiji.get(key))
     {
-        return Some((end, filter_ivs(replacement, config)));
+        return Some((end, render_gaiji_replacement(replacement, config)));
     }
     if let Some(replacement) = unicode_replacement(bare_note, config) {
         return Some((end, replacement));
@@ -914,17 +977,6 @@ fn gaiji_note_range(chars: &[char], start: usize) -> Option<(usize, String)> {
         index += 1;
     }
     None
-}
-
-fn parse_hex_code(input: &str, start: usize) -> Option<(u32, usize)> {
-    let end = input[start..]
-        .char_indices()
-        .find_map(|(offset, character)| (!character.is_ascii_hexdigit()).then_some(start + offset))
-        .unwrap_or(input.len());
-    if end == start {
-        return None;
-    }
-    Some((u32::from_str_radix(&input[start..end], 16).ok()?, end))
 }
 
 fn parse_image_note(
@@ -1306,6 +1358,21 @@ fn push_text_char(
         .copied()
         .and_then(normalize_dakuten_mark);
     if config.vertical
+        && config.dakuten_type == 2
+        && let Some(mark) = next_mark
+        && is_dakuten_base(chars[index])
+    {
+        let class_name = format!(
+            "u{:x}-u{:x}",
+            chars[index] as u32,
+            if mark == '゛' { 0x3099 } else { 0x309a }
+        );
+        if config.gaiji_font(&class_name).is_some() {
+            output.push_str(&glyph_span(&class_name, chars[index]));
+            return 2;
+        }
+    }
+    if config.vertical
         && config.dakuten_type == 1
         && let Some(mark) = next_mark
         && is_dakuten_base(chars[index])
@@ -1320,6 +1387,10 @@ fn push_text_char(
             output.push_str("</span></span>");
         }
         return 2;
+    }
+    if let Some((class_name, consumed)) = glyph_font_for_sequence(chars, index, config) {
+        output.push_str(&glyph_span(&class_name, '〓'));
+        return consumed;
     }
 
     let character = normalize_vertical_character(chars[index], config.vertical);
@@ -1363,6 +1434,7 @@ fn is_dakuten_base(character: char) -> bool {
             | 'ヽ'
             | 'ヿ'
             | '〻'
+            | '\u{31f0}'..='\u{31ff}'
     )
 }
 
