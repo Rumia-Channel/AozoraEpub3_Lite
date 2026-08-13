@@ -131,7 +131,12 @@ fn convert_input(
             .encoding
             .as_deref()
             .filter(|label| !label.eq_ignore_ascii_case("AUTO"));
-        let text = decode_text(&bytes, encoding_label)?;
+        let preserve_utf8_bom = bytes.starts_with(&[0xEF, 0xBB, 0xBF])
+            && encoding_label.is_none_or(|label| label.eq_ignore_ascii_case("UTF-8"));
+        let mut text = decode_text(&bytes, encoding_label)?;
+        if preserve_utf8_bom {
+            text.insert(0, '\u{feff}');
+        }
 
         let detected = detect_meta_with_gaiji(&text, title_type, publisher_first, &config.gaiji);
         let detected_title_source = detected
@@ -487,7 +492,7 @@ fn build_title_page_markup(
     input: &str,
     metadata: &BookMeta,
     config: &AozoraConfig,
-    vertical: bool,
+    _vertical: bool,
 ) -> Option<String> {
     let title_start = metadata.title_line?;
     let creator_start = metadata
@@ -506,18 +511,21 @@ fn build_title_page_markup(
     if title_lines.is_empty() {
         return None;
     }
-    let mut markup = String::new();
+
+    let mut markup = String::from("<div class=\"book-title start-2em\">\n");
     for (index, line) in title_lines.iter().enumerate() {
         let converted = inline_to_xhtml(line, config);
-        match index {
-            0 => markup.push_str(&format!(
-                "<div class=\"title book-title-main\"><p>{converted}</p></div>"
-            )),
-            1 => markup.push_str(&format!("<div class=\"orgtitle pt1\">{converted}</div>")),
-            2 => markup.push_str(&format!("<div class=\"subtitle pt1\">{converted}</div>")),
-            _ => markup.push_str(&format!("<div class=\"suborgtitle pt2\">{converted}</div>")),
-        }
+        let element = match index {
+            0 => format!("\t<div class=\"title book-title-main\"><p>{converted}</p></div>"),
+            1 => format!("\t<div class=\"orgtitle pt1\">{converted}</div>"),
+            2 => format!("\t<div class=\"subtitle pt1\">{converted}</div>"),
+            _ => format!("\t<div class=\"suborgtitle pt2\">{converted}</div>"),
+        };
+        markup.push_str(&element);
+        markup.push('\n');
     }
+    markup.push_str("</div>");
+
     if let Some(creator_start) = metadata.creator_line {
         let creator_end = metadata
             .title_end_line
@@ -535,25 +543,13 @@ fn build_title_page_markup(
             .enumerate()
         {
             let converted = inline_to_xhtml(line.1, config);
-            if index == 0 {
-                markup.push_str(&format!(
-                    "<div class=\"creator btm pb2 author\">{converted}</div>"
-                ));
-            } else {
-                markup.push_str(&format!(
-                    "<div class=\"subcreator btm pb2 author\">{converted}</div>"
-                ));
-            }
+            let class = if index == 0 { "creator" } else { "subcreator" };
+            markup.push_str(&format!(
+                "\n\t<div class=\"{class} btm pb2 author\">{converted}</div>"
+            ));
         }
     }
-    Some(format!(
-        "<div class=\"{}\">{markup}</div>",
-        if vertical {
-            "book-title start-2em"
-        } else {
-            "book-title"
-        }
-    ))
+    Some(markup)
 }
 
 fn is_kindle(options: &CliOptions) -> bool {

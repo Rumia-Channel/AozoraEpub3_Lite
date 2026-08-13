@@ -588,38 +588,66 @@ pub(super) fn render_section(
     let kindle_class = if kindle { " kindle" } else { "" };
     let trimmed = body_fragment.trim();
     if trimmed == TITLE_PAGE_MARKER {
+        let custom_title_page = title_page_markup.is_some();
         let publisher = metadata
             .publisher
             .as_deref()
             .map(|value| {
-                format!(
-                    "\n<div class=\"publisher\"><p>{}</p></div>",
-                    xml_escape(value)
-                )
+                if custom_title_page {
+                    format!(
+                        "\t<div class=\"publisher\">{}</div>\n\t<br/>\n",
+                        xml_escape(value)
+                    )
+                } else {
+                    format!(
+                        "\n<div class=\"publisher\"><p>{}</p></div>",
+                        xml_escape(value)
+                    )
+                }
             })
             .unwrap_or_default();
-        let creator = creator_markup
-            .map(|value| format!("\n<div class=\"author\"><p>{value}</p></div>"))
-            .or_else(|| {
-                metadata.creator.as_deref().map(|value| {
-                    format!("\n<div class=\"author\"><p>{}</p></div>", xml_escape(value))
-                })
-            })
-            .unwrap_or_default();
-        let title_page_body = title_page_markup
-            .map(|markup| format!("\n{markup}"))
-            .unwrap_or_else(|| {
-                format!(
-                    "\n<div class=\"{book_class}\">\n<div class=\"book-title-main\"><p>{title_body}</p></div>{creator}\n</div>",
-                    book_class = if vertical {
-                        "book-title start-2em"
-                    } else {
-                        "book-title"
-                    },
-                    title_body = title_markup.unwrap_or(&metadata.title),
-                    creator = creator,
-                )
-            });
+        let creator_break_count = if let Some(markup) = title_page_markup.as_deref() {
+            markup.matches("class=\"creator ").count()
+                + markup.matches("class=\"subcreator ").count()
+        } else if creator_markup.is_some() || metadata.creator.is_some() {
+            1
+        } else {
+            0
+        };
+        let mut title_page_body = String::from("\n");
+        title_page_body.push_str(&publisher);
+        for index in 0..creator_break_count {
+            if index == 0 {
+                title_page_body.push_str("\n\t<br/>\n");
+            } else {
+                title_page_body.push_str("\t<br/>\n");
+            }
+        }
+        title_page_body.push('\n');
+        if let Some(markup) = title_page_markup {
+            title_page_body.push_str(markup);
+        } else {
+            title_page_body.push_str("<div class=\"book-title start-2em\">\n");
+            title_page_body.push_str("\t<div class=\"title book-title-main\"><p>");
+            if let Some(title_markup) = title_markup {
+                title_page_body.push_str(title_markup);
+            } else {
+                title_page_body.push_str(&xml_escape(&metadata.title));
+            }
+            title_page_body.push_str("</p></div>\n</div>");
+            if let Some(creator_markup) = creator_markup {
+                title_page_body.push_str(&format!(
+                    "\n<div class=\"author\"><p>{creator_markup}</p></div>"
+                ));
+            } else if let Some(creator) = metadata.creator.as_deref() {
+                title_page_body.push_str(&format!(
+                    "\n<div class=\"author\"><p>{}</p></div>",
+                    xml_escape(creator)
+                ));
+            }
+        }
+        title_page_body.push_str("\n\n");
+        let layout_class = if vertical { "hltr" } else { "vrtl" };
         return format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
@@ -630,27 +658,18 @@ pub(super) fn render_section(
  class="{layout_class}"
 >
 <head>
-<meta charset="UTF-8"/>
-<title>{title_text}</title>
 <link rel="stylesheet" type="text/css" href="../style/book-style.css"/>
 
+<title>{title_text}</title>
 </head>
+
+
 <body class="p-titlepage{kindle_class}">
-<div class="{main_class}">{publisher}{title_page_body}
-</div>
+<div class="main vrtl block-align-center">{title_page_body}</div>
 </body>
-</html>
-"#,
+</html>"#,
             language = xml_escape(&metadata.language),
             title_text = xml_escape(&metadata.title),
-            layout_class = "hltr",
-            main_class = if vertical {
-                "main vrtl block-align-center"
-            } else {
-                "main"
-            },
-            publisher = publisher,
-            title_page_body = title_page_body,
             kindle_class = kindle_class,
         );
     }

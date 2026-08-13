@@ -103,6 +103,32 @@ fn title_page_navigation_omits_unheaded_body_fallbacks() {
 }
 
 #[test]
+fn title_page_uses_java_xhtml_head_and_spacing() {
+    let book = EpubBook::new(
+        EpubMetadata::new("題名", "urn:test:title-template").with_creator("著者"),
+        "<p>本文</p>\n",
+    )
+    .with_metadata_markup("題名", Some("著者".to_owned()))
+    .with_title_page();
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let mut title = String::new();
+    archive
+        .by_name("item/xhtml/title.xhtml")
+        .unwrap()
+        .read_to_string(&mut title)
+        .unwrap();
+    assert!(!title.contains("<meta charset=\"UTF-8\"/>"));
+    assert!(title.contains(
+        "<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/book-style.css\"/>\n\n<title>"
+    ));
+    assert!(title.contains(
+        "<div class=\"main vrtl block-align-center\">\n\n\t<br/>\n\n<div class=\"book-title start-2em\">"
+    ));
+    assert!(title.contains("</div>\n<div class=\"author\"><p>著者</p></div>\n\n</div>"));
+}
+
+#[test]
 fn writes_assets_and_manifest_entries() {
     let book = EpubBook::new(
         EpubMetadata::new("画像", "urn:test:image"),
