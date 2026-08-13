@@ -274,7 +274,21 @@ fn append_gaiji_assets(
     creator_markup: Option<&str>,
     title_page_markup: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
-    for (class_name, path) in &config.gaiji_fonts {
+    let mut font_entries = config.gaiji_fonts.iter().collect::<Vec<_>>();
+    let mut markup = sections.join("\n");
+    markup.push_str(title_markup);
+    if let Some(creator_markup) = creator_markup {
+        markup.push_str(creator_markup);
+    }
+    if let Some(title_page_markup) = title_page_markup {
+        markup.push_str(title_page_markup);
+    }
+    font_entries.sort_by_key(|(class_name, _)| {
+        markup
+            .find(&format!("class=\"glyph {class_name}\""))
+            .unwrap_or(usize::MAX)
+    });
+    for (class_name, path) in font_entries {
         let marker = format!("class=\"glyph {class_name}\"");
         let used = sections.iter().any(|section| section.contains(&marker))
             || title_markup.contains(&marker)
@@ -1037,7 +1051,6 @@ impl ImagePageType {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ImagePageFit {
     None,
-    Width,
     Height,
     HeightPercent(f32),
 }
@@ -1160,7 +1173,7 @@ fn image_page_fit(
     }
     match image_setting_usize(config, "ImageSizeType", 2) {
         1 => ImagePageFit::None,
-        3 if image_width / image_height > display_width / display_height => ImagePageFit::Width,
+        3 => ImagePageFit::None,
         2 if image_width / image_height > display_width / display_height => {
             ImagePageFit::HeightPercent(
                 (image_height / image_width * display_width / display_height * 100.0)
@@ -1474,7 +1487,6 @@ fn decorate_image_tags(sections: &mut [String], assets: &[EpubAsset], config: &A
                 !page_type.is_page() && image_setting_bool(config, "ImageFloatBlock", false);
             let (wrapper_replacement, image_class, image_style, image_dimensions) = if page_float {
                 let style = match page_fit {
-                    ImagePageFit::Width => Some("width:100%;".to_owned()),
                     ImagePageFit::Height => Some("height:100%;".to_owned()),
                     ImagePageFit::HeightPercent(value) => {
                         Some(format!("height:{value:.1}%; min-height:{value:.1}%;"))
@@ -1492,7 +1504,6 @@ fn decorate_image_tags(sections: &mut [String], assets: &[EpubAsset], config: &A
                     ImagePageFit::HeightPercent(value) => {
                         Some(format!("height:{value:.1}%; min-height:{value:.1}%;"))
                     }
-                    ImagePageFit::Width => Some("width:100%;".to_owned()),
                     ImagePageFit::Height | ImagePageFit::None => None,
                 };
                 let dimensions = rotation

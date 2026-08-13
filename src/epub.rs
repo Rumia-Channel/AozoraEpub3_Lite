@@ -10,19 +10,7 @@ mod render;
 use render::{is_image_only, render_cover, render_nav, render_ncx, render_package, render_section};
 
 const MIMETYPE: &str = "application/epub+zip";
-const CONTAINER_XML: &str = r#"<?xml version="1.0"?>
-<container
- version="1.0"
- xmlns="urn:oasis:names:tc:opendocument:xmlns:container"
->
-<rootfiles>
-<rootfile
- full-path="item/standard.opf"
- media-type="application/oebps-package+xml"
-/>
-</rootfiles>
-</container>
-"#;
+const CONTAINER_XML: &str = "<?xml version=\"1.0\"?>\r\n<container\r\n version=\"1.0\"\r\n xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\"\r\n>\r\n<rootfiles>\r\n<rootfile\r\n full-path=\"item/standard.opf\"\r\n media-type=\"application/oebps-package+xml\"\r\n/>\r\n</rootfiles>\r\n</container>\r\n";
 const BOOK_STYLE_CSS: &str = include_str!("../assets/aozora/template/item/style/book-style.css");
 const TEXT_CSS: &str = r#"@charset "utf-8";
 @namespace "http://www.w3.org/1999/xhtml";
