@@ -1449,6 +1449,8 @@ fn is_dakuten_base(character: char) -> bool {
             | 'ヽ'
             | 'ヿ'
             | '〻'
+            | 'ー'
+            | 'ι'
             | '\u{31f0}'..='\u{31ff}'
     )
 }

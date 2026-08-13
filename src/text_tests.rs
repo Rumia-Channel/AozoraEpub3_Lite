@@ -499,6 +499,22 @@ fn emits_configured_dakuten_glyph_font() {
             .unwrap();
     assert!(located.contains("<span class=\"glyph u3048-u3099\">え</span>"));
 }
+#[test]
+fn emits_configured_dakuten_glyph_fonts_for_dash_and_greek_iota() {
+    let mut config = AozoraConfig {
+        dakuten_type: 2,
+        ..Default::default()
+    };
+    config
+        .gaiji_fonts
+        .insert("u30fc-u3099".to_owned(), PathBuf::from("u30fc-u3099.ttf"));
+    config
+        .gaiji_fonts
+        .insert("u3b9-u3099".to_owned(), PathBuf::from("u3b9-u3099.ttf"));
+    let output = super::plain_text_to_xhtml_with_config("ー゛ι゛", &config).unwrap();
+    assert!(output.contains("<span class=\"glyph u30fc-u3099\">ー</span>"));
+    assert!(output.contains("<span class=\"glyph u3b9-u3099\">ι</span>"));
+}
 
 #[test]
 fn emits_configured_unicode_glyph_font() {
