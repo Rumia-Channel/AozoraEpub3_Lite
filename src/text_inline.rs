@@ -1378,44 +1378,49 @@ fn push_text_char(
     config: &AozoraConfig,
     allow_upright: bool,
 ) -> usize {
+    if let Some((class_name, consumed)) = glyph_font_for_sequence(chars, index, config) {
+        output.push_str(&glyph_span(&class_name, '〓'));
+        return consumed;
+    }
     let next_mark = chars
         .get(index + 1)
         .copied()
         .and_then(normalize_dakuten_mark);
     if config.vertical
-        && config.dakuten_type == 2
         && let Some(mark) = next_mark
         && is_dakuten_base(chars[index])
     {
-        let class_name = format!(
-            "u{:x}-u{:x}",
-            chars[index] as u32,
-            if mark == '゛' { 0x3099 } else { 0x309a }
-        );
-        if config.gaiji_font(&class_name).is_some() {
+        // Java composes the standard kana pairs before applying the
+        // configured fallback for otherwise unsupported combinations.
+        if let Some(composed) = compose_dakuten(chars[index], mark) {
+            push_escaped_char(output, composed);
+            return 2;
+        }
+        if config.dakuten_type == 2
+            && config
+                .gaiji_font(&format!(
+                    "u{:x}-u{:x}",
+                    chars[index] as u32,
+                    if mark == '゛' { 0x3099 } else { 0x309a }
+                ))
+                .is_some()
+        {
+            let class_name = format!(
+                "u{:x}-u{:x}",
+                chars[index] as u32,
+                if mark == '゛' { 0x3099 } else { 0x309a }
+            );
             output.push_str(&glyph_span(&class_name, chars[index]));
             return 2;
         }
-    }
-    if config.vertical
-        && config.dakuten_type == 1
-        && let Some(mark) = next_mark
-        && is_dakuten_base(chars[index])
-    {
-        if let Some(composed) = compose_dakuten(chars[index], mark) {
-            push_escaped_char(output, composed);
-        } else {
+        if config.dakuten_type == 1 {
             output.push_str("<span class=\"dakuten\">");
             push_escaped_char(output, chars[index]);
             output.push_str("<span>");
             push_escaped_char(output, mark);
             output.push_str("</span></span>");
+            return 2;
         }
-        return 2;
-    }
-    if let Some((class_name, consumed)) = glyph_font_for_sequence(chars, index, config) {
-        output.push_str(&glyph_span(&class_name, '〓'));
-        return consumed;
     }
 
     let character = normalize_vertical_character(chars[index], config.vertical);
