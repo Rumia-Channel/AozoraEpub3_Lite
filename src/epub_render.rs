@@ -39,22 +39,18 @@ fn nav_entries(sections: &[EpubSection], title_markup: Option<&str>) -> Vec<NavE
         }
         if !is_title_page(section)
             && first_heading(section.body_fragment.as_str()).is_none()
-            && first_text_label(section.body_fragment.as_str()).is_none()
+            && (title_markup.is_some()
+                || first_text_label(section.body_fragment.as_str()).is_none())
         {
             continue;
         }
         let is_title = is_title_page(section);
         let label = if is_title {
             title_markup.unwrap_or("タイトル").to_owned()
-        } else if title_markup.is_some()
-            && body_number == 1
-            && first_heading(section.body_fragment.as_str()).is_none()
-        {
-            title_markup.unwrap_or_default().to_owned()
         } else {
             section_label(section, body_number, body_count)
         };
-        let markup = title_markup.is_some() && (is_title || body_number == 1);
+        let markup = title_markup.is_some() && is_title;
         let level = if is_title {
             1
         } else {
