@@ -1352,10 +1352,9 @@ fn append_line(
         // page-break chapters, so `chapter_id` is intentionally unused here.
         let _ = chapter_id;
         // 見出し注記で生成された h1/h2/h3 は <p> で包まない（Java 準拠）
-        let trimmed_start = converted.trim_start();
-        let is_heading = trimmed_start.starts_with("<h1")
-            || trimmed_start.starts_with("<h2")
-            || trimmed_start.starts_with("<h3");
+        let is_heading = ["<h1", "<h2", "<h3"]
+            .iter()
+            .any(|tag| converted.contains(tag));
         if is_heading {
             fragment.push_str(&converted);
             fragment.push('\n');

@@ -2034,3 +2034,18 @@ fn push_text_char_escaped(output: &mut String, character: char) {
 
 
 
+
+#[cfg(test)]
+mod debug_mado_tests {
+    use super::*;
+    use crate::config::AozoraConfig;
+    use std::path::Path;
+    #[test]
+    fn debug_mado() {
+        let config = crate::config::AozoraConfig::load_from_dirs(&[Path::new("assets/aozora")], None).unwrap();
+        let input = "魔境「蕨の切り株」［＃「魔境「蕨の切り株」」は中見出し］";
+        let out = convert_inline(input, &config);
+        eprintln!("MADO OUT: {out}");
+        eprintln!("suffix: {:?}", config.suffix_notes.get("は中見出し"));
+    }
+}
