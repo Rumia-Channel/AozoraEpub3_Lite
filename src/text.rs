@@ -754,6 +754,18 @@ fn render_lines<'a>(
             find_inline_block_note(line, config)
         {
             output_count += 1;
+            // Java: インライン字下げ注記でも字下げブロック継続時は前ブロックを閉じる
+            let note = &line[start + "［＃".len()..line[start..].find('］').map_or(start, |o| start + o)];
+            if note.contains("字下げ")
+                && blocks.iter().any(OpenBlock::is_indent)
+                && let Some(block) = blocks.pop()
+            {
+                let close = match block {
+                    OpenBlock::Generated { close_tag, .. } => close_tag,
+                    OpenBlock::Configured { fallback_close_tag, .. } => fallback_close_tag,
+                };
+                fragment.push_str(&close);
+            }
             fragment.push_str(&convert_inline(&line[..start], config));
             let open_tag = chapter_id
                 .map(|id| inject_kobo_id(&open_tag, &id))
@@ -798,6 +810,17 @@ fn render_lines<'a>(
                 && let Some((open_tag, close_tag)) = config.block_inline_tags.get(note)
             {
                 output_count += 1;
+                // Java: インライン字下げ注記でも字下げブロック継続時は前ブロックを閉じる
+                if note.contains("字下げ")
+                    && blocks.iter().any(OpenBlock::is_indent)
+                    && let Some(block) = blocks.pop()
+                {
+                    let close = match block {
+                        OpenBlock::Generated { close_tag, .. } => close_tag,
+                        OpenBlock::Configured { fallback_close_tag, .. } => fallback_close_tag,
+                    };
+                    fragment.push_str(&close);
+                }
                 let open_tag = chapter_id
                     .map(|id| inject_kobo_id(open_tag, &id))
                     .unwrap_or_else(|| open_tag.clone());
@@ -978,6 +1001,19 @@ fn render_lines<'a>(
                     let open_tag = chapter_id
                         .map(|id| inject_kobo_id(open_tag, &id))
                         .unwrap_or_else(|| open_tag.clone());
+                    // Java: インライン字下げ注記でも字下げブロック継続時は前ブロックを閉じる
+                    if note.contains("字下げ")
+                        && blocks.iter().any(OpenBlock::is_indent)
+                        && let Some(block) = blocks.pop()
+                    {
+                        let close = match block {
+                            OpenBlock::Generated { close_tag, .. } => close_tag,
+                            OpenBlock::Configured { fallback_close_tag, .. } => {
+                                fallback_close_tag
+                            }
+                        };
+                        fragment.push_str(&close);
+                    }
                     fragment.push_str(&open_tag);
                     fragment.push_str(&convert_inline(rest.trim_start(), config));
                     fragment.push_str(close_tag);
