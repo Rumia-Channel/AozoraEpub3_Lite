@@ -1328,6 +1328,17 @@ fn image_wrapper_range(original: &str, image_start: usize) -> Option<(usize, usi
         .then_some((start, end))
 }
 
+fn escape_image_alt(value: &str) -> String {
+    let decoded = value
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&times;", "×");
+    escape_html(&decoded).replace('×', "&times;")
+}
+
 fn render_image_tag(
     source: &str,
     alt: &str,
@@ -1394,7 +1405,7 @@ fn decorate_image_tags(sections: &mut [String], assets: &[EpubAsset], config: &A
             } else {
                 image_width_ratio(dimensions, config, has_caption)
             };
-            let alt = escape_html(tag_attribute(tag, "alt").unwrap_or_default().trim());
+            let alt = escape_image_alt(tag_attribute(tag, "alt").unwrap_or_default().trim());
             let wrapper =
                 image_wrapper_range(&original, start).filter(|(wrapper_start, wrapper_end)| {
                     &original[*wrapper_start..*wrapper_end] == "<span>"

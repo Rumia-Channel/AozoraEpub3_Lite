@@ -278,6 +278,18 @@ fn converts_and_collects_image_notes() {
 }
 
 #[test]
+fn attaches_following_ruby_to_image_notes() {
+    let output = plain_text_to_xhtml(
+        "［＃底本が「ラン」とルビを付した梵字（img/fig.png、横18×縦23）入る］《ラン》",
+    )
+    .unwrap();
+    assert!(output.contains(
+        "<ruby><span><img class=\"fit\" src=\"../image/img/fig.png\" alt=\"底本が「ラン」とルビを付した梵字\"/></span><rt>ラン</rt></ruby>"
+    ));
+    assert!(!output.contains("</span>《ラン》"));
+}
+
+#[test]
 fn converts_gaiji_image_notes_without_remote_resources() {
     let input = "※［＃外字（gaiji.png）#GAIJI#］";
     let output = plain_text_to_xhtml(input).unwrap();
@@ -483,6 +495,15 @@ fn converts_unicode_and_ivs_gaiji_notes() {
     assert!(!output.contains("［＃"));
 }
 
+#[test]
+fn preserves_entities_in_image_alt_text() {
+    let output = plain_text_to_xhtml(
+        "［＃底本が「×」の中央よりやや上方に横棒（img/fig.png、横18×縦23）入る］",
+    )
+    .unwrap();
+    assert!(output.contains(r#"alt="底本が「&times;」の中央よりやや上方に横棒""#));
+    assert!(!output.contains(r#"&amp;amp;"#));
+}
 #[test]
 fn resolves_unicode_code_after_unknown_gaiji_note() {
     let output =

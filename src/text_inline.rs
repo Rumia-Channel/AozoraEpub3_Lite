@@ -158,11 +158,18 @@ fn convert_inline_with_options(
             && let Some(close) = find_closing_ruby(&chars, index)
             && index > 0
             && (ruby_base_kind(chars[index - 1]).is_some()
-                || latin_bracket_start_ending_at(&chars, index).is_some())
+                || latin_bracket_start_ending_at(&chars, index).is_some()
+                || image_note_start_ending_at(&chars, index).is_some())
         {
-            let mut base_start = latin_bracket_start_ending_at(&chars, index).unwrap_or(index - 1);
+            let mut base_start = latin_bracket_start_ending_at(&chars, index)
+                .or_else(|| image_note_start_ending_at(&chars, index))
+                .unwrap_or(index - 1);
             while base_start > 0 {
                 if let Some(note_start) = gaiji_note_start_ending_at(&chars, base_start) {
+                    base_start = note_start;
+                    continue;
+                }
+                if let Some(note_start) = image_note_start_ending_at(&chars, base_start) {
                     base_start = note_start;
                     continue;
                 }
@@ -216,7 +223,11 @@ fn convert_inline_with_options(
     if implicit_ruby_open {
         output.push_str("</ruby>");
     }
-    output
+    if output.contains("&amp;times;") {
+        output.replace("&amp;times;", "&times;")
+    } else {
+        output
+    }
 }
 fn rewrite_warichu_breaks(input: &str) -> String {
     let chars = input.chars().collect::<Vec<_>>();
@@ -1092,11 +1103,13 @@ fn parse_image_note(
             .inline_notes
             .get("外字画像")
             .map(|template| format_image_template(template, &source, ""))
-            .unwrap_or_else(|| format!("<img class=\"gaiji\" src=\"{source}\" alt=\"\"/>"));
+            .unwrap_or_else(|| format!(r#"<img class="gaiji" src="{source}" alt=""/>"#));
         return Some((end, replacement));
     }
     let alt = if config.inline_notes.contains_key("画像") && !description.is_empty() {
         escape_html(&description)
+            .replace("&amp;times;", "&times;")
+            .replace('×', "&times;")
     } else {
         "挿絵".to_owned()
     };
@@ -1287,6 +1300,16 @@ fn gaiji_note_start_ending_at(chars: &[char], end: usize) -> Option<usize> {
             return None;
         }
         (note_range(chars, start).is_some_and(|(note_end, _)| note_end == end)).then_some(start - 1)
+    })
+}
+
+fn image_note_start_ending_at(chars: &[char], end: usize) -> Option<usize> {
+    if end == 0 || chars.get(end - 1) != Some(&'］') {
+        return None;
+    }
+    (0..end).rev().find_map(|start| {
+        let (note_end, _) = note_range(chars, start)?;
+        (note_end == end && image_note_parts(chars, start).is_some()).then_some(start)
     })
 }
 fn latin_bracket_start_ending_at(chars: &[char], end: usize) -> Option<usize> {
