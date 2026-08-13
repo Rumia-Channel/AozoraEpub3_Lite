@@ -93,7 +93,7 @@ fn converts_explicit_and_implicit_ruby() {
 #[test]
 fn groups_java_kanji_in_implicit_ruby_bases() {
     let output = plain_text_to_xhtml("〆切《しめきり》 漢字𥈽漢字《かんじがいじかんじ》").unwrap();
-    assert!(output.contains("〆<ruby>切<rt>しめきり</rt></ruby>"));
+    assert!(output.contains("<ruby>〆切<rt>しめきり</rt></ruby>"));
     assert!(output.contains("<ruby>漢字𥈽漢字<rt>かんじがいじかんじ</rt></ruby>"));
 }
 #[test]

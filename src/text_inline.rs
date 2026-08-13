@@ -2,14 +2,19 @@ use super::{AozoraConfig, heading_spec};
 const WRC_BREAK_MARKER: char = '\u{0001}';
 
 pub(super) fn convert_inline(input: &str, config: &AozoraConfig) -> String {
-    convert_inline_with_auto_yoko(input, config, true)
+    convert_inline_with_options(input, config, true, true)
 }
 
 fn convert_inline_without_auto_yoko(input: &str, config: &AozoraConfig) -> String {
-    convert_inline_with_auto_yoko(input, config, false)
+    convert_inline_with_options(input, config, false, true)
 }
 
-fn convert_inline_with_auto_yoko(input: &str, config: &AozoraConfig, auto_yoko: bool) -> String {
+fn convert_inline_with_options(
+    input: &str,
+    config: &AozoraConfig,
+    auto_yoko: bool,
+    allow_upright: bool,
+) -> String {
     let input = rewrite_character_replacements(input, config);
     let input = rewrite_suffix_notes(&input, config);
     let input = rewrite_warichu_breaks(&input);
@@ -23,7 +28,12 @@ fn convert_inline_with_auto_yoko(input: &str, config: &AozoraConfig, auto_yoko: 
     let mut output = String::new();
     let mut index = 0;
     let mut tcy_depth = 0usize;
+    let mut implicit_ruby_open = false;
     while index < chars.len() {
+        if implicit_ruby_open && chars[index] != '《' && ruby_base_kind(chars[index]).is_none() {
+            output.push_str("</ruby>");
+            implicit_ruby_open = false;
+        }
         if chars[index] == WRC_BREAK_MARKER {
             output.push_str(
                 config
@@ -175,19 +185,36 @@ fn convert_inline_with_auto_yoko(input: &str, config: &AozoraConfig, auto_yoko: 
             };
             if output.ends_with(&rendered_base) {
                 output.truncate(output.len() - rendered_base.len());
-                let reading = chars[index + 1..close].iter().collect::<String>();
-                push_ruby(
-                    &mut output,
-                    &base,
-                    &reading,
-                    config,
-                    auto_yoko && tcy_depth == 0,
-                );
-                index = close + 1;
-                continue;
             }
+            let reading = chars[index + 1..close].iter().collect::<String>();
+            let continues = has_following_implicit_ruby(&chars, close + 1);
+            if !implicit_ruby_open {
+                output.push_str("<ruby>");
+            }
+            push_ruby_part(
+                &mut output,
+                &base,
+                &reading,
+                config,
+                auto_yoko && tcy_depth == 0,
+            );
+            implicit_ruby_open = continues;
+            if !continues {
+                output.push_str("</ruby>");
+            }
+            index = close + 1;
+            continue;
         }
-        index += push_text_char(&mut output, &chars, index, config, tcy_depth == 0);
+        index += push_text_char(
+            &mut output,
+            &chars,
+            index,
+            config,
+            allow_upright && tcy_depth == 0,
+        );
+    }
+    if implicit_ruby_open {
+        output.push_str("</ruby>");
     }
     output
 }
@@ -537,7 +564,7 @@ fn contains_literal_gaiji_note(input: &str) -> bool {
 }
 
 fn convert_ruby_reading(reading: &str, config: &AozoraConfig) -> String {
-    convert_inline_without_auto_yoko(reading, config)
+    convert_inline_with_options(reading, config, false, false)
 }
 fn rewrite_auto_yoko(input: &str, config: &AozoraConfig) -> String {
     if !config.vertical || !config.auto_yoko {
@@ -1612,16 +1639,40 @@ fn find_latin_replacement<'a>(
 fn is_half_space(character: char) -> bool {
     (0x20..=0x02af).contains(&(character as u32))
 }
-
 fn ruby_base_kind(character: char) -> Option<u8> {
     match character as u32 {
-        0x3005 | 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff | 0x20000..=0x2ffff => Some(0),
+        0x3005..=0x3006
+        | 0x3400..=0x4dbf
+        | 0x4e00..=0x9fff
+        | 0xf900..=0xfaff
+        | 0x20000..=0x2ffff => Some(0),
         0x3041..=0x3096 => Some(1),
         0x30a1..=0x30fa | 0xff61..=0xff9f => Some(2),
         0x20..=0x7e | 0xa0..=0x2af => Some(3),
         0xff10..=0xff19 | 0xff21..=0xff3a | 0xff41..=0xff5a => Some(4),
         _ => None,
     }
+}
+
+fn has_following_implicit_ruby(chars: &[char], mut index: usize) -> bool {
+    let Some(first_kind) = chars
+        .get(index)
+        .and_then(|character| ruby_base_kind(*character))
+    else {
+        return false;
+    };
+    while let Some(&character) = chars.get(index) {
+        if character == '《' {
+            return index > 0
+                && find_closing_ruby(chars, index).is_some()
+                && ruby_base_kind(chars[index - 1]) == Some(first_kind);
+        }
+        if ruby_base_kind(character) != Some(first_kind) {
+            return false;
+        }
+        index += 1;
+    }
+    false
 }
 
 fn push_ruby(
@@ -1631,7 +1682,22 @@ fn push_ruby(
     config: &AozoraConfig,
     allow_auto_yoko: bool,
 ) {
-    output.push_str("<ruby>");
+    if output.ends_with("</ruby>") {
+        output.truncate(output.len() - "</ruby>".len());
+    } else {
+        output.push_str("<ruby>");
+    }
+    push_ruby_part(output, base, reading, config, allow_auto_yoko);
+    output.push_str("</ruby>");
+}
+
+fn push_ruby_part(
+    output: &mut String,
+    base: &str,
+    reading: &str,
+    config: &AozoraConfig,
+    allow_auto_yoko: bool,
+) {
     if allow_auto_yoko && !contains_literal_gaiji_note(base) {
         output.push_str(&convert_inline(base, config));
     } else {
@@ -1639,7 +1705,7 @@ fn push_ruby(
     }
     output.push_str("<rt>");
     output.push_str(&convert_ruby_reading(reading, config));
-    output.push_str("</rt></ruby>");
+    output.push_str("</rt>");
 }
 
 pub fn escape_html(input: &str) -> String {
