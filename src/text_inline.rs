@@ -1621,11 +1621,26 @@ fn parse_inline_note(
     if chars.get(start) != Some(&'［') || chars.get(start + 1) != Some(&'＃') {
         return None;
     }
-    let close = chars
-        .iter()
-        .enumerate()
-        .skip(start + 2)
-        .find_map(|(index, character)| (*character == '］').then_some(index))?;
+    // 注記内注記（［＃…［＃…］…］）を考慮して閉じ括弧を探す
+    let mut depth = 1usize;
+    let mut index = start + 2;
+    let close = loop {
+        if chars.get(index) == Some(&'［') && chars.get(index + 1) == Some(&'＃') {
+            depth += 1;
+            index += 2;
+            continue;
+        }
+        if chars.get(index) == Some(&'］') {
+            depth -= 1;
+            if depth == 0 {
+                break index;
+            }
+        }
+        index += 1;
+        if index >= chars.len() {
+            return None;
+        }
+    };
     let note = chars[start + 2..close].iter().collect::<String>();
     // 訓点送り仮名・返り点: ［＃（X）］ → 行右小書き（. を含む外字画像は除外）
     if let Some(inner) = note.strip_prefix('（').and_then(|value| value.strip_suffix('）'))
