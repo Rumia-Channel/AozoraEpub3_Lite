@@ -135,22 +135,20 @@ cargo run --quiet -- -d target/progress-check \
 
 ## 既知の残存事項
 
-### 1. Java 版との完全一致は未達
-ローカル変換の主要経路は動作するが、Java 版と Rust 版で以下の差が残る。
+### 1. Java 版との完全一致は未達（2026-08-13 時点: 21件中13件がXHTML完全一致）
 
-- 一部の空セクション数・XHTML ファイル数
-- ブロック注記やレイアウト注記の細部
-- Java 版の冗長な二重 `<span class="tcy">` と Rust 版の正規化差
-- 画像ページ、タイトルページ、リンク処理の細部
-- 地付きブロック内の複数行を `<p>` に分けるかどうかなどの XHTML 構造
-- フィクスチャ `test_btm.txt` では句読点保持と地付き複数行の出力がJava版と異なる
+Java 参照（`target/java-run/out-all`、1ファイル1プロセス生成）と Rust 最新（`target/parity-rust-fresh`）を `\r\n→\n` 正規化して1行単位で比較。**13/21 完全一致**。
 
-完全一致を目指す場合は、Java / Rust の XHTML をセクション単位で比較し、差分を次の単位で分離する。
+一致済み13件: IVS、ラテン文字、ルビ※※《》、傍点・傍線、割り注、外字⚽、正立☆∀、禁則処理、濁点、縦中横AAA、行内地付き、BOM付きUTF-8、電書協EPUBサンプル。
 
-1. セクション分割
-2. 注記変換
-3. 画像解決・資産配置
-4. EPUB レンダリング
+残差分（約164行）:
+- **注記 90行**: 字下げブロック継続（`</div><div class="mt4">` 同Line、約60行）、0030 注記内注記の「」］残骸（12）、画像float分類（6）、0004 vrtl/hltr（2）、0029 内側注記ガイジ（2）、0048 破損注記（2）、0049 見出し（9）、0025 魔境/第一章の入れ子「」後置注記（4）
+- **画像回り込み 28行 + 出版社 7行**: float/単ページ画像の分類（`fit` vs `width:%`）とalt
+- **目次 14行**: `<IMG>`等タグ章名、`○○○○○※《中見出し》`章名の注記除去
+- **横書き横組み 14行**: ブロック境界の`<p><br/></p>`有無、`“→〝`の横書きゲート
+- **test_png 7行**: nav章（画像ページ番号）
+- **外字画像 2行**: ルビ基底の画像注記
+- **窓見出し 2行**: 2個目の窓中見出し注記の未変換（Javaは2個目を無視）
 
 ### 2. CLI と外部設定の残存事項
 
@@ -161,10 +159,10 @@ CLI の主要オプションと外部設定の基本経路は実装・テスト�
 
 ### 3. 検証環境
 
-- `tests/epub_parity.rs` は比較用のJava/Rust生成ディレクトリが必要なため通常は ignored。
-- `AOZORA_JAVA_DIR=target/parity-java AOZORA_RUST_DIR=target/parity-rust cargo test --test epub_parity -- --ignored` で、既存生成物の差分を再現できる。
-- 現在の既存Java生成物との差分は、少なくとも `test_btm.txt` の句読点と地付きブロックのXHTML構造に残る。
+- 差分計測: `target/xhtml-diff-report*.txt`（旧）、最新は `target/parity-rust-fresh` と `target/java-run/out-all` の直接比較（Python + difflib）。
+- `tests/epub_parity.rs` は比較用のJava/Rust生成ディレクトリが必要なため通常は ignored。新参照（out-all）に合わせて更新が必要。
 - `target/epubcheck-all` に現行実装で生成した21件を `java -jar C:/EPUBCheck/epubcheck.jar` で検証し、0エラー・0警告だった。
+- テスト: `cargo test --all` 157 passed / 1 ignored、`cargo clippy --all-targets --all-features -D warnings` 通過。
 
 ### 4. 対象外
 
