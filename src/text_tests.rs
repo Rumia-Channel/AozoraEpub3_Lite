@@ -484,6 +484,14 @@ fn converts_unicode_and_ivs_gaiji_notes() {
 }
 
 #[test]
+fn resolves_unicode_code_after_unknown_gaiji_note() {
+    let output =
+        plain_text_to_xhtml("※［＃「」、第4水準2-1-1］「」、第4水準2-1-1 U+20089").unwrap();
+    assert!(output.contains("𠂉"));
+    assert!(!output.contains("行右小書き"));
+}
+
+#[test]
 fn emits_configured_dakuten_glyph_font() {
     let mut config = AozoraConfig {
         dakuten_type: 2,

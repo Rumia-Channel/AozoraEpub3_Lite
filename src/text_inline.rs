@@ -1013,6 +1013,9 @@ fn parse_gaiji_note(
         return Some((end, replacement));
     }
     let normalized_note = crate::config::normalize_gaiji_key(&note);
+    if let Some(replacement) = unicode_replacement_in_following_text(chars, end, config) {
+        return Some((end, replacement));
+    }
     if let Some(replacement) = config
         .gaiji
         .get(&note)
@@ -1063,6 +1066,18 @@ fn gaiji_note_range(chars: &[char], start: usize) -> Option<(usize, String)> {
         index += 1;
     }
     None
+}
+
+fn unicode_replacement_in_following_text(
+    chars: &[char],
+    start: usize,
+    config: &AozoraConfig,
+) -> Option<String> {
+    let tail = chars[start..]
+        .iter()
+        .take_while(|character| **character != '\n' && **character != '\r')
+        .collect::<String>();
+    unicode_replacement(&tail, config)
 }
 
 fn parse_image_note(
