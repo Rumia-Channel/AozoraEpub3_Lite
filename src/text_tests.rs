@@ -746,51 +746,58 @@ fn chapter_names_keep_fullwidth_spaces() {
     assert_eq!(chapters[1].label, "!?　&<>");
 }
 
-#[test]
-fn debug_pb_sections() {
-    let sections = aozora_text_to_xhtml_sections("前［＃改ページ］後［＃改ページ］終").unwrap();
-    for (i, s) in sections.iter().enumerate() {
-        eprintln!("SEC{i}: {s:?}");
-    }
-}
+
+
 
 #[test]
-fn debug_nest_actual() {
-    let mut config = AozoraConfig::default();
-    config.load_suffix_text(
-        "は太字\t太字\t太字終わり\nに傍点\t傍点\t傍点終わり\nに傍線\t傍線\t傍線終わり\n",
-    );
-    config.load_tag_text("傍線\t<span class=\"em-line\">\t\t\n傍線終わり\t</span>\t\t\n");
-    let output = super::plain_text_to_xhtml_with_config(
-        "青空［＃「青空」は太字］［＃「青空」に傍点］文庫《ぶんこ》［＃「青空文庫」に傍線］",
-        &config,
-    )
-    .unwrap();
-    eprintln!("NEST: {output}");
-    let out2 = super::plain_text_to_xhtml_with_config(
-        "青空文庫［＃「青空文庫」に「aozora bunko」のルビ］\n漢字青空文庫《あおぞらぶんこ》［＃「青空文庫《あおぞらぶんこ》」に「aozora bunko」のルビ］",
-        &config,
-    )
-    .unwrap();
-    eprintln!("RUBY: {out2}");
-}
-
-#[test]
-fn debug_jzm_notes() {
+fn merges_continuous_indent_block_open_and_close_on_one_line() {
     let config = crate::config::AozoraConfig::load_from_dirs(
         &[std::path::Path::new("assets/aozora")],
         None,
     )
     .unwrap();
-    for key in ["ここから１８字詰め", "ここから４字下げ", "ここから罫囲み"] {
-        eprintln!("{key}: open_tags={:?} inline={:?}",
-            config.block_open_tags.get(key),
-            config.block_inline_tags.get(key));
-    }
-    let out = super::plain_text_to_xhtml_with_config(
-        "［＃ここから４字下げ］\n ［＃ここから１８字詰め］\n仕事\n",
+    let output = super::plain_text_to_xhtml_with_config(
+        "［＃ここから２字下げ］\n本文\n［＃ここから４字下げ］\n続き\n",
         &config,
     )
     .unwrap();
-    eprintln!("OUT: {out}");
+    // Java: 字下げブロック継続は前ブロックを閉じて同じ行で開く
+    assert!(output.contains("</div><div class=\"mt4\">"));
+    assert!(!output.contains("</div>\n<div class=\"mt4\">"));
 }
+
+#[test]
+fn keeps_leading_space_before_block_open_tags() {
+    let config = crate::config::AozoraConfig::load_from_dirs(
+        &[std::path::Path::new("assets/aozora")],
+        None,
+    )
+    .unwrap();
+    let output = super::plain_text_to_xhtml_with_config(
+        "［＃ここから４字下げ］\n ［＃ここから１８字詰め］\n 本文\n",
+        &config,
+    )
+    .unwrap();
+    assert!(output.contains(" <div class=\"jzm18 jzm\">"));
+}
+
+#[test]
+fn resolves_jis_row8_cells_48_to_62_as_circled_numbers() {
+    let output = super::plain_text_to_xhtml("※［＃丸32、1-8-44］※［＃丸36、1-8-48］※［＃丸50、1-8-62］")
+        .unwrap();
+    assert!(output.contains("㉜"));
+    assert!(output.contains("㊱"));
+    assert!(output.contains("㊿"));
+}
+
+#[test]
+fn includes_leading_gaiji_note_in_implicit_ruby_base() {
+    let output = super::plain_text_to_xhtml(
+        "山※［＃「石＋燗のつくり」、第3水準1-89-13］《さんかん》",
+    )
+    .unwrap();
+    // Java: 外字注記（漢字へ解決）はルビ基底に含まれる
+    assert!(output.contains("<ruby>山"));
+    assert!(output.contains("<rt>さんかん</rt>"));
+}
+
