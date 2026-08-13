@@ -743,8 +743,10 @@ pub(super) fn render_section(
     }
 
     let page_text = page_class.contains("p-middle") || page_class.contains("p-bottom");
-    let layout_class = if page_text {
+    let layout_class = if page_class.contains("p-middle") {
         "hltr"
+    } else if page_class.contains("p-bottom") {
+        "vrtl"
     } else if vertical {
         "vrtl"
     } else {
