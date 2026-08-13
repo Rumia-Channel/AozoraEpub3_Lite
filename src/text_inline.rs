@@ -1,5 +1,6 @@
 use super::{AozoraConfig, heading_spec};
 const WRC_BREAK_MARKER: char = '\u{0001}';
+const EMPTY_NOTE_KIND: u8 = 0xFF;
 
 pub(super) fn convert_inline(input: &str, config: &AozoraConfig) -> String {
     convert_inline_with_options(input, config, true, true)
@@ -229,8 +230,12 @@ fn convert_inline_with_options(
             };
             loop {
                 if let Some(note_start) = gaiji_note_start_ending_at(&chars, base_start) {
-                    let Some(note_kind) = note_rendered_kind(&chars[note_start..base_start], config)
-                    else {
+                    let note_kind = note_rendered_kind(&chars[note_start..base_start], config);
+                    if note_kind == Some(EMPTY_NOTE_KIND) {
+                        base_start = note_start;
+                        continue;
+                    }
+                    let Some(note_kind) = note_kind else {
                         break;
                     };
                     base_start = note_start;
@@ -238,8 +243,12 @@ fn convert_inline_with_options(
                     continue;
                 }
                 if let Some(note_start) = image_note_start_ending_at(&chars, base_start) {
-                    let Some(note_kind) = note_rendered_kind(&chars[note_start..base_start], config)
-                    else {
+                    let note_kind = note_rendered_kind(&chars[note_start..base_start], config);
+                    if note_kind == Some(EMPTY_NOTE_KIND) {
+                        base_start = note_start;
+                        continue;
+                    }
+                    let Some(note_kind) = note_kind else {
                         break;
                     };
                     base_start = note_start;
@@ -247,8 +256,12 @@ fn convert_inline_with_options(
                     continue;
                 }
                 if let Some(note_start) = unicode_note_start_ending_at(&chars, base_start, config) {
-                    let Some(note_kind) = note_rendered_kind(&chars[note_start..base_start], config)
-                    else {
+                    let note_kind = note_rendered_kind(&chars[note_start..base_start], config);
+                    if note_kind == Some(EMPTY_NOTE_KIND) {
+                        base_start = note_start;
+                        continue;
+                    }
+                    let Some(note_kind) = note_kind else {
                         break;
                     };
                     base_start = note_start;
@@ -1497,6 +1510,10 @@ fn note_rendered_kind(note: &[char], config: &AozoraConfig) -> Option<u8> {
         }
         break;
     }
+    if rendered.is_empty() {
+        // IVS等、出力が空になる注記は基底を継続させる（空描画）
+        return Some(EMPTY_NOTE_KIND);
+    }
     let mut kinds = rendered.chars().map(ruby_base_kind);
     let first = kinds.next()??;
     kinds.all(|kind| kind == Some(first)).then_some(first)
@@ -1907,7 +1924,10 @@ fn ruby_base_kind(character: char) -> Option<u8> {
         | 0x4e00..=0x9fff
         | 0xf900..=0xfaff
         | 0x20000..=0x2ffff => Some(0),
-        0x3041..=0x3096 => Some(1),
+        0x3041..=0x3096
+        | 0x309b..=0x309e
+        | 0x30fc
+        | 0x30fd..=0x30fe => Some(1),
         0x30a1..=0x30fa | 0xff61..=0xff9f => Some(2),
         0x20..=0x7e | 0xa0..=0x2af => Some(3),
         0xff10..=0xff19 | 0xff21..=0xff3a | 0xff41..=0xff5a => Some(4),

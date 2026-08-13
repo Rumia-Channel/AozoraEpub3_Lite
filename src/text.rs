@@ -873,6 +873,9 @@ fn render_lines<'a>(
                 if content.trim().is_empty() {
                     pending_heading = Some(spec);
                 } else {
+                    // Java: 行頭の全角/半角空白は見出しタグの前に出力される
+                    let leading_len = line.len() - line.trim_start().len();
+                    fragment.push_str(&line[..leading_len]);
                     append_heading(
                         &mut fragment,
                         spec,
