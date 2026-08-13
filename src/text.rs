@@ -879,7 +879,7 @@ fn render_lines<'a>(
                     append_heading(
                         &mut fragment,
                         spec,
-                        content.trim_start(),
+                        content,
                         config,
                         &mut output_count,
                         chapter_id.as_deref(),

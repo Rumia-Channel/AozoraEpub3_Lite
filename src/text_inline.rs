@@ -1196,7 +1196,8 @@ fn jis_to_unicode(plane: u8, row: u8, cell: u8) -> Option<char> {
         return None;
     }
     let code = match row {
-        8 if (33..=62).contains(&cell) => 0x3251 + (cell - 33) as u32,
+        8 if (33..=47).contains(&cell) => 0x3251 + (cell - 33) as u32,
+        8 if (48..=62).contains(&cell) => 0x32b1 + (cell - 48) as u32,
         12 if (1..=10).contains(&cell) => 0x2776 + (cell - 1) as u32,
         12 if (11..=20).contains(&cell) => 0x24eb + (cell - 11) as u32,
         13 if (1..=20).contains(&cell) => 0x2460 + (cell - 1) as u32,
