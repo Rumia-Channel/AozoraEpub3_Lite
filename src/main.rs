@@ -789,11 +789,34 @@ fn remove_missing_image_sources(
                     cursor = line_start + replacement.len();
                     continue;
                 }
-                let replacement = tag_attribute(tag, "alt").unwrap_or_default().to_owned();
-                let replacement_len = replacement.len();
-                section.replace_range(start..end, &replacement);
-                cursor = start + replacement_len;
+                section.replace_range(start..end, "");
+                cursor = start;
             }
+        }
+    }
+    for section in sections {
+        remove_empty_image_wrappers(section);
+    }
+}
+
+fn remove_empty_image_wrappers(fragment: &mut String) {
+    let mut cursor = 0;
+    while let Some(offset) = fragment[cursor..].find("</span>") {
+        let close = cursor + offset;
+        let Some(open) = fragment[..close].rfind("<span") else {
+            cursor = close + "</span>".len();
+            continue;
+        };
+        let Some(content_start) = fragment[open..close].find('>') else {
+            cursor = close + "</span>".len();
+            continue;
+        };
+        let content_start = open + content_start + 1;
+        if fragment[content_start..close].trim().is_empty() {
+            fragment.replace_range(open..close + "</span>".len(), "");
+            cursor = open;
+        } else {
+            cursor = close + "</span>".len();
         }
     }
 }
