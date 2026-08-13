@@ -82,6 +82,27 @@ fn writes_all_sections_to_manifest_spine_and_navigation() {
 }
 
 #[test]
+fn title_page_navigation_omits_unheaded_body_fallbacks() {
+    let book = EpubBook::new(
+        EpubMetadata::new("題名", "urn:test:title-navigation"),
+        "<p>本文だけ</p>\n",
+    )
+    .with_metadata_markup("題名", None)
+    .with_title_page();
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let mut nav = String::new();
+    archive
+        .by_name("item/nav.xhtml")
+        .unwrap()
+        .read_to_string(&mut nav)
+        .unwrap();
+    let toc = nav.split("<nav epub:type=\"toc\"").nth(1).unwrap();
+    assert!(toc.contains("xhtml/title.xhtml"));
+    assert!(!toc.contains("xhtml/0001.xhtml"));
+}
+
+#[test]
 fn writes_assets_and_manifest_entries() {
     let book = EpubBook::new(
         EpubMetadata::new("画像", "urn:test:image"),
