@@ -762,11 +762,11 @@ fn is_image_only_paragraph(line: &str, image_tag: &str) -> bool {
     let mut remainder = inner.replace(image_tag, "");
     loop {
         let trimmed = remainder.trim();
-        if let Some(end) = trimmed.find('>') {
-            if trimmed.starts_with("<span") {
-                remainder = trimmed[end + 1..].to_owned();
-                continue;
-            }
+        if let Some(end) = trimmed.find('>')
+            && trimmed.starts_with("<span")
+        {
+            remainder = trimmed[end + 1..].to_owned();
+            continue;
         }
         if let Some(stripped) = trimmed.strip_suffix("</span>") {
             remainder = stripped.to_owned();
