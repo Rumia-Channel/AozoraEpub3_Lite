@@ -235,6 +235,11 @@ fn convert_inline_with_options(
             // (Java: 基底はルビ直前の文字種ラン。外字→漢字等の基底文字なら注記もランに含む)。
             let mut run_kind = if bracket_start.is_some() {
                 Some(3)
+            } else if let Some(note_start) = gaiji_note_start_ending_at(&chars, index)
+                .or_else(|| unicode_note_start_ending_at(&chars, index, config))
+            {
+                // 注記始まりの基底は注記の描画種別から始める
+                note_rendered_kind(&chars[note_start..index], config)
             } else {
                 ruby_base_kind(chars[base_start])
             };
@@ -2021,6 +2026,7 @@ fn push_text_char_escaped(output: &mut String, character: char) {
         _ => output.push(character),
     }
 }
+
 
 
 

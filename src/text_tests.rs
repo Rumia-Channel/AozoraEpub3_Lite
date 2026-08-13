@@ -801,3 +801,4 @@ fn includes_leading_gaiji_note_in_implicit_ruby_base() {
     assert!(output.contains("<rt>さんかん</rt>"));
 }
 
+
