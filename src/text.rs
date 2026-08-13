@@ -801,6 +801,8 @@ fn render_lines<'a>(
                 if closes_generated {
                     if let Some(OpenBlock::Generated { close_tag }) = blocks.pop() {
                         output_count += 1;
+                        let leading_len = line.len() - line.trim_start().len();
+                        fragment.push_str(&line[..leading_len]);
                         fragment.push_str(&close_tag);
                         fragment.push('\n');
                     }
@@ -810,6 +812,8 @@ fn render_lines<'a>(
                 let closes_configured = matches!(blocks.last(), Some(OpenBlock::Configured { .. }));
                 if closes_configured && let Some(close_tag) = config.block_close_tags.get(note) {
                     output_count += 1;
+                    let leading_len = line.len() - line.trim_start().len();
+                    fragment.push_str(&line[..leading_len]);
                     fragment.push_str(close_tag);
                     fragment.push('\n');
                     if close_tag == "</span>" && image_wrapper_is_open(&fragment) {
@@ -821,6 +825,8 @@ fn render_lines<'a>(
                 }
                 if let Some((open_tag, close_tag)) = generated_indent_block(note) {
                     output_count += 1;
+                    let leading_len = line.len() - line.trim_start().len();
+                    fragment.push_str(&line[..leading_len]);
                     fragment.push_str(&open_tag);
                     fragment.push('\n');
                     blocks.push(OpenBlock::Generated { close_tag });
@@ -829,6 +835,8 @@ fn render_lines<'a>(
 
                 if let Some(open_tag) = config.block_open_tags.get(note) {
                     output_count += 1;
+                    let leading_len = line.len() - line.trim_start().len();
+                    fragment.push_str(&line[..leading_len]);
                     fragment.push_str(open_tag);
                     fragment.push('\n');
                     blocks.push(OpenBlock::Configured {
@@ -838,6 +846,8 @@ fn render_lines<'a>(
                 }
                 if let Some(tag) = config.block_single_tags.get(note) {
                     output_count += 1;
+                    let leading_len = line.len() - line.trim_start().len();
+                    fragment.push_str(&line[..leading_len]);
                     fragment.push_str(tag);
                     fragment.push('\n');
                     continue;
@@ -1109,6 +1119,20 @@ fn split_block_notes(line: &str, markers: &[String]) -> Vec<String> {
         pieces.push(marker.clone());
         rest = &rest[offset + marker.len()..];
     }
+    // ブロック注記の直前にある空白のみの片は注記と結合する
+    // （Java: 「 ［＃ここから…］」→ 行頭空白＋ブロック開始タグが同じ行になる）
+    let mut merged: Vec<String> = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        if piece.starts_with("［＃")
+            && let Some(last) = merged.last_mut()
+            && last.trim().is_empty()
+        {
+            last.push_str(&piece);
+        } else {
+            merged.push(piece);
+        }
+    }
+    let mut pieces = merged;
     if !rest.is_empty() || pieces.is_empty() {
         pieces.push(rest.to_owned());
     }

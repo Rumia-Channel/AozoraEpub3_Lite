@@ -774,3 +774,23 @@ fn debug_nest_actual() {
     .unwrap();
     eprintln!("RUBY: {out2}");
 }
+
+#[test]
+fn debug_jzm_notes() {
+    let config = crate::config::AozoraConfig::load_from_dirs(
+        &[std::path::Path::new("assets/aozora")],
+        None,
+    )
+    .unwrap();
+    for key in ["ここから１８字詰め", "ここから４字下げ", "ここから罫囲み"] {
+        eprintln!("{key}: open_tags={:?} inline={:?}",
+            config.block_open_tags.get(key),
+            config.block_inline_tags.get(key));
+    }
+    let out = super::plain_text_to_xhtml_with_config(
+        "［＃ここから４字下げ］\n ［＃ここから１８字詰め］\n仕事\n",
+        &config,
+    )
+    .unwrap();
+    eprintln!("OUT: {out}");
+}
