@@ -998,6 +998,9 @@ fn render_lines<'a>(
                     pending_config_heading = Some((open_tag.clone(), close_tag.clone()));
                 } else {
                     output_count += 1;
+                    // Java: 行頭の全角/半角空白はブロック開始タグの前に出力される
+                    let leading_len = line.len() - line.trim_start().len();
+                    fragment.push_str(&line[..leading_len]);
                     let open_tag = chapter_id
                         .map(|id| inject_kobo_id(open_tag, &id))
                         .unwrap_or_else(|| open_tag.clone());
