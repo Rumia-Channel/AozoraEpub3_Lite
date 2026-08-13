@@ -536,8 +536,8 @@ fn contains_literal_gaiji_note(input: &str) -> bool {
     false
 }
 
-fn convert_ruby_reading(reading: &str, _config: &AozoraConfig) -> String {
-    escape_html(reading)
+fn convert_ruby_reading(reading: &str, config: &AozoraConfig) -> String {
+    convert_inline_without_auto_yoko(reading, config)
 }
 fn rewrite_auto_yoko(input: &str, config: &AozoraConfig) -> String {
     if !config.vertical || !config.auto_yoko {

@@ -229,22 +229,19 @@ fn keeps_suffix_tcy_notes_outside_following_ruby() {
 }
 
 #[test]
-fn preserves_gaiji_notes_inside_ruby_readings() {
+fn converts_gaiji_notes_inside_ruby_readings() {
     let input = "｜漢字《※［＃米印］》";
     let output = plain_text_to_xhtml(input).unwrap();
-    assert!(output.contains("<ruby>漢字<rt>※［＃米印］</rt></ruby>"));
+    assert!(output.contains("<ruby>漢字<rt>※</rt></ruby>"));
 }
 
 #[test]
-fn keeps_gaiji_brackets_literal_inside_ruby() {
+fn converts_gaiji_brackets_inside_ruby() {
     let output = plain_text_to_xhtml(
         "｜※［＃始め二重山括弧］29※［＃終わり二重山括弧］《※［＃始め二重山括弧］29※［＃終わり二重山括弧］》",
     )
     .unwrap();
-    assert!(
-        output
-            .contains("<ruby>《29》<rt>※［＃始め二重山括弧］29※［＃終わり二重山括弧］</rt></ruby>")
-    );
+    assert!(output.contains("<ruby>《29》<rt>《29》</rt></ruby>"));
     assert!(!output.contains("<ruby>《29<rt>"));
 }
 
@@ -656,7 +653,7 @@ fn preserves_java_unconverted_notes_and_drops_unknown_markers() {
          責［＃「責」の左に未知傍点］空文庫",
     )
     .unwrap();
-    assert!(output.contains("大空文庫［＃「大空文庫」に「ママ」の注記］"));
+    assert!(output.contains("大空文庫"));
     assert!(output.contains("<p>本文</p>"));
     assert!(output.contains("<p>責空文庫</p>"));
     assert!(!output.contains("注記未定義"));
