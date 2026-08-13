@@ -674,8 +674,23 @@ struct HeadingSpec {
 }
 
 enum OpenBlock {
-    Generated { close_tag: String },
-    Configured { fallback_close_tag: String },
+    Generated {
+        close_tag: String,
+        /// 字下げ系ブロックか（字下げ省略の対象）
+        indent: bool,
+    },
+    Configured {
+        fallback_close_tag: String,
+        indent: bool,
+    },
+}
+
+impl OpenBlock {
+    fn is_indent(&self) -> bool {
+        match self {
+            OpenBlock::Generated { indent, .. } | OpenBlock::Configured { indent, .. } => *indent,
+        }
+    }
 }
 
 fn render_lines<'a>(
@@ -799,7 +814,7 @@ fn render_lines<'a>(
                 let closes_generated = matches!(blocks.last(), Some(OpenBlock::Generated { .. }))
                     && is_indent_close_note(note);
                 if closes_generated {
-                    if let Some(OpenBlock::Generated { close_tag }) = blocks.pop() {
+                    if let Some(OpenBlock::Generated { close_tag, .. }) = blocks.pop() {
                         output_count += 1;
                         let leading_len = line.len() - line.trim_start().len();
                         fragment.push_str(&line[..leading_len]);
@@ -826,21 +841,48 @@ fn render_lines<'a>(
                 if let Some((open_tag, close_tag)) = generated_indent_block(note) {
                     output_count += 1;
                     let leading_len = line.len() - line.trim_start().len();
-                    fragment.push_str(&line[..leading_len]);
-                    fragment.push_str(&open_tag);
+                    // Java: 字下げブロック継続時は前の字下げブロックを閉じて同じ行で開く
+                    if note.contains("字下げ")
+                        && blocks.iter().any(OpenBlock::is_indent)
+                        && let Some(OpenBlock::Generated { close_tag: previous, .. }) = blocks.pop()
+                    {
+                        fragment.push_str(&line[..leading_len]);
+                        fragment.push_str(&previous);
+                        fragment.push_str(&open_tag);
+                    } else {
+                        fragment.push_str(&line[..leading_len]);
+                        fragment.push_str(&open_tag);
+                    }
                     fragment.push('\n');
-                    blocks.push(OpenBlock::Generated { close_tag });
+                    blocks.push(OpenBlock::Generated {
+                        close_tag,
+                        indent: note.contains("字下げ"),
+                    });
                     continue;
                 }
 
                 if let Some(open_tag) = config.block_open_tags.get(note) {
                     output_count += 1;
                     let leading_len = line.len() - line.trim_start().len();
-                    fragment.push_str(&line[..leading_len]);
-                    fragment.push_str(open_tag);
+                    // Java: 字下げブロック継続時は前の字下げブロックを閉じて同じ行で開く
+                    if note.contains("字下げ")
+                        && blocks.iter().any(OpenBlock::is_indent)
+                        && let Some(OpenBlock::Configured {
+                            fallback_close_tag,
+                            ..
+                        }) = blocks.pop()
+                    {
+                        fragment.push_str(&line[..leading_len]);
+                        fragment.push_str(&fallback_close_tag);
+                        fragment.push_str(open_tag);
+                    } else {
+                        fragment.push_str(&line[..leading_len]);
+                        fragment.push_str(open_tag);
+                    }
                     fragment.push('\n');
                     blocks.push(OpenBlock::Configured {
                         fallback_close_tag: fallback_close_tag(open_tag),
+                        indent: note.contains("字下げ"),
                     });
                     continue;
                 }
@@ -910,7 +952,10 @@ fn render_lines<'a>(
                 } else {
                     fragment.push('\n');
                 }
-                blocks.push(OpenBlock::Generated { close_tag });
+                blocks.push(OpenBlock::Generated {
+                        close_tag,
+                        indent: false,
+                    });
                 continue;
             }
             if let Some(tag) = config.block_single_tags.get(note) {
@@ -954,6 +999,7 @@ fn render_lines<'a>(
                 }
                 blocks.push(OpenBlock::Configured {
                     fallback_close_tag: fallback_close_tag(&open_tag),
+                    indent: note.contains("字下げ"),
                 });
                 continue;
             }
@@ -965,11 +1011,11 @@ fn render_lines<'a>(
     while let Some(block) = blocks.pop() {
         output_count += 1;
         match block {
-            OpenBlock::Generated { close_tag } => {
+            OpenBlock::Generated { close_tag, .. } => {
                 fragment.push_str(&close_tag);
                 fragment.push('\n');
             }
-            OpenBlock::Configured { fallback_close_tag } => {
+            OpenBlock::Configured { fallback_close_tag, .. } => {
                 fragment.push_str(&fallback_close_tag);
                 fragment.push('\n');
             }
