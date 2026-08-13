@@ -259,6 +259,14 @@ fn append_section_line(
     page_marker: &mut Option<&'static str>,
     config: &AozoraConfig,
 ) {
+    if matches!(
+        page_marker,
+        Some(PAGE_CHAPTER_MIDDLE_MARKER | PAGE_CHAPTER_BOTTOM_MARKER)
+    ) && current.is_empty()
+        && line.trim().is_empty()
+    {
+        return;
+    }
     if is_colophon_line(line) && !current.is_empty() {
         trim_trailing_empty_lines(current);
         if !current.is_empty() {
