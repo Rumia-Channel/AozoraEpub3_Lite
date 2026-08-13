@@ -147,10 +147,15 @@ fn convert_inline_with_auto_yoko(input: &str, config: &AozoraConfig, auto_yoko: 
         if chars[index] == '《'
             && let Some(close) = find_closing_ruby(&chars, index)
             && index > 0
-            && ruby_base_kind(chars[index - 1]).is_some()
+            && (ruby_base_kind(chars[index - 1]).is_some()
+                || latin_bracket_start_ending_at(&chars, index).is_some())
         {
-            let mut base_start = index - 1;
+            let mut base_start = latin_bracket_start_ending_at(&chars, index).unwrap_or(index - 1);
             while base_start > 0 {
+                if let Some(note_start) = gaiji_note_start_ending_at(&chars, base_start) {
+                    base_start = note_start;
+                    continue;
+                }
                 let Some(current_kind) = ruby_base_kind(chars[base_start]) else {
                     break;
                 };
@@ -163,9 +168,13 @@ fn convert_inline_with_auto_yoko(input: &str, config: &AozoraConfig, auto_yoko: 
                 base_start -= 1;
             }
             let base = chars[base_start..index].iter().collect::<String>();
-            let escaped_base = escape_html(&base);
-            if output.ends_with(&escaped_base) {
-                output.truncate(output.len() - escaped_base.len());
+            let rendered_base = if auto_yoko && tcy_depth == 0 {
+                convert_inline(&base, config)
+            } else {
+                convert_inline_without_auto_yoko(&base, config)
+            };
+            if output.ends_with(&rendered_base) {
+                output.truncate(output.len() - rendered_base.len());
                 let reading = chars[index + 1..close].iter().collect::<String>();
                 push_ruby(
                     &mut output,
@@ -178,7 +187,6 @@ fn convert_inline_with_auto_yoko(input: &str, config: &AozoraConfig, auto_yoko: 
                 continue;
             }
         }
-
         index += push_text_char(&mut output, &chars, index, config, tcy_depth == 0);
     }
     output
@@ -1214,6 +1222,27 @@ fn note_range(chars: &[char], start: usize) -> Option<(usize, String)> {
     let note = chars[start + 2..close].iter().collect::<String>();
     Some((close + 1, note))
 }
+fn gaiji_note_start_ending_at(chars: &[char], end: usize) -> Option<usize> {
+    if end == 0 || chars.get(end - 1) != Some(&'］') {
+        return None;
+    }
+    (0..end).rev().find_map(|start| {
+        if start == 0
+            || chars.get(start) != Some(&'［')
+            || chars.get(start + 1) != Some(&'＃')
+            || chars.get(start - 1) != Some(&'※')
+        {
+            return None;
+        }
+        (note_range(chars, start).is_some_and(|(note_end, _)| note_end == end)).then_some(start - 1)
+    })
+}
+fn latin_bracket_start_ending_at(chars: &[char], end: usize) -> Option<usize> {
+    if end == 0 || chars.get(end - 1) != Some(&'〕') {
+        return None;
+    }
+    (0..end).rev().find(|index| chars[*index] == '〔')
+}
 
 fn find_note(chars: &[char], start: usize, note: &str) -> Option<(usize, usize)> {
     let marker = format!("［＃{note}］").chars().collect::<Vec<_>>();
@@ -1586,7 +1615,7 @@ fn is_half_space(character: char) -> bool {
 
 fn ruby_base_kind(character: char) -> Option<u8> {
     match character as u32 {
-        0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff | 0x20000..=0x2ffff => Some(0),
+        0x3005 | 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff | 0x20000..=0x2ffff => Some(0),
         0x3041..=0x3096 => Some(1),
         0x30a1..=0x30fa | 0xff61..=0xff9f => Some(2),
         0x20..=0x7e | 0xa0..=0x2af => Some(3),
