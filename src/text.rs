@@ -350,6 +350,7 @@ fn push_rendered_section(
     no_br.clear();
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_section_line(
     line: &str,
     sections: &mut Vec<String>,

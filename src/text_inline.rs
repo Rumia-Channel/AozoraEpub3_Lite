@@ -926,33 +926,7 @@ fn suffix_visible_text(input: &str) -> String {
     output
 }
 
-fn previous_char_boundary(text: &str, byte_index: usize) -> usize {
-    text[..byte_index]
-        .char_indices()
-        .next_back()
-        .map(|(index, _)| index)
-        .unwrap_or(0)
-}
 
-fn remove_suffix_ruby(input: &str) -> String {
-    let chars = input.chars().collect::<Vec<_>>();
-    let mut output = String::with_capacity(input.len());
-    let mut index = 0;
-    while index < chars.len() {
-        if chars[index] == '《' {
-            index = chars
-                .iter()
-                .enumerate()
-                .skip(index + 1)
-                .find_map(|(candidate, value)| (*value == '》').then_some(candidate + 1))
-                .unwrap_or(index + 1);
-            continue;
-        }
-        output.push(chars[index]);
-        index += 1;
-    }
-    output
-}
 
 fn suffix_target_range_by_len(prefix: &str, target_len: usize) -> Option<(usize, usize)> {
     if target_len == 0 {
@@ -1374,23 +1348,6 @@ fn raw_tag_attribute<'a>(tag: &'a str, attribute: &str) -> Option<&'a str> {
     Some(&value[..end])
 }
 
-fn is_external_reference(value: &str) -> bool {
-    let value = value.trim();
-    if value.starts_with("//") {
-        return true;
-    }
-    let Some((scheme, _)) = value.split_once(':') else {
-        return false;
-    };
-    !scheme.is_empty()
-        && scheme.chars().enumerate().all(|(index, character)| {
-            if index == 0 {
-                character.is_ascii_alphabetic()
-            } else {
-                character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
-            }
-        })
-}
 
 fn parse_raw_anchor(chars: &[char], start: usize) -> Option<(usize, String)> {
     let end = chars
@@ -2059,17 +2016,3 @@ fn push_text_char_escaped(output: &mut String, character: char) {
 
 
 
-#[cfg(test)]
-mod debug_mado_tests {
-    use super::*;
-    use crate::config::AozoraConfig;
-    use std::path::Path;
-    #[test]
-    fn debug_mado() {
-        let config = crate::config::AozoraConfig::load_from_dirs(&[Path::new("assets/aozora")], None).unwrap();
-        let input = "魔境「蕨の切り株」［＃「魔境「蕨の切り株」」は中見出し］";
-        let out = convert_inline(input, &config);
-        eprintln!("MADO OUT: {out}");
-        eprintln!("suffix: {:?}", config.suffix_notes.get("は中見出し"));
-    }
-}

@@ -733,7 +733,6 @@ fn preserves_java_unconverted_notes_and_drops_unknown_markers() {
 }
 
 #[test]
-#[test]
 fn chapter_names_keep_fullwidth_spaces() {
     let cfg = crate::config::AozoraConfig::default();
     let (_, chapters) = super::aozora_text_to_xhtml_sections_with_chapters(
