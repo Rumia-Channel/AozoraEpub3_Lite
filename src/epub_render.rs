@@ -523,8 +523,40 @@ pub(super) fn render_ncx(
     metadata: &EpubMetadata,
     sections: &[EpubSection],
     title_markup: Option<&str>,
+    chapters: &[NavChapter],
 ) -> String {
-    let entries = nav_entries(sections, title_markup);
+    let entries = if chapters.is_empty() {
+        nav_entries(sections, title_markup)
+    } else {
+        chapters
+            .iter()
+            .enumerate()
+            .map(|(index, chapter)| {
+                let label = if index == 0 && title_markup.is_some() {
+                    title_markup.unwrap_or(&chapter.label).to_owned()
+                } else {
+                    chapter.label.clone()
+                };
+                NavEntry {
+                    label,
+                    markup: false,
+                    path: chapter.path.clone(),
+                    level: 1,
+                }
+            })
+            .collect()
+    };
+    // 章情報も nav_entries も空の場合は本文のみのフォールバックを出力する
+    let entries = if entries.is_empty() {
+        vec![NavEntry {
+            label: "本文".to_owned(),
+            markup: false,
+            path: first_body_path(sections),
+            level: 1,
+        }]
+    } else {
+        entries
+    };
     let identifier = metadata
         .identifier
         .strip_prefix("urn:uuid:")

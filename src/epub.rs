@@ -513,7 +513,13 @@ impl EpubBook {
         write_entry(
             &mut archive,
             "item/toc.ncx",
-            render_ncx(&self.metadata, &self.sections, self.title_markup.as_deref()).as_bytes(),
+            render_ncx(
+                &self.metadata,
+                &self.sections,
+                self.title_markup.as_deref(),
+                &self.chapters,
+            )
+            .as_bytes(),
             CompressionMethod::Deflated,
         )?;
         if !image_only {
@@ -749,6 +755,7 @@ mod tests {
         assert!(!nav.contains("xhtml/0002.xhtml"));
     }
 }
+
 
 
 
