@@ -401,13 +401,17 @@ fn converts_default_grounding_and_special_brackets() {
 fn inserts_warichu_line_breaks_like_java() {
     let output = plain_text_to_xhtml(
         "［＃割り注］ヒロソヒイ［＃割り注終わり］\n\
-         ［＃割り注］東は字大林四三七［＃改行］西は字神内一一一ノ一［＃割り注終わり］",
+         ［＃割り注］東は字大林四三七［＃改行］西は字神内一一一ノ一［＃割り注終わり］\n\
+         ［＃割り注］〔二十三日〕［＃割り注終わり］\n\
+         ［＃割り注］ポリチカルマタル。［＃割り注終わり］",
     )
     .unwrap();
     assert!(output.contains("<span class=\"wrc\">ヒロソ<br/>ヒイ</span>"));
     assert!(
         output.contains("<span class=\"wrc\">東は字大林四三七<br/>西は字神内一一一ノ一</span>")
     );
+    assert!(output.contains("〔<span class=\"wrc\">二十<br/>三日</span>〕"));
+    assert!(output.contains("<span class=\"wrc\">ポリチカル<br/>マタル。</span>"));
     assert!(!output.contains("［＃"));
 }
 

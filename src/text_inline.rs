@@ -208,9 +208,24 @@ fn rewrite_warichu_breaks(input: &str) -> String {
             index = open_end;
             continue;
         };
+        let (body_start, body_end, moved_brackets) = if (chars[open_end] == '〔'
+            && chars.get(close_start.saturating_sub(1)) == Some(&'〕')
+            || chars[open_end] == '（' && chars.get(close_start.saturating_sub(1)) == Some(&'）'))
+            && (index == 0 || !matches!(chars[index - 1], '〔' | '（'))
+        {
+            (open_end + 1, close_start - 1, true)
+        } else {
+            (open_end, close_start, false)
+        };
+        if moved_brackets {
+            output.push(chars[open_end]);
+        }
         output.extend(chars[index..open_end].iter());
-        output.push_str(&rewrite_warichu_body(&chars[open_end..close_start]));
+        output.push_str(&rewrite_warichu_body(&chars[body_start..body_end]));
         output.extend(chars[close_start..close_end].iter());
+        if moved_brackets {
+            output.push(chars[close_start - 1]);
+        }
         index = close_end;
     }
     output
@@ -246,7 +261,7 @@ fn rewrite_warichu_body(body: &[char]) -> String {
             index = close + 1;
             continue;
         }
-        let width = if is_halfwidth_for_tcy(body[index]) {
+        let width = if is_halfwidth_for_warichu(body[index]) {
             1
         } else {
             2
@@ -256,9 +271,6 @@ fn rewrite_warichu_body(body: &[char]) -> String {
     }
     if units.len() < 2 {
         return body.iter().collect();
-    }
-    if units.last().is_some_and(|(index, _)| body[*index] == '。') {
-        units.pop();
     }
     let total = units.iter().map(|(_, width)| *width).sum::<usize>();
     let half = total.div_ceil(2);
@@ -271,9 +283,12 @@ fn rewrite_warichu_body(body: &[char]) -> String {
             None
         }
     });
-    let Some(break_index) = break_index.filter(|index| *index > 0) else {
+    let Some(mut break_index) = break_index.filter(|index| *index > 0) else {
         return body.iter().collect();
     };
+    if matches!(body.get(break_index), Some('、' | '。')) {
+        break_index += 1;
+    }
     let mut output = String::with_capacity(body.len() + 1);
     output.extend(body[..break_index].iter());
     output.push(WRC_BREAK_MARKER);
@@ -669,6 +684,9 @@ fn tcy_boundary_after(chars: &[char], mut index: usize) -> bool {
 
 fn is_halfwidth_for_tcy(character: char) -> bool {
     character.is_ascii() || (('\u{ff61}'..='\u{ff9f}').contains(&character))
+}
+fn is_halfwidth_for_warichu(character: char) -> bool {
+    ('\u{21}'..='\u{2af}').contains(&character)
 }
 
 fn suffix_note_at(chars: &[char], start: usize) -> Option<(usize, String, String)> {
@@ -1334,13 +1352,12 @@ fn parse_inline_note(
         .unwrap_or_default();
     Some((close + 1, replacement))
 }
-
 fn should_preserve_unconverted_note(note: &str) -> bool {
     note.contains('「')
         && note.contains('」')
-        // Java drops unsupported left-side annotations rather than emitting
-        // their source marker into the XHTML.
         && !note.contains("左に")
+        && !note.contains("底本では")
+        && !(note.contains("」に「") && !note.contains("ママ"))
 }
 fn parse_configured_markup(
     chars: &[char],
