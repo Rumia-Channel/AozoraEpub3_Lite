@@ -836,8 +836,14 @@ xml:lang="{language}"
         );
     }
 
-    let layout_class = if vertical { "vrtl" } else { "hltr" };
     let page_text = page_class.contains("p-middle") || page_class.contains("p-bottom");
+    let layout_class = if page_text {
+        "hltr"
+    } else if vertical {
+        "vrtl"
+    } else {
+        "hltr"
+    };
     let rendered_page_class = if page_text {
         format!(" class=\"p-text{kindle_class}\"")
     } else {

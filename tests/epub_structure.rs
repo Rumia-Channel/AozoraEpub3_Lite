@@ -313,3 +313,23 @@ fn navigation_labels_omit_ruby_readings() {
     assert!(nav.contains(">漢字</a>"));
     assert!(!nav.contains("かんじ"));
 }
+
+#[test]
+fn renders_middle_and_bottom_pages_with_horizontal_document_class() {
+    for marker in ["<!-- aozora-page-middle -->", "<!-- aozora-page-bottom -->"] {
+        let book = EpubBook::new(
+            EpubMetadata::new("ページ", format!("urn:test:{marker}")),
+            format!("{marker}\n<p>本文</p>\n"),
+        );
+        let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+        let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut section = String::new();
+        archive
+            .by_name("item/xhtml/0001.xhtml")
+            .unwrap()
+            .read_to_string(&mut section)
+            .unwrap();
+        assert!(section.contains("xml:lang=\"ja\"\n class=\"hltr\""));
+        assert!(!section.contains("xml:lang=\"ja\"\n class=\"vrtl\""));
+    }
+}
