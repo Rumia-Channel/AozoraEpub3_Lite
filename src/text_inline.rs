@@ -1686,6 +1686,9 @@ fn should_preserve_unconverted_note(note: &str) -> bool {
         && !note.contains("左に")
         && !note.contains("底本では")
         && !note.contains("ママ")
+        // Java: 小書き対応外の「…」に「…」の注記/ルビは破棄される
+        && !note.contains("」に「")
+        && !note.ends_with("の注記")
 }
 fn parse_configured_markup(
     chars: &[char],
