@@ -727,9 +727,8 @@ fn resolve_fs_image(base: &Path, reference: &str) -> Result<Option<ResolvedImage
     Ok(Some((relative, data)))
 }
 
-/// Removes image tags whose source could not be resolved into an EPUB asset.
-/// Keeping an unresolved `src` would make the generated EPUB invalid; the
-/// already escaped `alt` text remains as a readable fallback.
+/// Replaces image-only paragraphs whose source could not be resolved with an
+/// empty paragraph, preserving the Java converter's pagination placeholder.
 fn remove_missing_image_sources(
     sections: &mut [String],
     references: &[String],
@@ -764,8 +763,16 @@ fn remove_missing_image_sources(
                     } else {
                         line_end
                     };
-                    section.replace_range(line_start..remove_end, "");
-                    cursor = line_start;
+                    let remainder = format!("{}{}", &section[..line_start], &section[remove_end..]);
+                    let replacement = if is_empty_paragraph_fragment(&remainder) {
+                        ""
+                    } else if section.as_bytes().get(line_end) == Some(&b'\n') {
+                        "<p><br/></p>\n"
+                    } else {
+                        "<p><br/></p>"
+                    };
+                    section.replace_range(line_start..remove_end, replacement);
+                    cursor = line_start + replacement.len();
                     continue;
                 }
                 let replacement = tag_attribute(tag, "alt").unwrap_or_default().to_owned();
@@ -1222,6 +1229,32 @@ fn should_split_image_page(
         && !image_setting_bool(config, "ImageFloatPage", false)
 }
 
+fn is_empty_paragraph_fragment(fragment: &str) -> bool {
+    let fragment = fragment
+        .replace('\r', "")
+        .replace("<!-- aozora-page-chapter -->", "")
+        .replace("<!-- aozora-page-middle -->", "")
+        .replace("<!-- aozora-page-bottom -->", "")
+        .replace("<!-- aozora-page-no-chapter -->", "");
+    fragment
+        .split("<p><br/></p>")
+        .all(|part| part.trim().is_empty())
+}
+
+fn has_open_block_container(fragment: &str) -> bool {
+    fragment.matches("<div").count() > fragment.matches("</div>").count()
+}
+
+fn is_page_marker_only_fragment(fragment: &str) -> bool {
+    fragment
+        .replace("<!-- aozora-page-chapter -->", "")
+        .replace("<!-- aozora-page-middle -->", "")
+        .replace("<!-- aozora-page-bottom -->", "")
+        .replace("<!-- aozora-page-no-chapter -->", "")
+        .trim()
+        .is_empty()
+}
+
 fn split_image_page_sections(
     section: &str,
     assets: &[EpubAsset],
@@ -1230,7 +1263,9 @@ fn split_image_page_sections(
     let mut output = Vec::new();
     let mut current = Vec::new();
     for line in section.split_inclusive('\n') {
+        let prefix: String = current.concat();
         if is_standalone_image_line(line)
+            && !has_open_block_container(&prefix)
             && let Some((asset, has_caption)) = image_asset_for_line(line, assets)
             && should_split_image_page(
                 image_dimensions(&asset.data, &asset.media_type).unwrap_or(ImageDimensions {
@@ -1241,11 +1276,12 @@ fn split_image_page_sections(
                 has_caption,
             )
         {
-            let prefix: String = current.concat();
-            if !prefix.trim().is_empty() {
+            if !prefix.trim().is_empty() && !is_empty_paragraph_fragment(&prefix) {
                 output.push(prefix);
+                output.push(line.to_owned());
+            } else {
+                output.push(format!("{prefix}{line}"));
             }
-            output.push(line.to_owned());
             current.clear();
         } else {
             current.push(line);
@@ -1289,7 +1325,7 @@ fn reflow_image_sections(sections: &mut Vec<String>, assets: &[EpubAsset], confi
     let split = sections
         .drain(..)
         .flat_map(|section| split_image_page_sections(&section, assets, config))
-        .filter(|section| !section.trim().is_empty())
+        .filter(|section| !section.trim().is_empty() && !is_page_marker_only_fragment(section))
         .collect::<Vec<_>>();
     let mut output: Vec<String> = Vec::with_capacity(split.len());
     let mut pending = String::new();
@@ -1399,7 +1435,9 @@ fn decorate_image_tags(sections: &mut [String], assets: &[EpubAsset], config: &A
                 .map_or(original.len(), |index| end + index);
             let line = &original[line_start..line_end];
             let has_caption = line.contains("キャプション") || line.contains("caption");
-            let page_type = image_page_type(dimensions, config, has_caption, 0);
+            let has_open_block = has_open_block_container(&original[..start]);
+            let page_type =
+                image_page_type(dimensions, config, has_caption, usize::from(has_open_block));
             let ratio = if page_type.is_page() {
                 0.0
             } else {
@@ -2254,12 +2292,23 @@ mod tests {
     #[test]
     fn removes_missing_image_only_paragraphs() {
         let mut sections = vec![
-            "<p><span><img class=\"fit\" src=\"../image/missing.png\" alt=\"未解決\"/></span></p>\n\
-             <p>本文</p>"
+            "<p><span><img class=\"fit\" src=\"../image/missing.png\" alt=\"未解決\"/></span></p>"
                 .to_owned(),
         ];
         remove_missing_image_sources(&mut sections, &["missing.png".to_owned()], &[]);
-        assert_eq!(sections[0], "<p>本文</p>");
+        assert_eq!(sections[0], "");
+    }
+
+    #[test]
+    fn preserves_missing_image_placeholder_inside_content() {
+        let mut sections = vec![
+            "<p>前</p>\n\
+             <p><span><img class=\"fit\" src=\"../image/missing.png\" alt=\"未解決\"/></span></p>\n\
+             <p>後</p>"
+                .to_owned(),
+        ];
+        remove_missing_image_sources(&mut sections, &["missing.png".to_owned()], &[]);
+        assert_eq!(sections[0], "<p>前</p>\n<p><br/></p>\n<p>後</p>");
     }
 
     #[test]
@@ -2338,6 +2387,30 @@ mod tests {
         assert!(sections[1].contains("<p><span><img"));
         assert!(sections[0].contains("<p>前</p>"));
         assert!(sections[2].contains("<p>後</p>"));
+    }
+
+    #[test]
+    fn keeps_large_images_inside_block_containers_inline() {
+        let mut png = vec![0; 24];
+        png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        png[16..20].copy_from_slice(&1836u32.to_be_bytes());
+        png[20..24].copy_from_slice(&1400u32.to_be_bytes());
+        let asset = EpubAsset::new("image/large.png", "image/png", png);
+        let config = AozoraConfig::from_ini(
+            IniSettings::parse("DispW=584\nDispH=754\nSinglePageWidth=550\n").unwrap(),
+        );
+        let mut sections = vec![
+            "<div class=\"mt5\">\n\
+             <p><span><img class=\"fit\" src=\"../image/large.png\" alt=\"\"/></span></p>\n\
+             <p>後</p>\n\
+             </div>\n"
+                .to_owned(),
+        ];
+        reflow_image_sections(&mut sections, &[asset], &config);
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].contains("<div class=\"mt5\">"));
+        assert!(sections[0].contains("<img class=\"fit\""));
+        assert!(sections[0].contains("<p>後</p>"));
     }
 
     #[test]
