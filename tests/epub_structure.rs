@@ -82,7 +82,7 @@ fn writes_all_sections_to_manifest_spine_and_navigation() {
 }
 
 #[test]
-fn title_page_navigation_omits_unheaded_body_fallbacks() {
+fn title_page_navigation_includes_unheaded_body_entries() {
     let book = EpubBook::new(
         EpubMetadata::new("題名", "urn:test:title-navigation"),
         "<p>本文だけ</p>\n",
@@ -99,7 +99,7 @@ fn title_page_navigation_omits_unheaded_body_fallbacks() {
         .unwrap();
     let toc = nav.split("<nav epub:type=\"toc\"").nth(1).unwrap();
     assert!(toc.contains("xhtml/title.xhtml"));
-    assert!(!toc.contains("xhtml/0001.xhtml"));
+    assert!(toc.contains("xhtml/0001.xhtml"));
 }
 
 #[test]

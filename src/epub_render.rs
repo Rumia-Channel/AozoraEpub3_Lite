@@ -37,13 +37,6 @@ fn nav_entries(sections: &[EpubSection], title_markup: Option<&str>) -> Vec<NavE
         if is_no_chapter(section) {
             continue;
         }
-        if !is_title_page(section)
-            && first_heading(section.body_fragment.as_str()).is_none()
-            && (title_markup.is_some()
-                || first_text_label(section.body_fragment.as_str()).is_none())
-        {
-            continue;
-        }
         let is_title = is_title_page(section);
         let label = if is_title {
             title_markup.unwrap_or("タイトル").to_owned()
@@ -215,13 +208,19 @@ pub(super) fn render_package(
     let mut body_number = 0;
     let mut manifest_sections = String::new();
     let mut spine_sections = String::new();
+    let mut title_page_seen = false;
     for (index, section) in sections.iter().enumerate() {
         if is_title_page(section) {
+            title_page_seen = true;
             manifest_sections.push_str(
                 "\t\t<item id=\"title-page\" href=\"xhtml/title.xhtml\" media-type=\"application/xhtml+xml\"/>\n",
             );
             spine_sections.push_str("\t\t<itemref idref=\"title-page\" linear=\"yes\"/>\n");
             continue;
+        }
+        if title_page_seen && body_number == 0 {
+            manifest_sections.push('\n');
+            spine_sections.push('\n');
         }
         body_number += 1;
         if image_only {
@@ -309,17 +308,14 @@ pub(super) fn render_package(
 <!-- style -->
 {styles}<!-- image -->
 {assets}<!-- xhtml -->
-
 {cover}{sections}
 		<item href="toc.ncx" id="ncx" media-type="application/x-dtbncx+xml"/>
 	</manifest>
 
 	<spine page-progression-direction="{progression}" toc="ncx">
-
 {cover_spine}{spine}	</spine>
 
-</package>
-"#,
+</package>"#,
         language = xml_escape(&metadata.language),
         title = xml_escape(&metadata.title),
         creator = creator,
@@ -437,18 +433,29 @@ nav#landmarks {{ display:none; }}
 }
 
 fn render_nav_items(entries: &[NavEntry]) -> String {
-    if entries.len() == 1 && entries[0].level == 1 {
-        let entry = &entries[0];
-        let label = if entry.markup {
-            entry.label.clone()
-        } else {
-            xml_escape(&entry.label)
-        };
-        return format!(
-            "\t\t\t<li><a href=\"{}\">{label}</a></li>\n\n",
-            xml_escape(&entry.path),
-        );
+    if entries.is_empty() {
+        return String::new();
     }
+    if entries.iter().all(|entry| entry.level == 1) {
+        let mut output = String::new();
+        for (index, entry) in entries.iter().enumerate() {
+            if index > 0 {
+                output.push_str("</li>\n");
+            }
+            let label = if entry.markup {
+                entry.label.clone()
+            } else {
+                xml_escape(&entry.label)
+            };
+            output.push_str(&format!(
+                "\t\t\t<li><a href=\"{}\">{label}</a>\n",
+                xml_escape(&entry.path),
+            ));
+        }
+        output.push_str("\n\t\t</li>\n");
+        return output;
+    }
+
     let mut output = String::new();
     let mut depth = 1usize;
     let mut has_item = false;
@@ -479,7 +486,7 @@ fn render_nav_items(entries: &[NavEntry]) -> String {
         has_item = true;
     }
     if has_item {
-        output.push_str("</li>\n");
+        output.push_str("\n\t\t</li>\n");
         for _ in 1..depth {
             output.push_str("</ol>\n</li>\n");
         }
@@ -499,17 +506,15 @@ pub(super) fn render_ncx(
         .unwrap_or(&metadata.identifier);
     let mut nav_points = String::new();
     let mut current_depth = 0usize;
-    let simple_fallback = entries.len() == 1 && entries[0].level == 1;
     for (index, entry) in entries.iter().enumerate() {
         while current_depth >= entry.level && current_depth > 0 {
-            nav_points.push_str("</navPoint>\n");
+            let close_indent = "\t".repeat(current_depth);
+            nav_points.push_str(&format!("{close_indent}</navPoint>\n"));
             current_depth -= 1;
         }
-        let indent = if simple_fallback {
-            String::new()
-        } else {
-            "\t".repeat(entry.level)
-        };
+        let indent = "\t".repeat(entry.level);
+        let child_indent = format!("{indent}\t");
+        let value_indent = format!("{child_indent}\t");
         let play_order = index + 1;
         let label = if entry.markup {
             entry.label.clone()
@@ -518,16 +523,17 @@ pub(super) fn render_ncx(
         };
         nav_points.push_str(&format!(
             "{indent}<navPoint id=\"toc{play_order}\" playOrder=\"{play_order}\">\n\
-{indent}<navLabel>\n\
-{indent}<text>{label}</text>\n\
-{indent}</navLabel>\n\
-{indent}<content src=\"{}\"/>\n",
+        {child_indent}<navLabel>\n\
+        {value_indent}<text>{label}</text>\n\
+        {child_indent}</navLabel>\n\
+        {child_indent}<content src=\"{}\"/>\n",
             xml_escape(&entry.path),
         ));
         current_depth = entry.level;
     }
     while current_depth > 0 {
-        nav_points.push_str("</navPoint>\n");
+        let close_indent = "\t".repeat(current_depth);
+        nav_points.push_str(&format!("{close_indent}</navPoint>\n"));
         current_depth -= 1;
     }
     format!(
