@@ -320,7 +320,12 @@ fn remove_metadata_lines(input: &str, metadata: &BookMeta) -> String {
         .enumerate()
         .filter_map(|(index, line)| (index < remove_start || index > remove_end).then_some(line))
         .collect::<Vec<_>>();
-    if remove_start == 0 {
+    if remove_start == 0
+        && retained
+            .iter()
+            .find(|line| !line.trim().is_empty())
+            .is_some_and(|line| line.starts_with("-----"))
+    {
         while retained.first().is_some_and(|line| line.trim().is_empty()) {
             retained.remove(0);
         }
@@ -2045,7 +2050,7 @@ mod tests {
     fn removes_detected_title_lines_before_body_conversion() {
         let input = "表題\n著者名\n\n本文";
         let metadata = detect_meta(input, TitleType::TitleAuthor, false);
-        assert_eq!(remove_metadata_lines(input, &metadata), "本文");
+        assert_eq!(remove_metadata_lines(input, &metadata), "\n本文");
     }
     #[test]
     fn drops_separator_blank_before_hidden_comment_block() {
