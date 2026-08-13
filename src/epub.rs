@@ -241,6 +241,7 @@ pub struct EpubBook {
     kindle: bool,
     title_markup: Option<String>,
     creator_markup: Option<String>,
+    title_page_markup: Option<String>,
 }
 impl EpubBook {
     pub fn new(metadata: EpubMetadata, body_fragment: impl Into<String>) -> Self {
@@ -270,6 +271,7 @@ impl EpubBook {
             kindle: false,
             title_markup: None,
             creator_markup: None,
+            title_page_markup: None,
         }
     }
 
@@ -302,6 +304,10 @@ impl EpubBook {
     ) -> Self {
         self.title_markup = Some(title_markup.into());
         self.creator_markup = creator_markup;
+        self
+    }
+    pub fn with_title_page_markup(mut self, markup: impl Into<String>) -> Self {
+        self.title_page_markup = Some(markup.into());
         self
     }
 
@@ -432,6 +438,7 @@ impl EpubBook {
                     self.kindle,
                     self.title_markup.as_deref(),
                     self.creator_markup.as_deref(),
+                    self.title_page_markup.as_deref(),
                 )
                 .as_bytes(),
                 CompressionMethod::Deflated,

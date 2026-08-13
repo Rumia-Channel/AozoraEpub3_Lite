@@ -148,13 +148,13 @@ fn convert_input(
         let body_text = remove_metadata_lines(&text, &detected);
         let (title, creator) = if options.use_file_name {
             (
-                file_title.clone().or(detected.title),
-                file_creator.clone().or(detected.creator),
+                file_title.clone().or(detected.title.clone()),
+                file_creator.clone().or(detected.creator.clone()),
             )
         } else {
             (
-                detected.title.or(file_title.clone()),
-                detected.creator.or(file_creator.clone()),
+                detected.title.clone().or(file_title.clone()),
+                detected.creator.clone().or(file_creator.clone()),
             )
         };
         let title = title.unwrap_or_else(|| title_from_path(input_path));
@@ -172,7 +172,7 @@ fn convert_input(
         }
         let resolved_references = assets
             .iter()
-            .flat_map(|asset| asset.references.iter().map(String::as_str))
+            .flat_map(|asset| asset.references.iter().cloned())
             .collect::<Vec<_>>();
         remove_missing_image_sources(
             &mut sections,
@@ -201,12 +201,27 @@ fn convert_input(
             };
             inline_to_xhtml(source, config)
         });
+        let title_page_markup = if options.use_file_name {
+            None
+        } else {
+            build_title_page_markup(&text, &detected, config, vertical)
+        }
+        .map(|markup| {
+            let mut fragments = vec![markup];
+            remove_missing_image_sources(
+                &mut fragments,
+                &image_references(&text),
+                &resolved_references,
+            );
+            fragments.pop().unwrap_or_default()
+        });
         append_gaiji_assets(
             &mut assets,
             config,
             &sections,
             &title_markup,
             creator_markup.as_deref(),
+            title_page_markup.as_deref(),
         )?;
         let metadata = build_metadata(
             &title,
@@ -230,6 +245,9 @@ fn convert_input(
             .with_kindle(is_kindle(options))
             .with_assets(assets)
             .with_metadata_markup(title_markup, creator_markup);
+        if let Some(title_page_markup) = title_page_markup {
+            book = book.with_title_page_markup(title_page_markup);
+        }
         if let Some(cover) = cover {
             book = book.with_cover_asset(cover);
         }
@@ -245,12 +263,14 @@ fn append_gaiji_assets(
     sections: &[String],
     title_markup: &str,
     creator_markup: Option<&str>,
+    title_page_markup: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
     for (class_name, path) in &config.gaiji_fonts {
         let marker = format!("class=\"glyph {class_name}\"");
         let used = sections.iter().any(|section| section.contains(&marker))
             || title_markup.contains(&marker)
-            || creator_markup.is_some_and(|markup| markup.contains(&marker));
+            || creator_markup.is_some_and(|markup| markup.contains(&marker))
+            || title_page_markup.is_some_and(|markup| markup.contains(&marker));
         if !used {
             continue;
         }
@@ -438,6 +458,79 @@ fn build_metadata(
     metadata
 }
 
+fn build_title_page_markup(
+    input: &str,
+    metadata: &BookMeta,
+    config: &AozoraConfig,
+    vertical: bool,
+) -> Option<String> {
+    let title_start = metadata.title_line?;
+    let creator_start = metadata
+        .creator_line
+        .or_else(|| metadata.title_end_line.map(|line| line + 1))
+        .unwrap_or(title_start + 1);
+    let title_lines = input
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            (index >= title_start && index < creator_start)
+                .then_some(line.trim())
+                .filter(|line| !line.is_empty())
+        })
+        .collect::<Vec<_>>();
+    if title_lines.is_empty() {
+        return None;
+    }
+    let mut markup = String::new();
+    for (index, line) in title_lines.iter().enumerate() {
+        let converted = inline_to_xhtml(line, config);
+        match index {
+            0 => markup.push_str(&format!(
+                "<div class=\"title book-title-main\"><p>{converted}</p></div>"
+            )),
+            1 => markup.push_str(&format!("<div class=\"orgtitle pt1\">{converted}</div>")),
+            2 => markup.push_str(&format!("<div class=\"subtitle pt1\">{converted}</div>")),
+            _ => markup.push_str(&format!("<div class=\"suborgtitle pt2\">{converted}</div>")),
+        }
+    }
+    if let Some(creator_start) = metadata.creator_line {
+        let creator_end = metadata
+            .title_end_line
+            .unwrap_or(creator_start)
+            .max(creator_start);
+        for (index, line) in input
+            .lines()
+            .enumerate()
+            .filter_map(|(line_index, line)| {
+                (line_index >= creator_start && line_index <= creator_end)
+                    .then_some(line.trim())
+                    .filter(|line| !line.is_empty())
+                    .map(|line| (line_index, line))
+            })
+            .enumerate()
+        {
+            let converted = inline_to_xhtml(line.1, config);
+            if index == 0 {
+                markup.push_str(&format!(
+                    "<div class=\"creator btm pb2 author\">{converted}</div>"
+                ));
+            } else {
+                markup.push_str(&format!(
+                    "<div class=\"subcreator btm pb2 author\">{converted}</div>"
+                ));
+            }
+        }
+    }
+    Some(format!(
+        "<div class=\"{}\">{markup}</div>",
+        if vertical {
+            "book-title start-2em"
+        } else {
+            "book-title"
+        }
+    ))
+}
+
 fn is_kindle(options: &CliOptions) -> bool {
     options
         .device
@@ -614,10 +707,10 @@ fn resolve_fs_image(base: &Path, reference: &str) -> Result<Option<ResolvedImage
 fn remove_missing_image_sources(
     sections: &mut [String],
     references: &[String],
-    resolved_references: &[&str],
+    resolved_references: &[String],
 ) {
     for reference in references {
-        if resolved_references.contains(&reference.as_str()) {
+        if resolved_references.contains(reference) {
             continue;
         }
         let source = format!("../image/{}", escape_html(reference));
@@ -630,16 +723,56 @@ fn remove_missing_image_sources(
                 };
                 let end = start + end_offset + 2;
                 let tag = &section[start..end];
-                if tag.contains(&format!("src=\"{source}\"")) {
-                    let replacement = tag_attribute(tag, "alt").unwrap_or_default().to_owned();
-                    let replacement_len = replacement.len();
-                    section.replace_range(start..end, &replacement);
-                    cursor = start + replacement_len;
-                } else {
+                if !tag.contains(&format!("src=\"{source}\"")) {
                     cursor = end;
+                    continue;
                 }
+                let line_start = section[..start].rfind('\n').map_or(0, |index| index + 1);
+                let line_end = section[end..]
+                    .find('\n')
+                    .map_or(section.len(), |index| end + index);
+                let line = &section[line_start..line_end];
+                if is_image_only_paragraph(line, tag) {
+                    let remove_end = if section.as_bytes().get(line_end) == Some(&b'\n') {
+                        line_end + 1
+                    } else {
+                        line_end
+                    };
+                    section.replace_range(line_start..remove_end, "");
+                    cursor = line_start;
+                    continue;
+                }
+                let replacement = tag_attribute(tag, "alt").unwrap_or_default().to_owned();
+                let replacement_len = replacement.len();
+                section.replace_range(start..end, &replacement);
+                cursor = start + replacement_len;
             }
         }
+    }
+}
+
+fn is_image_only_paragraph(line: &str, image_tag: &str) -> bool {
+    let Some(inner) = line
+        .trim()
+        .strip_prefix("<p>")
+        .and_then(|value| value.strip_suffix("</p>"))
+    else {
+        return false;
+    };
+    let mut remainder = inner.replace(image_tag, "");
+    loop {
+        let trimmed = remainder.trim();
+        if let Some(end) = trimmed.find('>') {
+            if trimmed.starts_with("<span") {
+                remainder = trimmed[end + 1..].to_owned();
+                continue;
+            }
+        }
+        if let Some(stripped) = trimmed.strip_suffix("</span>") {
+            remainder = stripped.to_owned();
+            continue;
+        }
+        return trimmed.is_empty();
     }
 }
 
@@ -1130,6 +1263,7 @@ fn reflow_image_sections(sections: &mut Vec<String>, assets: &[EpubAsset], confi
     let split = sections
         .drain(..)
         .flat_map(|section| split_image_page_sections(&section, assets, config))
+        .filter(|section| !section.trim().is_empty())
         .collect::<Vec<_>>();
     let mut output: Vec<String> = Vec::with_capacity(split.len());
     let mut pending = String::new();
@@ -1761,7 +1895,8 @@ mod tests {
     use super::{
         AozoraConfig, CliOptions, EpubAsset, ImageDimensions, ImagePageType, TitleType,
         decorate_image_tags, image_dimensions, image_page_type, output_path, parse_args,
-        reflow_image_sections, remove_metadata_lines, sanitize_anchor_links, should_rotate,
+        reflow_image_sections, remove_metadata_lines, remove_missing_image_sources,
+        sanitize_anchor_links, should_rotate,
     };
     use aozora_epub3_lite::{IniSettings, decode_text, detect_meta};
     use std::path::Path;
@@ -2093,6 +2228,17 @@ mod tests {
         assert!(sections[0].contains("height:37.5%"));
         assert!(sections[0].contains("<img class=\"fit\""));
     }
+    #[test]
+    fn removes_missing_image_only_paragraphs() {
+        let mut sections = vec![
+            "<p><span><img class=\"fit\" src=\"../image/missing.png\" alt=\"未解決\"/></span></p>\n\
+             <p>本文</p>"
+                .to_owned(),
+        ];
+        remove_missing_image_sources(&mut sections, &["missing.png".to_owned()], &[]);
+        assert_eq!(sections[0], "<p>本文</p>");
+    }
+
     #[test]
     fn removes_unresolved_local_anchor_targets() {
         let mut sections = vec![

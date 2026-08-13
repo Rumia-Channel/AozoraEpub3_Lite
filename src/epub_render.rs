@@ -587,6 +587,7 @@ pub(super) fn render_section(
     kindle: bool,
     title_markup: Option<&str>,
     creator_markup: Option<&str>,
+    title_page_markup: Option<&str>,
 ) -> String {
     let kindle_class = if kindle { " kindle" } else { "" };
     let trimmed = body_fragment.trim();
@@ -609,6 +610,20 @@ pub(super) fn render_section(
                 })
             })
             .unwrap_or_default();
+        let title_page_body = title_page_markup
+            .map(|markup| format!("\n{markup}"))
+            .unwrap_or_else(|| {
+                format!(
+                    "\n<div class=\"{book_class}\">\n<div class=\"book-title-main\"><p>{title_body}</p></div>{creator}\n</div>",
+                    book_class = if vertical {
+                        "book-title start-2em"
+                    } else {
+                        "book-title"
+                    },
+                    title_body = title_markup.unwrap_or(&metadata.title),
+                    creator = creator,
+                )
+            });
         return format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
@@ -625,30 +640,21 @@ pub(super) fn render_section(
 
 </head>
 <body class="p-titlepage{kindle_class}">
-<div class="{main_class}">{publisher}
-<div class="{book_class}">
-<div class="book-title-main"><p>{title_body}</p></div>{creator}
-</div>
+<div class="{main_class}">{publisher}{title_page_body}
 </div>
 </body>
 </html>
 "#,
             language = xml_escape(&metadata.language),
             title_text = xml_escape(&metadata.title),
-            title_body = title_markup.unwrap_or(&metadata.title),
             layout_class = "hltr",
             main_class = if vertical {
                 "main vrtl block-align-center"
             } else {
                 "main"
             },
-            book_class = if vertical {
-                "book-title start-2em"
-            } else {
-                "book-title"
-            },
             publisher = publisher,
-            creator = creator,
+            title_page_body = title_page_body,
             kindle_class = kindle_class,
         );
     }
