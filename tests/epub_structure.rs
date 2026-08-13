@@ -295,3 +295,21 @@ fn writes_heading_levels_as_nested_navigation() {
     assert!(nav.contains("第一節"));
     assert!(nav.contains("第二章"));
 }
+
+#[test]
+fn navigation_labels_omit_ruby_readings() {
+    let book = EpubBook::from_sections(
+        EpubMetadata::new("ルビ", "urn:test:ruby-navigation"),
+        ["<h1><ruby>漢字<rt>かんじ</rt></ruby></h1>\n"],
+    );
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let mut nav = String::new();
+    archive
+        .by_name("item/nav.xhtml")
+        .unwrap()
+        .read_to_string(&mut nav)
+        .unwrap();
+    assert!(nav.contains(">漢字</a>"));
+    assert!(!nav.contains("かんじ"));
+}

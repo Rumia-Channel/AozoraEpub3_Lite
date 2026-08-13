@@ -147,7 +147,7 @@ fn first_heading(body: &str) -> Option<(usize, String)> {
             continue;
         };
         let content_end = content_start + close_offset;
-        let label = strip_html(&body[content_start..content_end]);
+        let label = strip_html(&strip_ruby_readings(&body[content_start..content_end]));
         if !label.trim().is_empty() {
             return Some((level + 1, normalize_chapter_label(label)));
         }
@@ -161,7 +161,9 @@ fn first_text_label_raw(body: &str) -> Option<String> {
         let start = offset + relative_start;
         let content_start = start + body[start..].find('>')? + 1;
         let content_end = body[content_start..].find("</p>")? + content_start;
-        let label = unescape_html(&strip_html(&body[content_start..content_end]));
+        let label = unescape_html(&strip_html(&strip_ruby_readings(
+            &body[content_start..content_end],
+        )));
         if !label.trim().is_empty() {
             return Some(label.trim().to_owned());
         }
@@ -196,6 +198,26 @@ fn strip_html(input: &str) -> String {
             _ => {}
         }
     }
+    output
+}
+
+fn strip_ruby_readings(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut remainder = input;
+    while let Some(start) = remainder.find("<rt") {
+        output.push_str(&remainder[..start]);
+        let Some(open_end) = remainder[start..].find('>') else {
+            output.push_str(&remainder[start..]);
+            return output;
+        };
+        let after_open = start + open_end + 1;
+        let Some(close_offset) = remainder[after_open..].find("</rt>") else {
+            output.push_str(&remainder[start..]);
+            return output;
+        };
+        remainder = &remainder[after_open + close_offset + "</rt>".len()..];
+    }
+    output.push_str(remainder);
     output
 }
 
