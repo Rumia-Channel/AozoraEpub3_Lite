@@ -1413,7 +1413,7 @@ fn should_preserve_unconverted_note(note: &str) -> bool {
         && note.contains('」')
         && !note.contains("左に")
         && !note.contains("底本では")
-        && !(note.contains("」に「") && !note.contains("ママ"))
+        && !note.contains("ママ")
 }
 fn parse_configured_markup(
     chars: &[char],
