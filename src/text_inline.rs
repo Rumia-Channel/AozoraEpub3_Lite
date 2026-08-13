@@ -1025,7 +1025,17 @@ fn parse_gaiji_note(
     if let Some(replacement) = unicode_replacement(bare_note, config) {
         return Some((end, replacement));
     }
-    Some((end, escape_html(&note)))
+    let open = config
+        .inline_notes
+        .get("行右小書き")
+        .map(String::as_str)
+        .unwrap_or("<span class=\"super\">");
+    let close = config
+        .inline_notes
+        .get("行右小書き終わり")
+        .map(String::as_str)
+        .unwrap_or("</span>");
+    Some((end, format!("〓{open}（{}）{close}", escape_html(key))))
 }
 
 fn gaiji_note_range(chars: &[char], start: usize) -> Option<(usize, String)> {
