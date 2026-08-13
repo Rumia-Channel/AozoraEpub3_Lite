@@ -1116,7 +1116,19 @@ fn parse_gaiji_note(
     let key_note = format!("※［＃{key}］");
     let normalized_key_note = format!("※［＃{normalized_key}］");
     if bare_note.contains("※［＃") {
-        return Some((end, escape_text(&note)));
+        // Java: 内側注記を含む外字注記は説明（行右小書き）に変換される
+        let key = bare_note.split(['、', ',']).next().unwrap_or(bare_note);
+        let open = config
+            .inline_notes
+            .get("行右小書き")
+            .map(String::as_str)
+            .unwrap_or("<span class=\"super\">");
+        let close = config
+            .inline_notes
+            .get("行右小書き終わり")
+            .map(String::as_str)
+            .unwrap_or("</span>");
+        return Some((end, format!("〓{open}（{key}）{close}")));
     }
     if let Some(replacement) = unicode_replacement(bare_note, config) {
         return Some((end, replacement));
@@ -1202,24 +1214,14 @@ fn gaiji_note_range(chars: &[char], start: usize) -> Option<(usize, String)> {
     {
         return None;
     }
-    let mut depth = 1usize;
-    let mut index = start + 3;
-    while index < chars.len() {
-        if chars.get(index) == Some(&'［') && chars.get(index + 1) == Some(&'＃') {
-            depth += 1;
-            index += 2;
-            continue;
-        }
-        if chars[index] == '］' {
-            depth -= 1;
-            if depth == 0 {
-                let note = chars[start..=index].iter().collect::<String>();
-                return Some((index + 1, note));
-            }
-        }
-        index += 1;
-    }
-    None
+    // Java chukiPattern は最初の ］ まででマッチする（注記内注記は注記文字変換で除去）
+    let close = chars
+        .iter()
+        .enumerate()
+        .skip(start + 3)
+        .find_map(|(index, character)| (*character == '］').then_some(index))?;
+    let note = chars[start..=close].iter().collect::<String>();
+    Some((close + 1, note))
 }
 
 fn unicode_replacement_in_following_text(
