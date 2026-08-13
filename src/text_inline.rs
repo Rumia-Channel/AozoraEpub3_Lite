@@ -16,6 +16,11 @@ fn convert_inline_with_options(
     allow_upright: bool,
 ) -> String {
     let input = rewrite_character_replacements(input, config);
+    // エスケープペア: ＜＜→※《 ＞＞→※》 <<→※《 >>→※》 (Java convertEscapedText)
+    // ※マーカーはループ内のエスケープ分岐で除去される
+    let input = rewrite_escape_pairs(&input);
+    // くの字点: ／＼→〳〵 ／″＼→〴〵 (Java convertGaijiChuki)
+    let input = rewrite_kunoji_point(&input);
     let input = rewrite_suffix_notes(&input, config);
     let input = rewrite_warichu_breaks(&input);
     let input = rewrite_alternative_gaiji(&input, config);
@@ -28,6 +33,7 @@ fn convert_inline_with_options(
     let mut output = String::new();
     let mut index = 0;
     let mut tcy_depth = 0usize;
+    let mut link_started = false;
     let mut implicit_ruby_open = false;
     while index < chars.len() {
         if implicit_ruby_open
@@ -49,6 +55,19 @@ fn convert_inline_with_options(
             index += 1;
             continue;
         }
+        // エスケープ文字: ※の直後の《》｜＃※ はルビ/注記処理しない
+        // (Java convertReplacedChar: ※を削除して文字を素通し出力)
+        if matches!(chars[index], '《' | '》' | '｜' | '＃' | '※')
+            && index > 0
+            && chars[index - 1] == '※'
+        {
+            if output.ends_with('※') {
+                output.pop();
+            }
+            push_text_char_escaped(&mut output, chars[index]);
+            index += 1;
+            continue;
+        }
         if chars[index] == '※'
             && let Some((end, replacement)) = parse_image_note(&chars, index + 1, config)
         {
@@ -57,7 +76,8 @@ fn convert_inline_with_options(
             continue;
         }
         if chars[index] == '※'
-            && let Some((end, replacement)) = parse_gaiji_note(&chars, index, config)
+            && let Some((end, replacement)) =
+                parse_gaiji_note(&chars, index, config, allow_upright && tcy_depth == 0)
         {
             output.push_str(&replacement);
             index = end;
@@ -122,7 +142,18 @@ fn convert_inline_with_options(
         if chars[index] == '<'
             && let Some((end, replacement)) = parse_raw_anchor(&chars, index)
         {
-            output.push_str(&replacement);
+            // Java: linkStarted フラグで開閉を追跡（破棄された <a> は閉じも破棄）
+            if replacement == "</a>" {
+                if link_started {
+                    link_started = false;
+                    output.push_str("</a>");
+                }
+            } else if replacement.is_empty() {
+                link_started = false;
+            } else {
+                link_started = true;
+                output.push_str(&replacement);
+            }
             index = end;
             continue;
         }
@@ -133,7 +164,7 @@ fn convert_inline_with_options(
             if !inner.is_empty() && inner.iter().copied().all(is_half_space) {
                 let separated = inner.iter().collect::<String>();
                 let replacement = convert_latin(&separated, config);
-                output.push_str(&escape_html(&replacement));
+                output.push_str(&escape_text(&replacement));
                 index = close + 1;
                 continue;
             }
@@ -177,25 +208,60 @@ fn convert_inline_with_options(
                 || latin_bracket_start_ending_at(&chars, index).is_some()
                 || image_note_start_ending_at(&chars, index).is_some())
         {
-            let mut base_start = latin_bracket_start_ending_at(&chars, index)
+            let bracket_start = latin_bracket_start_ending_at(&chars, index);
+            let mut base_start = bracket_start
+                .map(|start| {
+                    // Java: 英字ランは直前の半角空白も含む
+                    if start > 0 && is_half_space(chars[start - 1]) {
+                        start - 1
+                    } else {
+                        start
+                    }
+                })
                 .or_else(|| image_note_start_ending_at(&chars, index))
                 .unwrap_or(index - 1);
-            while base_start > 0 {
+            // 現在のラン種別。注記をまたぐ場合は注記の描画種別で継続する
+            // (Java: 基底はルビ直前の文字種ラン。外字→漢字等の基底文字なら注記もランに含む)。
+            let mut run_kind = if bracket_start.is_some() {
+                Some(3)
+            } else {
+                ruby_base_kind(chars[base_start])
+            };
+            loop {
                 if let Some(note_start) = gaiji_note_start_ending_at(&chars, base_start) {
+                    let Some(note_kind) = note_rendered_kind(&chars[note_start..base_start], config)
+                    else {
+                        break;
+                    };
                     base_start = note_start;
+                    run_kind = Some(note_kind);
                     continue;
                 }
                 if let Some(note_start) = image_note_start_ending_at(&chars, base_start) {
+                    let Some(note_kind) = note_rendered_kind(&chars[note_start..base_start], config)
+                    else {
+                        break;
+                    };
                     base_start = note_start;
+                    run_kind = Some(note_kind);
                     continue;
                 }
-                let Some(current_kind) = ruby_base_kind(chars[base_start]) else {
+                if let Some(note_start) = unicode_note_start_ending_at(&chars, base_start, config) {
+                    let Some(note_kind) = note_rendered_kind(&chars[note_start..base_start], config)
+                    else {
+                        break;
+                    };
+                    base_start = note_start;
+                    run_kind = Some(note_kind);
+                    continue;
+                }
+                if base_start == 0 {
                     break;
-                };
+                }
                 let Some(previous_kind) = ruby_base_kind(chars[base_start - 1]) else {
                     break;
                 };
-                if previous_kind != current_kind {
+                if run_kind.is_some_and(|kind| kind != previous_kind) {
                     break;
                 }
                 base_start -= 1;
@@ -228,6 +294,13 @@ fn convert_inline_with_options(
             index = close + 1;
             continue;
         }
+        if chars[index] == '《'
+            && let Some(close) = find_closing_ruby(&chars, index)
+        {
+            // Java: ルビ開始文字無しの《》は警告して破棄する
+            index = close + 1;
+            continue;
+        }
         index += push_text_char(
             &mut output,
             &chars,
@@ -239,12 +312,39 @@ fn convert_inline_with_options(
     if implicit_ruby_open {
         output.push_str("</ruby>");
     }
-    if output.contains("&amp;times;") {
-        output.replace("&amp;times;", "&times;")
-    } else {
-        output
-    }
+    output
 }
+/// ＜＜・＞＞・<<・>> の2連続を ※《・※》・※《・※》 へ変換する。
+/// 3連続以上の連続では変換しない（Java convertEscapedText と同じ条件）。
+fn rewrite_escape_pairs(input: &str) -> String {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    while index < chars.len() {
+        let character = chars[index];
+        let is_open = matches!(character, '＜' | '<');
+        let is_close = matches!(character, '＞' | '>');
+        if (is_open || is_close)
+            && chars.get(index + 1) == Some(&character)
+            && chars.get(index + 2) != Some(&character)
+            && (index == 0 || chars.get(index - 1) != Some(&character))
+        {
+            output.push('※');
+            output.push(if is_open { '《' } else { '》' });
+            index += 2;
+            continue;
+        }
+        output.push(character);
+        index += 1;
+    }
+    output
+}
+
+/// ／＼→〳〵 ／″＼→〴〵 (くの字点)
+fn rewrite_kunoji_point(input: &str) -> String {
+    input.replace("／″＼", "〴〵").replace("／＼", "〳〵")
+}
+
 fn rewrite_warichu_breaks(input: &str) -> String {
     let chars = input.chars().collect::<Vec<_>>();
     let mut output = String::with_capacity(input.len());
@@ -366,13 +466,15 @@ fn rewrite_character_replacements(input: &str, config: &AozoraConfig) -> String 
     let mut output = String::with_capacity(input.len());
     let mut index = 0;
     while index < chars.len() {
-        let replacement = [2, 1].into_iter().find_map(|length| {
-            let candidate = chars.get(index..index + length)?;
+        // Single-character rules are applied per character at output time
+        // (like the reference replaceMap) so replacement results are not
+        // re-normalized; only the two-character rules run as a pre-scan.
+        let replacement = chars.get(index..index + 2).and_then(|candidate| {
             let key = candidate.iter().collect::<String>();
-            config
-                .character_replacements
-                .get(&key)
-                .map(|value| (length, value.as_str()))
+            (key.chars().count() == 2)
+                .then(|| config.character_replacements.get(&key))
+                .flatten()
+                .map(|value| (2, value.as_str()))
         });
         if let Some((length, replacement)) = replacement {
             output.push_str(replacement);
@@ -402,21 +504,14 @@ fn rewrite_suffix_notes(input: &str, config: &AozoraConfig) -> String {
             if let Some((end, target, suffix)) = suffix_note_at(&chars, index) {
                 if let Some(rule) = config.suffix_notes.get(&suffix) {
                     let prefix = chars[..index].iter().collect::<String>();
-                    if suffix_target_range(&prefix, &target).is_some() {
-                        let target_length = target.chars().count();
-                        let should_select = selected
-                            .as_ref()
-                            .is_none_or(|(_, _, _, _, _, length)| target_length > *length);
-                        if should_select {
-                            selected = Some((
-                                index,
-                                end,
-                                target,
-                                rule.start.clone(),
-                                rule.end.clone(),
-                                target_length,
-                            ));
-                        }
+                    if suffix_target_range(&prefix, &target).is_some() && selected.is_none() {
+                        selected = Some((
+                            index,
+                            end,
+                            target,
+                            rule.start.clone(),
+                            rule.end.clone(),
+                        ));
                     }
                 }
                 index = end;
@@ -425,31 +520,35 @@ fn rewrite_suffix_notes(input: &str, config: &AozoraConfig) -> String {
             }
         }
 
-        let Some((start, end, target, start_tag, end_tag, _)) = selected else {
+        let Some((start, end, target, start_tag, end_tag)) = selected else {
             return current;
         };
         let prefix = chars[..start].iter().collect::<String>();
         let suffix = chars[end..].iter().collect::<String>();
-        let (target_start, target_end) = suffix_target_range(&prefix, &target).unwrap();
-        let target_at_end = target_end == prefix.len();
         let start_note = format!("［＃{start_tag}］");
         let end_note = format!("［＃{end_tag}］");
-        let mut rewritten = prefix;
-        rewritten.insert_str(target_start, &start_note);
-
-        // A suffix note may appear between an explicit ruby base and its
-        // reading marker. Keep the generated span outside the complete ruby.
+        // Java: 注記の後ろにルビがあれば前に移動して位置を調整する。
+        // 移動後の文字列で対象位置を計算すると ｜ を含めた span になる。
         let ruby_end = suffix.strip_prefix('《').and_then(|reading| {
             reading
                 .find('》')
                 .map(|offset| '《'.len_utf8() + offset + '》'.len_utf8())
         });
-        if target_at_end && let Some(ruby_end) = ruby_end {
+        let (target_start, _) = if let Some(ruby_end) = ruby_end {
+            let mut range_prefix = prefix.clone();
+            range_prefix.push_str(&suffix[..ruby_end]);
+            suffix_target_range(&range_prefix, &target).unwrap()
+        } else {
+            suffix_target_range(&prefix, &target).unwrap()
+        };
+        let mut rewritten = prefix;
+        rewritten.insert_str(target_start, &start_note);
+        if let Some(ruby_end) = ruby_end {
             rewritten.push_str(&suffix[..ruby_end]);
             rewritten.push_str(&end_note);
             rewritten.push_str(&suffix[ruby_end..]);
         } else {
-            rewritten.insert_str(target_end + start_note.len(), &end_note);
+            rewritten.push_str(&end_note);
             rewritten.push_str(&suffix);
         }
         current = rewritten;
@@ -468,28 +567,14 @@ fn rewrite_special_suffix_once(input: &str) -> Option<String> {
             .and_then(|value| value.strip_suffix("」のルビ"))
             .filter(|reading| !reading.is_empty() && !reading.starts_with("ママ"))
         {
-            let visible_target = suffix_visible_text(&target);
-            let (mut target_start, target_end) = suffix_target_range(&prefix, &visible_target)?;
-            if target.contains('《') {
-                let extra = target
-                    .chars()
-                    .count()
-                    .saturating_sub(visible_target.chars().count());
-                for _ in 0..extra {
-                    target_start = previous_char_boundary(&prefix, target_start);
-                }
-                while target_start > 0 && prefix[..target_start].ends_with('｜') {
-                    target_start -= '｜'.len_utf8();
-                }
-            }
+            // Java: targetLength は target 全体（ルビ込み）でカウント。
+            // 対象に《》が含まれると可視文字が足りず先頭(0)になる。
+            let (target_start, target_end) =
+                suffix_target_range_by_len(&prefix, target.chars().count())?;
             let mut rewritten = String::with_capacity(prefix.len() + reading.len() + 4);
             rewritten.push_str(&prefix[..target_start]);
             rewritten.push('｜');
-            if target.contains('《') {
-                rewritten.push_str(&remove_suffix_ruby(&prefix[target_start..target_end]));
-            } else {
-                rewritten.push_str(&prefix[target_start..target_end]);
-            }
+            rewritten.push_str(&prefix[target_start..target_end]);
             rewritten.push('《');
             rewritten.push_str(reading);
             rewritten.push('》');
@@ -856,65 +941,50 @@ fn remove_suffix_ruby(input: &str) -> String {
     output
 }
 
-fn suffix_target_range(output: &str, target: &str) -> Option<(usize, usize)> {
-    let indexed_chars = output.char_indices().collect::<Vec<_>>();
-    let mut visible = Vec::new();
-    let mut index = 0;
-
-    while index < indexed_chars.len() {
-        let (byte_index, character) = indexed_chars[index];
-        if character == '［' && indexed_chars.get(index + 1).map(|(_, value)| *value) == Some('＃')
-        {
-            index = indexed_chars
-                .iter()
-                .enumerate()
-                .skip(index + 2)
-                .find_map(|(candidate, (_, value))| (*value == '］').then_some(candidate + 1))
-                .unwrap_or(index + 1);
-            continue;
-        }
-        if character == '｜' {
-            index += 1;
-            continue;
-        }
-        if character == '《' {
-            index = indexed_chars
-                .iter()
-                .enumerate()
-                .skip(index + 1)
-                .find_map(|(candidate, (_, value))| (*value == '》').then_some(candidate + 1))
-                .unwrap_or(index + 1);
-            continue;
-        }
-        let end = byte_index + character.len_utf8();
-        visible.push((character, byte_index, end));
-        index += 1;
-    }
-
-    let target_chars = suffix_visible_text(target).chars().collect::<Vec<_>>();
-    if target_chars.is_empty() || target_chars.len() > visible.len() {
+fn suffix_target_range_by_len(prefix: &str, target_len: usize) -> Option<(usize, usize)> {
+    if target_len == 0 {
         return None;
     }
-    let match_start = visible.len() - target_chars.len();
-    if !visible[match_start..]
-        .iter()
-        .zip(target_chars)
-        .all(|((character, _, _), target)| *character == target)
-    {
-        return None;
+    // Java getTargetStart: 注記の直前から可視文字を target_len 分だけ遡る。
+    // 間にあるルビ（《…》）と注記タグ（［＃…］）は除外、｜は数えない。
+    let indexed = prefix.char_indices().collect::<Vec<_>>();
+    let mut idx = indexed.len();
+    let mut length = 0usize;
+    let mut has_ruby = false;
+    while target_len > length && idx > 0 {
+        match indexed[idx - 1].1 {
+            '》' => {
+                let mut j = idx - 1;
+                while j > 0 && indexed[j - 1].1 != '《' {
+                    j -= 1;
+                }
+                idx = j.saturating_sub(1);
+                has_ruby = true;
+                continue;
+            }
+            '］' => {
+                let mut j = idx - 1;
+                while j > 0 && indexed[j - 1].1 != '［' {
+                    j -= 1;
+                }
+                idx = j.saturating_sub(1);
+                continue;
+            }
+            '｜' => {}
+            _ => length += 1,
+        }
+        idx -= 1;
     }
-
-    let mut start = visible[match_start].1;
-    if start >= '｜'.len_utf8() && output[..start].ends_with('｜') {
+    let mut start = indexed[idx].0;
+    // ルビをまたいだら先頭の｜を含める
+    if has_ruby && start >= '｜'.len_utf8() && prefix[..start].ends_with('｜') {
         start -= '｜'.len_utf8();
     }
-    let mut end = visible.last()?.2;
-    if output[end..].starts_with('《')
-        && let Some(ruby_end) = output[end..].find('》')
-    {
-        end += ruby_end + '》'.len_utf8();
-    }
-    Some((start, end))
+    Some((start, prefix.len()))
+}
+
+fn suffix_target_range(prefix: &str, target: &str) -> Option<(usize, usize)> {
+    suffix_target_range_by_len(prefix, suffix_visible_text(target).chars().count())
 }
 
 fn parse_unicode_note(
@@ -953,10 +1023,10 @@ fn unicode_replacement(note: &str, config: &AozoraConfig) -> Option<String> {
         end = variation_end;
     }
     let _ = end;
-    Some(render_gaiji_replacement(&replacement, config))
+    Some(render_gaiji_replacement(&replacement, config, true))
 }
 
-fn render_gaiji_replacement(input: &str, config: &AozoraConfig) -> String {
+fn render_gaiji_replacement(input: &str, config: &AozoraConfig, allow_upright: bool) -> String {
     let chars = input.chars().collect::<Vec<_>>();
     let mut output = String::with_capacity(input.len());
     let mut index = 0;
@@ -972,7 +1042,7 @@ fn render_gaiji_replacement(input: &str, config: &AozoraConfig) -> String {
             index += 1;
             continue;
         }
-        index += push_text_char(&mut output, &chars, index, config, false);
+        index += push_text_char(&mut output, &chars, index, config, allow_upright);
     }
     output
 }
@@ -1014,7 +1084,7 @@ fn is_ssp_variation(character: char) -> bool {
 fn glyph_span(class_name: &str, base: char) -> String {
     format!(
         "<span class=\"glyph {class_name}\">{}</span>",
-        escape_html(&base.to_string())
+        escape_text(&base.to_string())
     )
 }
 
@@ -1032,6 +1102,7 @@ fn parse_gaiji_note(
     chars: &[char],
     start: usize,
     config: &AozoraConfig,
+    allow_upright: bool,
 ) -> Option<(usize, String)> {
     let (end, note) = gaiji_note_range(chars, start)?;
     let bare_note = note
@@ -1043,7 +1114,7 @@ fn parse_gaiji_note(
     let key_note = format!("※［＃{key}］");
     let normalized_key_note = format!("※［＃{normalized_key}］");
     if bare_note.contains("※［＃") {
-        return Some((end, escape_html(&note)));
+        return Some((end, escape_text(&note)));
     }
     if let Some(replacement) = unicode_replacement(bare_note, config) {
         return Some((end, replacement));
@@ -1062,7 +1133,10 @@ fn parse_gaiji_note(
         .or_else(|| config.gaiji.get(&key_note))
         .or_else(|| config.gaiji.get(&normalized_key_note))
     {
-        return Some((end, render_gaiji_replacement(replacement, config)));
+        return Some((end, render_gaiji_replacement(replacement, config, allow_upright)));
+    }
+    if let Some(replacement) = jis_note_replacement(bare_note, config, allow_upright) {
+        return Some((end, replacement));
     }
     let open = config
         .inline_notes
@@ -1074,7 +1148,48 @@ fn parse_gaiji_note(
         .get("行右小書き終わり")
         .map(String::as_str)
         .unwrap_or("</span>");
-    Some((end, format!("〓{open}（{}）{close}", escape_html(key))))
+    let description = convert_inline(key, config);
+    Some((end, format!("〓{open}（{description}）{close}")))
+}
+
+/// Resolves JIS X 0213 丸数字 codes (1面 8/12/13区) used by the reference
+/// converter's JisConverter table. Only the JIS code part (after the last
+/// `、` or after the 第3/第4水準 marker) is parsed.
+fn jis_note_replacement(
+    note: &str,
+    config: &AozoraConfig,
+    allow_upright: bool,
+) -> Option<String> {
+    let code_part = if let Some(position) = note.find("第3水準") {
+        &note[position + "第3水準".len()..]
+    } else if let Some(position) = note.find("第4水準") {
+        &note[position + "第4水準".len()..]
+    } else {
+        let comma = note.rfind('、')?;
+        &note[comma + '、'.len_utf8()..]
+    };
+    let start = code_part.find(|c: char| c.is_ascii_digit())?;
+    let mut parts = code_part[start..].split(|c: char| !c.is_ascii_digit());
+    let plane = parts.next()?.parse::<u8>().ok()?;
+    let row = parts.next()?.parse::<u8>().ok()?;
+    let cell = parts.next()?.parse::<u8>().ok()?;
+    let character = jis_to_unicode(plane, row, cell)?;
+    Some(render_gaiji_replacement(&character.to_string(), config, allow_upright))
+}
+
+/// JIS X 0213 1面 8区(㉑-㊿)・12区(❶-❿,⓫-⓴)・13区(①-⑳) → Unicode.
+fn jis_to_unicode(plane: u8, row: u8, cell: u8) -> Option<char> {
+    if plane != 1 {
+        return None;
+    }
+    let code = match row {
+        8 if (33..=62).contains(&cell) => 0x3251 + (cell - 33) as u32,
+        12 if (1..=10).contains(&cell) => 0x2776 + (cell - 1) as u32,
+        12 if (11..=20).contains(&cell) => 0x24eb + (cell - 11) as u32,
+        13 if (1..=20).contains(&cell) => 0x2460 + (cell - 1) as u32,
+        _ => return None,
+    };
+    char::from_u32(code)
 }
 
 fn gaiji_note_range(chars: &[char], start: usize) -> Option<(usize, String)> {
@@ -1132,9 +1247,7 @@ fn parse_image_note(
         return Some((end, replacement));
     }
     let alt = if config.inline_notes.contains_key("画像") && !description.is_empty() {
-        escape_html(&description)
-            .replace("&amp;times;", "&times;")
-            .replace('×', "&times;")
+        escape_html(&description).replace('×', "&times;")
     } else {
         String::new()
     };
@@ -1273,26 +1386,23 @@ fn parse_raw_anchor(chars: &[char], start: usize) -> Option<(usize, String)> {
         .find_map(|(index, character)| (*character == '>').then_some(index))?;
     let raw = chars[start..=end].iter().collect::<String>();
     let lower = raw.to_ascii_lowercase();
-    let replacement = if lower == "<a>" || lower == "</a>" {
-        raw
+    let replacement = if lower == "</a>" {
+        "</a>".to_owned()
     } else if lower.starts_with("<a") {
-        if let Some(name) = raw_tag_attribute(&raw, "name") {
-            let name = name.trim();
-            if name.is_empty() || name.contains('<') || name.contains('>') {
-                return None;
-            }
-            format!("<a id=\"{}\">", escape_html(name))
-        } else if let Some(href) = raw_tag_attribute(&raw, "href") {
+        // Java: href が http または # で始まる場合のみタグを出力し、
+        // それ以外（name のみ・その他 href）は破棄する
+        if let Some(href) = raw_tag_attribute(&raw, "href") {
             if href.contains('"') || href.contains('<') || href.contains('>') {
                 return None;
             }
-            if is_external_reference(href) {
-                "<a>".to_owned()
+            let href = href.trim();
+            if href.starts_with("http") || href.starts_with('#') {
+                raw.replace('&', "&amp;")
             } else {
-                format!("<a href=\"{}\">", escape_html(href))
+                String::new()
             }
         } else {
-            return None;
+            String::new()
         }
     } else {
         return None;
@@ -1336,6 +1446,60 @@ fn image_note_start_ending_at(chars: &[char], end: usize) -> Option<usize> {
         let (note_end, _) = note_range(chars, start)?;
         (note_end == end && image_note_parts(chars, start).is_some()).then_some(start)
     })
+}
+
+fn unicode_note_start_ending_at(
+    chars: &[char],
+    end: usize,
+    config: &AozoraConfig,
+) -> Option<usize> {
+    if end == 0 || chars.get(end - 1) != Some(&'］') {
+        return None;
+    }
+    (0..end).rev().find_map(|start| {
+        if start == 0
+            || chars.get(start) != Some(&'［')
+            || chars.get(start + 1) != Some(&'＃')
+            || chars.get(start - 1) != Some(&'※')
+        {
+            return None;
+        }
+        (parse_unicode_note(chars, start, config).is_some_and(|(note_end, _)| note_end == end))
+            .then_some(start - 1)
+    })
+}
+
+/// 注記を本文と同じ経路で描画し、全文字が同一の基底種別ならその種別を返す。
+/// ルビ基底に注記を含めてよいかの判定に使う（縦線→｜ は基底にならない）。
+fn note_rendered_kind(note: &[char], config: &AozoraConfig) -> Option<u8> {
+    let mut rendered = String::new();
+    let mut index = 0;
+    while index < note.len() {
+        if let Some((end, replacement)) = parse_image_note(note, index, config) {
+            rendered.push_str(&replacement);
+            index = end;
+            continue;
+        }
+        if let Some((end, replacement)) = parse_gaiji_note(note, index, config, true) {
+            rendered.push_str(&replacement);
+            index = end;
+            continue;
+        }
+        if let Some((end, replacement)) = parse_unicode_note(note, index, config) {
+            rendered.push_str(&replacement);
+            index = end;
+            continue;
+        }
+        if let Some((end, replacement)) = parse_inline_note(note, index, config) {
+            rendered.push_str(&replacement);
+            index = end;
+            continue;
+        }
+        break;
+    }
+    let mut kinds = rendered.chars().map(ruby_base_kind);
+    let first = kinds.next()??;
+    kinds.all(|kind| kind == Some(first)).then_some(first)
 }
 fn latin_bracket_start_ending_at(chars: &[char], end: usize) -> Option<usize> {
     if end == 0 || chars.get(end - 1) != Some(&'〕') {
@@ -1473,6 +1637,23 @@ fn parse_inline_note(
         .skip(start + 2)
         .find_map(|(index, character)| (*character == '］').then_some(index))?;
     let note = chars[start + 2..close].iter().collect::<String>();
+    // 訓点送り仮名・返り点: ［＃（X）］ → 行右小書き（. を含む外字画像は除外）
+    if let Some(inner) = note.strip_prefix('（').and_then(|value| value.strip_suffix('）'))
+        && !note.contains('.')
+        && !inner.is_empty()
+    {
+        let open = config
+            .inline_notes
+            .get("行右小書き")
+            .map(String::as_str)
+            .unwrap_or("<span class=\"super\">");
+        let close_tag = config
+            .inline_notes
+            .get("行右小書き終わり")
+            .map(String::as_str)
+            .unwrap_or("</span>");
+        return Some((close + 1, format!("{open}{inner}{close_tag}")));
+    }
     let replacement = config
         .inline_notes
         .get(&note)
@@ -1524,6 +1705,13 @@ fn push_text_char(
     config: &AozoraConfig,
     allow_upright: bool,
 ) -> usize {
+    // Single-character replacement (replace.txt): the result is emitted raw,
+    // exactly like the reference replaceMap, so it is not re-normalized.
+    let key = chars[index].to_string();
+    if let Some(replacement) = config.character_replacements.get(&key) {
+        output.push_str(replacement);
+        return 1;
+    }
     if let Some((class_name, consumed)) = glyph_font_for_sequence(chars, index, config) {
         output.push_str(&glyph_span(&class_name, '〓'));
         return consumed;
@@ -1539,7 +1727,7 @@ fn push_text_char(
         // Java composes the standard kana pairs before applying the
         // configured fallback for otherwise unsupported combinations.
         if let Some(composed) = compose_dakuten(chars[index], mark) {
-            push_escaped_char(output, composed);
+            push_text_char_escaped(output, composed);
             return 2;
         }
         if config.dakuten_type == 2
@@ -1561,9 +1749,9 @@ fn push_text_char(
         }
         if config.dakuten_type == 1 {
             output.push_str("<span class=\"dakuten\">");
-            push_escaped_char(output, chars[index]);
+            push_text_char_escaped(output, chars[index]);
             output.push_str("<span>");
-            push_escaped_char(output, mark);
+            push_text_char_escaped(output, mark);
             output.push_str("</span></span>");
             return 2;
         }
@@ -1572,10 +1760,10 @@ fn push_text_char(
     let character = normalize_vertical_character(chars[index], config.vertical);
     if allow_upright && is_upright_character(character) {
         output.push_str("<span class=\"upr\">");
-        push_escaped_char(output, character);
+        push_text_char_escaped(output, character);
         output.push_str("</span>");
     } else {
-        push_escaped_char(output, character);
+        push_text_char_escaped(output, character);
     }
     1
 }
@@ -1781,6 +1969,25 @@ fn push_ruby_part(
     config: &AozoraConfig,
     allow_auto_yoko: bool,
 ) {
+    let base_chars = base.chars().collect::<Vec<_>>();
+    let reading_chars = reading.chars().collect::<Vec<_>>();
+    // Java: 基底と読仮名が同じ長さで読仮名が同一文字なら一文字ずつルビを振る
+    if base_chars.len() == reading_chars.len()
+        && base_chars.len() > 1
+        && reading_chars.iter().all(|character| *character == reading_chars[0])
+    {
+        for (base_char, reading_char) in base_chars.iter().zip(reading_chars.iter()) {
+            if allow_auto_yoko {
+                output.push_str(&convert_inline(&base_char.to_string(), config));
+            } else {
+                output.push_str(&convert_inline_without_auto_yoko(&base_char.to_string(), config));
+            }
+            output.push_str("<rt>");
+            output.push_str(&convert_ruby_reading(&reading_char.to_string(), config));
+            output.push_str("</rt>");
+        }
+        return;
+    }
     if allow_auto_yoko && !contains_literal_gaiji_note(base) {
         output.push_str(&convert_inline(base, config));
     } else {
@@ -1791,20 +1998,39 @@ fn push_ruby_part(
     output.push_str("</rt>");
 }
 
+/// Escapes text for attribute values (quotes included).
 pub fn escape_html(input: &str) -> String {
     let mut escaped = String::with_capacity(input.len());
     for character in input.chars() {
-        push_escaped_char(&mut escaped, character);
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            _ => escaped.push(character),
+        }
     }
     escaped
 }
 
-fn push_escaped_char(output: &mut String, character: char) {
+/// Escapes body text the way the reference converter does: only `& < >`.
+fn escape_text(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for character in input.chars() {
+        push_text_char_escaped(&mut escaped, character);
+    }
+    escaped
+}
+
+fn push_text_char_escaped(output: &mut String, character: char) {
     match character {
         '&' => output.push_str("&amp;"),
         '<' => output.push_str("&lt;"),
         '>' => output.push_str("&gt;"),
-        '"' => output.push_str("&quot;"),
         _ => output.push(character),
     }
 }
+
+
+
+

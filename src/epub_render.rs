@@ -1,4 +1,4 @@
-use super::{EpubAsset, EpubMetadata, EpubSection, TITLE_PAGE_MARKER, is_title_page};
+use super::{EpubAsset, EpubMetadata, EpubSection, NavChapter, TITLE_PAGE_MARKER, is_title_page};
 const PAGE_MIDDLE_MARKER: &str = "<!-- aozora-page-middle -->";
 const PAGE_BOTTOM_MARKER: &str = "<!-- aozora-page-bottom -->";
 const PAGE_NO_CHAPTER_MARKER: &str = "<!-- aozora-page-no-chapter -->";
@@ -428,31 +428,23 @@ pub(super) fn render_package(
 pub(super) fn render_nav(
     metadata: &EpubMetadata,
     sections: &[EpubSection],
-    vertical: bool,
-    title_markup: Option<&str>,
+    _vertical: bool,
+    _title_markup: Option<&str>,
+    chapters: &[NavChapter],
+    toc_vertical: bool,
 ) -> String {
-    let entries = nav_entries(sections, title_markup);
-    let nav_items = render_nav_items(&entries);
-    let toc_style = if vertical {
-        r#"@page {margin:.5em .5em 0 0;}
-html {
-	writing-mode: vertical-rl;
-	-webkit-writing-mode: vertical-rl;
-	-epub-writing-mode: vertical-rl;
-}
-h1 {font-size:1.5em; padding-top:1em;}
-li {padding:0 .25em 0 0;}
-li a {text-decoration:none; border-right-width:1px; border-right-style:solid; padding-right: 1px;}"#
+    let mut nav_items = render_nav_items(chapters, sections);
+    if chapters.is_empty() && sections.iter().any(is_title_page) {
+        // Java: タイトルページを目次の先頭に書籍タイトルで追加する
+        let title = xml_escape(&metadata.title);
+        nav_items = format!(
+            "\t\t\t<li><a href=\"xhtml/title.xhtml\">{title}</a>\r\n</li>\r\n{nav_items}"
+        );
+    }
+    let toc_style = if toc_vertical {
+        "@page {margin:.5em .5em 0 0;}\r\nhtml {\r\n\twriting-mode: vertical-rl;\r\n\t-webkit-writing-mode: vertical-rl;\r\n\t-epub-writing-mode: vertical-rl;\r\n}\r\nh1 {font-size:1.5em; padding-top:1em;}\r\nli {padding:0 .25em 0 0;}\r\nli a {text-decoration:none; border-right-width:1px; border-right-style:solid; padding-right: 1px;}\r\n.tcy {\r\n  -webkit-text-combine:         horizontal;\r\n  -webkit-text-combine-upright: all;\r\n  text-combine-upright:         all;\r\n  -epub-text-combine:           horizontal;\r\n}\r\n.upr {\r\ntext-orientation: upright;\r\n-webkit-text-orientation: upright;\r\n-epub-text-orientation: upright;\r\n}"
     } else {
-        r#"@page {margin:.5em 0 0 .5em;}
-html {
-	writing-mode:horizontal-tb;
-	-webkit-writing-mode:horizontal-tb;
-	-epub-writing-mode:horizontal-tb;
-}
-h1 {font-size:1.5em; text-align:center;}
-li {padding:.25em 0 0 0;}
-li a {text-decoration:none; border-bottom-width:1px; border-bottom-style:solid; padding-right: 1px;}"#
+        "@page {margin:.5em 0 0 .5em;}\r\nhtml {\r\n\twriting-mode:horizontal-tb;\r\n\t-webkit-writing-mode:horizontal-tb;\r\n\t-epub-writing-mode:horizontal-tb;\r\n}\r\nh1 {font-size:1.5em; text-align:center;}\r\nli {padding:.25em 0 0 0;}\r\nli a {text-decoration:none; border-bottom-width:1px; border-bottom-style:solid; padding-right: 1px;}"
     };
     let first_body = sections
         .iter()
@@ -465,58 +457,17 @@ li a {text-decoration:none; border-bottom-width:1px; border-bottom-style:solid; 
                 .count();
             format!("xhtml/{body_number:04}.xhtml")
         });
-    let title_landmark = if sections.iter().any(is_title_page) {
-        "\t\t\t<li><a epub:type=\"titlepage\" href=\"xhtml/title.xhtml\">扉</a></li>\n"
-    } else {
-        ""
-    };
-    let body_landmark = first_body
-        .map(|path| {
-            format!("\t\t\t<li><a epub:type=\"bodymatter\" href=\"{path}\">本文</a></li>\n")
-        })
-        .unwrap_or_default();
-    let landmark = format!("{title_landmark}{body_landmark}");
+    let mut landmark = String::new();
+    if sections.iter().any(is_title_page) {
+        landmark.push_str("\t\t\t<li><a epub:type=\"titlepage\" href=\"xhtml/title.xhtml\">扉</a></li>\r\n");
+    }
+    if let Some(path) = first_body {
+        landmark.push_str(&format!(
+            "\t\t\t<li><a epub:type=\"bodymatter\" href=\"{path}\">本文</a></li>\r\n"
+        ));
+    }
     format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="{language}" xml:lang="{language}">
-<head>
-<meta charset="UTF-8"/>
-<title>{title}</title>
-<style type="text/css">
-{toc_style}
-.tcy {{
-  -webkit-text-combine:         horizontal;
-  -webkit-text-combine-upright: all;
-  text-combine-upright:         all;
-  -epub-text-combine:           horizontal;
-}}
-.upr {{
-text-orientation: upright;
--webkit-text-orientation: upright;
--epub-text-orientation: upright;
-}}
-li {{list-style:none;}}
-li.chapter {{list-style:disc; line-height:1.75em;}}
-nav#landmarks {{ display:none; }}
-</style>
-</head>
-
-<body>
-	<nav epub:type="landmarks" id="landmarks" hidden="">
-		<h2>Guide</h2>
-		<ol>
-{landmark}		</ol>
-	</nav>
-	<nav epub:type="toc" id="toc">
-		<h1>目　次</h1>
-		<ol>
-{items}		</ol>
-	</nav>
-</body>
-</html>
-"#,
-        language = xml_escape(&metadata.language),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!DOCTYPE html>\r\n<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\" lang=\"ja\" xml:lang=\"ja\">\r\n<head>\r\n<meta charset=\"UTF-8\"/>\r\n<title>{title}</title>\r\n<style type=\"text/css\">\r\n{toc_style}\r\nli {{list-style:none;}}\r\nli.chapter {{list-style:disc; line-height:1.75em;}}\r\nnav#landmarks {{ display:none; }}\r\n</style>\r\n</head>\r\n\r\n<body>\r\n\t<nav epub:type=\"landmarks\" id=\"landmarks\" hidden=\"\">\r\n\t\t<h2>Guide</h2>\r\n\t\t<ol>\r\n{landmark}\t\t</ol>\r\n\t</nav>\r\n\t<nav epub:type=\"toc\" id=\"toc\">\r\n\t\t<h1>目　次</h1>\r\n\t\t<ol>\r\n{items}\t\t</ol>\r\n\t</nav>\r\n</body>\r\n</html>\r\n",
         title = xml_escape(&metadata.title),
         toc_style = toc_style,
         landmark = landmark,
@@ -524,66 +475,49 @@ nav#landmarks {{ display:none; }}
     )
 }
 
-fn render_nav_items(entries: &[NavEntry]) -> String {
-    if entries.is_empty() {
-        return String::new();
+fn render_nav_items(chapters: &[NavChapter], sections: &[EpubSection]) -> String {
+    if chapters.is_empty() {
+        // Java: 章情報が無い場合は最初の本文セクションを「本文」で出力する
+        let fallback = first_body_path(sections);
+        return format!("\t\t\t<li><a href=\"{fallback}\">本文</a></li>\r\n\r\n");
     }
-    if entries.iter().all(|entry| entry.level == 1) {
-        let mut output = String::new();
-        for (index, entry) in entries.iter().enumerate() {
-            if index > 0 {
-                output.push_str("</li>\n");
-            }
-            let label = if entry.markup {
-                entry.label.clone()
-            } else {
-                xml_escape(&entry.label)
-            };
-            output.push_str(&format!(
-                "\t\t\t<li><a href=\"{}\">{label}</a>\n",
-                xml_escape(&entry.path),
-            ));
-        }
-        output.push_str("\n\t\t</li>\n");
-        return output;
-    }
-
     let mut output = String::new();
-    let mut depth = 1usize;
-    let mut has_item = false;
-    for entry in entries {
-        let level = entry.level;
-        if has_item {
-            if level > depth {
-                for _ in depth..level {
-                    output.push_str("\t\t<ol>\n");
-                }
-            } else {
-                output.push_str("</li>\n");
-                for _ in level..depth {
-                    output.push_str("</ol>\n</li>\n");
-                }
-            }
-        }
-        let label = if entry.markup {
-            entry.label.clone()
-        } else {
-            xml_escape(&entry.label)
-        };
+    for (index, chapter) in chapters.iter().enumerate() {
+        let anchor = chapter
+            .anchor
+            .as_deref()
+            .map(|anchor| format!("#{anchor}"))
+            .unwrap_or_default();
+        let label = chapter
+            .label
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
         output.push_str(&format!(
-            "\t\t\t<li><a href=\"{}\">{label}</a>\n",
-            xml_escape(&entry.path),
+            "\t\t\t<li><a href=\"{}{}\">{label}</a>\r\n",
+            chapter.path, anchor,
         ));
-        depth = level;
-        has_item = true;
-    }
-    if has_item {
-        output.push_str("\n\t\t</li>\n");
-        for _ in 1..depth {
-            output.push_str("</ol>\n</li>\n");
+        if index + 1 < chapters.len() {
+            output.push_str("</li>\r\n");
         }
     }
+    output.push_str("\r\n\t\t</li>\r\n");
     output
+}
+
+fn first_body_path(sections: &[EpubSection]) -> String {
+    sections
+        .iter()
+        .enumerate()
+        .find(|(_, section)| !is_title_page(section))
+        .map(|(index, _)| {
+            let body_number = sections[..=index]
+                .iter()
+                .filter(|section| !is_title_page(section))
+                .count();
+            format!("xhtml/{body_number:04}.xhtml")
+        })
+        .unwrap_or_else(|| "xhtml/0001.xhtml".to_owned())
 }
 pub(super) fn render_ncx(
     metadata: &EpubMetadata,
@@ -748,26 +682,7 @@ pub(super) fn render_section(
         }
         title_page_body.push_str("\n\n");
         let layout_class = if vertical { "hltr" } else { "vrtl" };
-        return format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE html>
-<html
- xmlns="http://www.w3.org/1999/xhtml"
- xmlns:epub="http://www.idpf.org/2007/ops"
- xml:lang="{language}"
- class="{layout_class}"
->
-<head>
-<link rel="stylesheet" type="text/css" href="../style/book-style.css"/>
-
-<title>{title_text}</title>
-</head>
-
-
-<body class="p-titlepage{kindle_class}">
-<div class="main vrtl block-align-center">{title_page_body}</div>
-</body>
-</html>"#,
+        return format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!DOCTYPE html>\r\n<html\r\n xmlns=\"http://www.w3.org/1999/xhtml\"\r\n xmlns:epub=\"http://www.idpf.org/2007/ops\"\r\n xml:lang=\"{language}\"\r\n class=\"{layout_class}\"\r\n>\r\n<head>\r\n<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/book-style.css\"/>\r\n\r\n<title>{title_text}</title>\r\n</head>\r\n\r\n\r\n<body class=\"p-titlepage{kindle_class}\">\r\n<div class=\"main vrtl block-align-center\">{title_page_body}</div>\r\n</body>\r\n</html>\r\n",
             language = xml_escape(&metadata.language),
             title_text = xml_escape(&metadata.title),
             kindle_class = kindle_class,
@@ -777,28 +692,7 @@ pub(super) fn render_section(
     let (page_class, raw_body_fragment) = section_page_mode(trimmed);
     let body_fragment = dedent_fragment(&sanitize_xhtml_fragment(raw_body_fragment));
     if let Some(image) = image_page_body(&body_fragment) {
-        return format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE html>
-<html
- xmlns="http://www.w3.org/1999/xhtml"
- xmlns:epub="http://www.idpf.org/2007/ops"
- xml:lang="{language}"
- class="hltr"
->
-<head>
-<meta charset="UTF-8"/>
-<title>{title}</title>
-<link rel="stylesheet" type="text/css" href="../style/book-style.css"/>
-
-</head>
-<body class="p-image{kindle_class}">
-<div class="main">
-{image}
-</div>
-</body>
-</html>
-"#,
+        return format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!DOCTYPE html>\r\n<html\r\n xmlns=\"http://www.w3.org/1999/xhtml\"\r\n xmlns:epub=\"http://www.idpf.org/2007/ops\"\r\n xml:lang=\"{language}\"\r\n class=\"hltr\"\r\n>\r\n<head>\r\n<meta charset=\"UTF-8\"/>\r\n<title>{title}</title>\r\n<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/book-style.css\"/>\r\n\r\n</head>\r\n<body class=\"p-image{kindle_class}\">\r\n<div class=\"main\">\r\n{image}\n</div>\r\n</body>\r\n</html>\r\n",
             language = xml_escape(&metadata.language),
             title = xml_escape(&metadata.title),
             image = image,
@@ -807,27 +701,7 @@ pub(super) fn render_section(
     }
     if let Some(svg) = svg_image_body(&body_fragment) {
         let (width, height) = svg_view_box(svg).unwrap_or((1, 1));
-        return format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE html>
-<html
-xmlns="http://www.w3.org/1999/xhtml"
-xmlns:epub="http://www.idpf.org/2007/ops"
-xml:lang="{language}"
->
-<head>
-<meta charset="UTF-8"/>
-<title>{title}</title>
-<link rel="stylesheet" type="text/css" href="../style/fixed-layout-jp.css"/>
-<meta name="viewport" content="width={width}, height={height}"/>
-</head>
-<body>
-<div class="main">
-{svg}
-</div>
-</body>
-</html>
-"#,
+        return format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!DOCTYPE html>\r\n<html\r\nxmlns=\"http://www.w3.org/1999/xhtml\"\r\nxmlns:epub=\"http://www.idpf.org/2007/ops\"\r\nxml:lang=\"{language}\"\r\n>\r\n<head>\r\n<meta charset=\"UTF-8\"/>\r\n<title>{title}</title>\r\n<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/fixed-layout-jp.css\"/>\r\n<meta name=\"viewport\" content=\"width={width}, height={height}\"/>\r\n</head>\r\n<body>\r\n<div class=\"main\">\r\n{svg}\n</div>\r\n</body>\r\n</html>\r\n",
             language = xml_escape(&metadata.language),
             title = xml_escape(&metadata.title),
             width = width,
@@ -860,26 +734,7 @@ xml:lang="{language}"
     } else {
         format!("<div class=\"main\">\n{body_fragment}\n</div>")
     };
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE html>
-<html
- xmlns="http://www.w3.org/1999/xhtml"
- xmlns:epub="http://www.idpf.org/2007/ops"
- xml:lang="{language}"
- class="{layout_class}"
->
-<head>
-<meta charset="UTF-8"/>
-<title>{title}</title>
-<link rel="stylesheet" type="text/css" href="../style/book-style.css"/>
-
-</head>
-<body{rendered_page_class}>
-{body}
-</body>
-</html>
-"#,
+    format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!DOCTYPE html>\r\n<html\r\n xmlns=\"http://www.w3.org/1999/xhtml\"\r\n xmlns:epub=\"http://www.idpf.org/2007/ops\"\r\n xml:lang=\"{language}\"\r\n class=\"{layout_class}\"\r\n>\r\n<head>\r\n<meta charset=\"UTF-8\"/>\r\n<title>{title}</title>\r\n<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/book-style.css\"/>\r\n\r\n</head>\r\n<body{rendered_page_class}>\r\n{body}\n</body>\r\n</html>\r\n",
         language = xml_escape(&metadata.language),
         title = xml_escape(&metadata.title),
         layout_class = layout_class,

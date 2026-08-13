@@ -1,17 +1,53 @@
 # AozoraEpub3_Lite 引継ぎメモ
 
-更新日: 2026-08-12
+更新日: 2026-08-13
 作業ディレクトリ: `C:/Users/rumia/Desktop/APP/Rust/AozoraEpub3_Lite`
 作業ブランチ: `develop`
 
 ## 目的
 
-Java 版 AozoraEpub3 を Rust で再構築するプロジェクト。GUI は対象外とし、次の2形態を目標にしている。
+Java 版 AozoraEpub3 の本文変換・EPUB生成機能を、GUI とネットワーク通信を持たない Rust 軽量版として再構築する。成果物は次の2形態とする。
 
 - `aozora_epub3_lite` Rust ライブラリ
 - `AozoraEpub3_Lite` 単体 CLI
 
 ライセンスは AozoraEpub3 に合わせて GPL v3。
+
+## 軽量版の対象範囲
+
+### 対象
+
+- ローカルの TXT / ZIP / TXTZ / CBZ からの EPUB 3 生成
+- CLI による入力、出力先、タイトル種別、表紙、文字コード、書字方向、端末指定の操作
+- INI、プリセット、注記資産、外字資産などの外部ファイルによる設定
+- 青空文庫注記の本文変換、メタデータ抽出、ローカル画像・表紙処理
+- EPUB の構造、目次、画像、外字フォント、タイトルページの生成
+- Java 版のローカル変換結果との互換性向上
+
+### 明確な対象外
+
+次の機能は軽量版には不要であり、未実装でも欠陥とは扱わない。今後の優先実装にも含めない。
+
+- GUI、Swing画面、GUI上の確認・編集・プロファイル管理
+- Web小説取得、サイト別HTML抽出、Web変換キャッシュ
+- HTTP / HTTPS を含むネットワーク通信
+- HTTP表紙、外部画像、外部文書などのネットワーク資源取得
+- RAR入力
+
+Java版にこれらの機能が存在していても、軽量版の互換対象はローカル入力からEPUBを生成する経路に限定する。
+
+## 完了条件
+
+軽量版の完了は、Java版の全機能を移植したことではなく、次を満たすこととする。
+
+1. CLI の全オプションがヘルプに掲載され、正常系・異常系・境界値をテストできる。
+2. 外部 INI / プリセット / 注記資産 / 外字資産を指定して、設定が変換結果に一貫して反映される。
+3. TXT / ZIP / TXTZ / CBZ のローカル入力を、エラーなく再現可能な EPUB に変換できる。
+4. EPUB の ZIP 整合性、manifest、spine、nav、NCX、画像、外字フォントを検証できる。
+5. 対象範囲内の Java 版フィクスチャについて、差分を管理しながら互換性を継続的に改善できる。
+6. 対象外の Web小説取得、ネットワーク通信、RAR、GUIを実装しないまま軽量性を維持する。
+
+完了条件を満たすために必要な差分修正・回帰テスト・設定テストは実装対象とする。対象外機能を理由に完了を保留しない。
 
 ## 現在の状態
 
@@ -64,94 +100,108 @@ text::tests::keeps_suffix_tcy_notes_outside_following_ruby
 
 ## 検証済みコマンド
 
-以下は 2026-08-12 時点で成功済み。
+以下は 2026-08-13 時点で成功済み。
 
 ```text
 cargo fmt --all -- --check
 cargo test --all
+cargo test --test epub_structure
+cargo test --test cli_config
 cargo clippy --all-targets --all-features -- -D warnings
 cargo build --all-targets --all-features
-cargo test --test epub_structure
 ccc index
 ```
 
 結果:
 
-- `cargo test --all`: 109 passed
-- `cargo test --test epub_structure`: 6 passed
+- `cargo test --all`: 156 passed、1 ignored
+- `cargo test --test epub_structure`: 11 passed
+- `cargo test --test cli_config`: 3 passed
 - clippy: 警告なし
 - build: 成功
-- `ccc index`: 35 files / 1465 chunks / error 0
+- `ccc index`: 38 files / 1628 chunks / error 0
 
 代表入力による CLI 変換も確認済み。
 
 ```text
-cargo run --quiet -- -d target/final-cli-verified \
+cargo run --quiet -- -d target/progress-check \
   sample/AozoraEpub3/test_data/test_title.txt \
   sample/AozoraEpub3/test_data/test_chuki.txt \
   sample/AozoraEpub3/test_data/test_png.zip
 ```
 
-生成された EPUB は3件。ZIP 整合性エラーはなく、画像・XHTML・manifest を確認済み。
+3件のEPUBが生成され、`unzip -t` によるZIP整合性確認に成功した。さらに現行実装で
+`test_data` 内の21件のローカルフィクスチャをCLI変換し、すべてEPUBCheckを通過した。
 
 ## 既知の残存事項
 
-### 1. `test_chuki.txt` の EPUBCheck エラー
-
-EPUBCheck では次のエラーが残る。
-
-- `href="#link"` の参照先 ID がない
-- `href="aaa"` の参照先リソースがない
-
-これは入力フィクスチャ内の raw `<a>` タグが原因。Java 版も同様のリンクを出力するため、現時点では互換性を優先して自動修正していない。
-
-### 2. Java 版との完全一致は未達
-
-`test_chuki.txt` の主要な縦中横ルビは一致したが、Java 版と Rust 版で以下の差が残る。
+### 1. Java 版との完全一致は未達
+ローカル変換の主要経路は動作するが、Java 版と Rust 版で以下の差が残る。
 
 - 一部の空セクション数・XHTML ファイル数
 - ブロック注記やレイアウト注記の細部
 - Java 版の冗長な二重 `<span class="tcy">` と Rust 版の正規化差
 - 画像ページ、タイトルページ、リンク処理の細部
+- 地付きブロック内の複数行を `<p>` に分けるかどうかなどの XHTML 構造
+- フィクスチャ `test_btm.txt` では句読点保持と地付き複数行の出力がJava版と異なる
 
-完全互換を目指す場合は、まず Java / Rust の XHTML をセクション単位で比較し、差分を次の単位で分離すること。
+完全一致を目指す場合は、Java / Rust の XHTML をセクション単位で比較し、差分を次の単位で分離する。
 
 1. セクション分割
 2. 注記変換
 3. 画像解決・資産配置
 4. EPUB レンダリング
 
-## Java版機能監査（2026-08-12）
+### 2. CLI と外部設定の残存事項
+
+CLI の主要オプションと外部設定の基本経路は実装・テスト済みである。残る項目は次に限定する。
+
+- INI の全画像・改ページキーについて、変換結果まで含む代表ケースの固定。
+- ローカル入力に対する Java 版互換差分を、再現可能なフィクスチャとして管理する。
+
+### 3. 検証環境
+
+- `tests/epub_parity.rs` は比較用のJava/Rust生成ディレクトリが必要なため通常は ignored。
+- `AOZORA_JAVA_DIR=target/parity-java AOZORA_RUST_DIR=target/parity-rust cargo test --test epub_parity -- --ignored` で、既存生成物の差分を再現できる。
+- 現在の既存Java生成物との差分は、少なくとも `test_btm.txt` の句読点と地付きブロックのXHTML構造に残る。
+- `target/epubcheck-all` に現行実装で生成した21件を `java -jar C:/EPUBCheck/epubcheck.jar` で検証し、0エラー・0警告だった。
+
+### 4. 対象外
+
+Web小説取得、HTTP / HTTPS リソース取得、RAR入力、GUIは、未実装事項ではなく軽量版の明確な対象外である。これらを理由に完了判定を遅らせない。
+
+## 軽量版機能監査（2026-08-13）
 
 ### 対応済み
 
-- TXT / ZIP / TXTZ / CBZ の入力、UTF-8 / Shift_JIS 系の自動判定、タイトル・著者・出版社の推定。
-- 青空文庫注記の資産ロード、通常の注記タグ、改ページ・改丁・左右中央・ページ左寄せ、見出し、固定形式の字下げ、行頭強制字下げ。
-- ルビ、設定由来の後置注記（傍点・太字・縦中横など）、自動縦中横、外字コード・IVS・代替文字、拡張ラテン、文字置換。
-- 注記画像・raw `<img>`・raw `<a>`、画像解決・EPUB 内配置、表紙、CBZ の画像専用 EPUB。
+- TXT / ZIP / TXTZ / CBZ のローカル入力、UTF-8 / Shift_JIS 系の自動判定、タイトル・著者・出版社の推定。
+- 青空文庫注記の資産ロード、通常の注記タグ、改ページ・改丁・左右中央・ページ左寄せ、見出し、字下げ、行頭強制字下げ。
+- ルビ、設定由来の後置注記、自動縦中横、外字コード・IVS・代替文字、拡張ラテン、文字置換。
+- 注記画像・raw `<img>`、ローカル画像解決、EPUB内配置、ローカル表紙、CBZの画像専用EPUB。
 - EPUB 3 の container / OPF / spine / nav / NCX / title page / cover。`mimetype` は非圧縮で先頭に配置。
-- 画像の寸法解析、元画像の埋め込み、回転、浮動・単ページ判定、SVG 固定レイアウトページ化。
-- 本文の空行除去 / 最大空行数、本文バイト数・空行数・章単位の強制改ページ、`底本：` の奥付分離、Kobo 栞用 paragraph ID。
+- 画像の寸法解析、リサイズ、回転、ガンマ、余白処理、浮動・単ページ判定、SVG固定レイアウトページ化。
+- 本文の空行除去 / 最大空行数、本文バイト数・空行数・章単位の強制改ページ、`底本：` の奥付分離、Kobo栞用 paragraph ID。
+- 外字フォントの検出、glyph span出力、EPUB内フォント格納、動的 `font.css` 生成。
 
 ### 部分対応
 
-- 注記資産の固定形式（1〜30字下げ、折り返し、字詰め、地付き等）は `AozoraConfig::load_tag_text` で変換できる。一方、資産内で `TODO Pattern` とされる正規表現形式の複合字下げは演算処理されない。
-- 注記フラグは `P` / `M` / `L` と `1` の動作を実装している。`K`（訓点）と `2` / `3`（ルビ排他）は資産タグ出力はできるが、Java 版の専用状態管理とは一致しない。
-- 割り注は `<span class="wrc">` へ変換するが、Java 版の自動改行・禁則計算は未実装。後置注記も資産に定義された装飾規則が対象で、「〜のルビ」や「注記付き」の専用変換は未実装。
-- 画像は元バイトを EPUB に格納し、CSS / SVG で表示サイズを調整する。画素リサイズ、JPEG / PNG 再エンコード、ガンマ、余白除去、画像の実回転、外字フォント画像の向き別処理は未実装。
-- 目次はセクション先頭の h1〜h3 を階層化し、`底本：` の奥付ページを除外する。Java 版の自動章名抽出・副題 / 原題 / シリーズ等は未実装。
+- 注記資産の固定形式（1〜30字下げ、折り返し、字詰め、地付き等）は `AozoraConfig::load_tag_text` で変換できる。一方、資産内で `TODO Pattern` とされる正規表現形式の複合字下げはJava版と同じ汎用演算ではない。
+- 注記フラグは `P` / `M` / `L` と `1` の動作を実装している。`K`（訓点）と `2` / `3`（ルビ排他）はJava版の専用状態管理とは一致しない。
+- 割り注は `<span class="wrc">` へ変換し、改行も処理するが、Java版の自動改行・禁則計算との完全一致は未確認。後置注記も資産に定義された装飾規則が中心で、「〜のルビ」や「注記付き」の専用変換は未実装。
+- 画像処理の主要機能は実装済みだが、Java `ImageUtils` との画素単位・エンコード単位の完全一致は未達。
+- 目次はセクション先頭の h1〜h3 を階層化し、`底本：` の奥付ページを除外する。Java版の自動章名抽出・副題 / 原題 / シリーズ等は未実装。
 
-### 未実装（優先度高）
+### 優先して仕上げる項目
 
-- 外字フォントの検出・埋め込みと glyph span 出力。
-- RAR 入力、Web 小説取得、HTTP 表紙 URL、端末プロファイルの実適用。
-- Java 版 `ImageUtils` 相当の画素処理（リサイズ、余白、回転、ガンマ、出力形式変換）。
-- Java 版との完全な XHTML / セクション一致。`test_chuki.txt` には raw `<a>` の未解決参照など、Java 版も出力する EPUBCheck エラーが残る。
+- 外字資産を含む `--config-dir` の CLI エンドツーエンドテスト。
+- ローカル入力に限定した Java 版との XHTML / セクション差分の縮小。
+- EPUB構造、ローカル画像、外字フォント、表紙、目次の回帰テスト拡充。
 
-この監査では GUI を目標外とし、Web 変換は参照機能として未実装を確認した。`sample/AozoraEpub3` の参照実装、`assets/aozora` の資産、Rust の実装・出力を照合した。次に互換性を上げる場合は、外字フォント資産と Java `ImageUtils` のうち利用価値の高い処理を個別に実装する。
+この監査では、軽量版の互換対象をローカル入力からEPUBを生成する経路に限定した。Web小説取得、HTTP / HTTPS、RAR、GUIは実装対象外として評価から除外する。
+
 
 ## 作業ツリーとコミット状態
-引き継ぎ後も論理単位ごとに `develop` へ commit / push 済み。
+引き継ぎ後に完了した論理単位は、以下のコミットとして `develop` へ commit / push 済み。
 
 - `bc3a29d`: Aozora 変換データ資産
 - `0ddcc38`: EPUB テンプレート資産
@@ -167,7 +217,7 @@ EPUBCheck では次のエラーが残る。
 - `6840d56`: `底本：` 奥付分離と目次除外
 - `325c0a8`: コメントブロックの字下げ抑止
 
-`develop` は `origin/develop` と同期済み。`master` は変更していない。
+`develop` の HEAD は `origin/develop` と同期済みだが、作業ツリーには CLI / 外部設定 / 回帰テスト / 本文変換の未コミット差分がある。`master` は変更していない。
 
 再開時は既存差分を破棄せず、まず `git status --short --branch` で状態を確認すること。
 
@@ -200,8 +250,11 @@ git log --oneline --decorate -8
 
 1. `git status --short --branch` で未コミット変更を確認
 2. `cargo test --all` を再実行
-3. `test_chuki.txt` の Java / Rust XHTML 差分をセクション単位で比較
-4. 変更対象ごとに回帰テストを追加
-5. `cargo fmt --all`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo build --all-targets --all-features` を実行
-6. 必要なら `ccc index` でコードインデックスを更新
-7. `develop` 上でレビュー・コミットする。`master` への merge / push はユーザーの明示依頼と十分な検証後のみ
+3. `test_chuki.txt` などローカルフィクスチャの Java / Rust XHTML 差分をセクション単位で比較する
+4. 外字資産と画像・改ページ設定を使う CLI エンドツーエンドテストを追加する
+5. 変更対象ごとに回帰テストを追加する
+6. `cargo fmt --all`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo build --all-targets --all-features` を実行する
+7. 必要なら `ccc index` でコードインデックスを更新する
+8. `develop` 上でレビュー・コミットする。`master` への merge / push はユーザーの明示依頼と十分な検証後のみ
+
+Web小説取得、HTTP / HTTPS、RAR、GUIを調査・実装対象に戻してはならない。

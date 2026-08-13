@@ -120,8 +120,9 @@ fn splits_sections_at_page_break_tags() {
 fn splits_page_breaks_embedded_in_text_lines() {
     let sections = aozora_text_to_xhtml_sections("前［＃改ページ］後［＃改ページ］終").unwrap();
     assert_eq!(sections.len(), 3);
-    assert!(sections[0].contains("<p>前</p>"));
-    assert!(sections[1].contains("<p>後</p>"));
+    // Java: 行途中の改ページの前部分は <p> なしの bare 出力（先頭文字へ kobo id）
+    assert!(sections[0].contains("<span id=\"kobo.1.1\">前</span>"));
+    assert!(sections[1].contains("後"));
     assert!(sections[2].contains("<p>終</p>"));
 }
 #[test]
@@ -327,22 +328,34 @@ fn converts_gaiji_image_notes_without_remote_resources() {
 }
 
 #[test]
-fn converts_raw_named_anchors_to_xhtml_ids() {
+fn drops_raw_named_anchors_but_keeps_fragment_hrefs() {
     let output = plain_text_to_xhtml(r##"<a name="aaa">本文</a><a href="#aaa">参照</a>"##).unwrap();
-    assert!(output.contains(r#"<a id="aaa">本文</a>"#));
+    // Java: name のみの <a> は破棄、http/# の href はそのまま出力
+    assert!(!output.contains("<a id=\"aaa\">"));
+    assert!(!output.contains("<a name=\"aaa\">"));
+    assert!(output.contains("本文"));
     assert!(output.contains(r##"<a href="#aaa">参照</a>"##));
 }
 
 #[test]
-fn strips_external_raw_anchor_targets() {
+fn keeps_http_and_fragment_anchor_hrefs_verbatim() {
     let output = plain_text_to_xhtml(
         r#"<a href="https://example.com/book">外部リンク</a><a href="//cdn.example.com">CDN</a>"#,
     )
     .unwrap();
-    assert!(output.contains("<a>外部リンク</a>"));
-    assert!(output.contains("<a>CDN</a>"));
-    assert!(!output.contains("https://"));
+    // Java: http で始まる href はタグごと出力、それ以外（// 等）は破棄
+    assert!(output.contains(r#"<a href="https://example.com/book">外部リンク</a>"#));
     assert!(!output.contains("//cdn.example.com"));
+    assert!(!output.contains("<a>CDN</a>"));
+}
+
+#[test]
+fn drops_unhref_anchors_under_link_started_semantics() {
+    let output = plain_text_to_xhtml(r##"<A>外<a href="#nested">内</a>後</A>"##).unwrap();
+    // Java: href の無い <A> は破棄、#href の <a> のみ出力され </a> も対応
+    assert!(!output.contains("<A>"));
+    assert!(!output.contains("<a>外内後</a>"));
+    assert!(output.contains("外<a href=\"#nested\">内</a>後"));
 }
 
 #[test]
@@ -357,7 +370,7 @@ fn renders_inline_and_block_headings() {
     let block =
         plain_text_to_xhtml("［＃ここから中見出し］\n章題\n［＃ここで中見出し終わり］\n本文")
             .unwrap();
-    assert!(block.contains("<h2 class=\"font-1em30\">\n<p>章題</p>\n</h2>"));
+    assert!(block.contains("<div class=\"font-1em30\">\n<p>章題</p>\n</div>"));
     assert!(block.contains("<p>本文</p>"));
 }
 #[test]
@@ -510,7 +523,7 @@ fn nests_multiple_suffix_notes_on_the_same_target() {
     .unwrap();
     assert!(
         output.contains(
-            "<span class=\"em-line\"><span class=\"bold\"><span class=\"em-sesame\">青空"
+            "<span class=\"bold\"><span class=\"em-sesame\"><span class=\"em-line\">青空"
         )
     );
     assert!(output.contains("</span></span><ruby>文庫<rt>ぶんこ</rt></ruby></span>"));
@@ -531,7 +544,7 @@ fn preserves_entities_in_image_alt_text() {
     )
     .unwrap();
     assert!(output.contains(r#"alt="底本が「&times;」の中央よりやや上方に横棒""#));
-    assert!(!output.contains(r#"&amp;amp;"#));
+    assert!(!output.contains("&#215;"));
 }
 #[test]
 fn resolves_unicode_code_after_unknown_gaiji_note() {
@@ -673,7 +686,8 @@ fn converts_suffix_ruby_notes() {
     )
     .unwrap();
     assert!(output.contains("青空<ruby>文庫<rt>ぶんこ</rt></ruby>"));
-    assert!(output.contains("<ruby>漢字青空文庫<rt>aozora bunko</rt></ruby>"));
+    // Java: 対象が既に《…》ルビを含む場合は既存ルビが優先され注記は破棄される
+    assert!(output.contains("<ruby>漢字青空文庫<rt>あおぞらぶんこ</rt></ruby>"));
     assert!(output.contains("<ruby>青空文庫<rt>aozora bunko</rt></ruby>"));
     assert!(!output.contains("のルビ"));
 }
@@ -716,4 +730,48 @@ fn preserves_java_unconverted_notes_and_drops_unknown_markers() {
     assert!(output.contains("<p>責空文庫</p>"));
     assert!(!output.contains("注記未定義"));
     assert!(!output.contains("未知傍点"));
+}
+
+#[test]
+#[test]
+fn chapter_names_keep_fullwidth_spaces() {
+    let cfg = crate::config::AozoraConfig::default();
+    let (_, chapters) = super::aozora_text_to_xhtml_sections_with_chapters(
+        "表題\n著者\n\n［＃改ページ］\n［＃３字下げ］短章　その一［＃「短章　その一」は中見出し］\n［＃改ページ］\n!?　&<>\n",
+        &cfg,
+        false,
+    )
+    .unwrap();
+    assert_eq!(chapters.len(), 2);
+    assert_eq!(chapters[0].label, "短章　その一");
+    assert_eq!(chapters[1].label, "!?　&<>");
+}
+
+#[test]
+fn debug_pb_sections() {
+    let sections = aozora_text_to_xhtml_sections("前［＃改ページ］後［＃改ページ］終").unwrap();
+    for (i, s) in sections.iter().enumerate() {
+        eprintln!("SEC{i}: {s:?}");
+    }
+}
+
+#[test]
+fn debug_nest_actual() {
+    let mut config = AozoraConfig::default();
+    config.load_suffix_text(
+        "は太字\t太字\t太字終わり\nに傍点\t傍点\t傍点終わり\nに傍線\t傍線\t傍線終わり\n",
+    );
+    config.load_tag_text("傍線\t<span class=\"em-line\">\t\t\n傍線終わり\t</span>\t\t\n");
+    let output = super::plain_text_to_xhtml_with_config(
+        "青空［＃「青空」は太字］［＃「青空」に傍点］文庫《ぶんこ》［＃「青空文庫」に傍線］",
+        &config,
+    )
+    .unwrap();
+    eprintln!("NEST: {output}");
+    let out2 = super::plain_text_to_xhtml_with_config(
+        "青空文庫［＃「青空文庫」に「aozora bunko」のルビ］\n漢字青空文庫《あおぞらぶんこ》［＃「青空文庫《あおぞらぶんこ》」に「aozora bunko」のルビ］",
+        &config,
+    )
+    .unwrap();
+    eprintln!("RUBY: {out2}");
 }

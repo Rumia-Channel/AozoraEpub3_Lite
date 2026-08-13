@@ -7,7 +7,9 @@ use zip::{CompressionMethod, result::ZipError};
 #[path = "epub_render.rs"]
 mod render;
 
-use render::{is_image_only, render_cover, render_nav, render_ncx, render_package, render_section};
+use render::{
+    is_image_only, render_cover, render_nav, render_ncx, render_package, render_section,
+};
 
 const MIMETYPE: &str = "application/epub+zip";
 const CONTAINER_XML: &str = "<?xml version=\"1.0\"?>\r\n<container\r\n version=\"1.0\"\r\n xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\"\r\n>\r\n<rootfiles>\r\n<rootfile\r\n full-path=\"item/standard.opf\"\r\n media-type=\"application/oebps-package+xml\"\r\n/>\r\n</rootfiles>\r\n</container>\r\n";
@@ -219,13 +221,38 @@ impl EpubAsset {
     }
 }
 
+/// A navigation chapter for the nav/NCX pages.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NavChapter {
+    pub label: String,
+    pub path: String,
+    pub anchor: Option<String>,
+}
+
+impl NavChapter {
+    pub fn new(label: impl Into<String>, path: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            path: path.into(),
+            anchor: None,
+        }
+    }
+
+    pub fn with_anchor(mut self, anchor: impl Into<String>) -> Self {
+        self.anchor = Some(anchor.into());
+        self
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EpubBook {
     pub metadata: EpubMetadata,
     pub sections: Vec<EpubSection>,
     pub assets: Vec<EpubAsset>,
     pub cover_asset: Option<String>,
+    pub chapters: Vec<NavChapter>,
     vertical: bool,
+    toc_vertical: bool,
     kindle: bool,
     title_markup: Option<String>,
     creator_markup: Option<String>,
@@ -255,7 +282,9 @@ impl EpubBook {
             sections,
             assets: Vec::new(),
             cover_asset: None,
+            chapters: Vec::new(),
             vertical: true,
+            toc_vertical: false,
             kindle: false,
             title_markup: None,
             creator_markup: None,
@@ -278,6 +307,19 @@ impl EpubBook {
 
     pub fn with_vertical(mut self, vertical: bool) -> Self {
         self.vertical = vertical;
+        self
+    }
+
+    pub fn with_toc_vertical(mut self, toc_vertical: bool) -> Self {
+        self.toc_vertical = toc_vertical;
+        self
+    }
+
+    pub fn with_chapters<I>(mut self, chapters: I) -> Self
+    where
+        I: IntoIterator<Item = NavChapter>,
+    {
+        self.chapters = chapters.into_iter().collect();
         self
     }
 
@@ -462,6 +504,8 @@ impl EpubBook {
                 &self.sections,
                 self.vertical,
                 self.title_markup.as_deref(),
+                &self.chapters,
+                self.toc_vertical,
             )
             .as_bytes(),
             CompressionMethod::Deflated,
@@ -586,8 +630,9 @@ mod tests {
             .unwrap()
             .read_to_string(&mut nav)
             .unwrap();
-        assert!(nav.contains(">タイトル</a>"));
-        assert!(nav.contains(">第一章</a>"));
+        // EpubBook-level nav: title page landmark + first-body fallback
+        assert!(nav.contains("epub:type=\"titlepage\""));
+        assert!(nav.contains(">本文</a>"));
     }
     #[test]
     fn renders_optional_metadata_markup_in_title_and_navigation() {
@@ -611,7 +656,8 @@ mod tests {
             .unwrap()
             .read_to_string(&mut nav)
             .unwrap();
-        assert!(nav.contains("<a href=\"xhtml/title.xhtml\"><ruby>題<rt>だい</rt>名</ruby></a>"));
+        assert!(nav.contains("epub:type=\"titlepage\""));
+        assert!(!nav.contains("<ruby>題<rt>だい</rt>名</ruby></a>"));
     }
 
     #[test]
@@ -628,9 +674,7 @@ mod tests {
             .unwrap()
             .read_to_string(&mut section)
             .unwrap();
-        assert!(section.contains(
-            "<html\n xmlns=\"http://www.w3.org/1999/xhtml\"\n xmlns:epub=\"http://www.idpf.org/2007/ops\"\n xml:lang=\"ja\"\n class=\"hltr\"\n>"
-        ));
+        assert!(section.contains("\r\n class=\"hltr\"\r\n>"));
         assert!(section.contains("<body class=\"p-image\">"));
         assert!(section.contains("<img class=\"fit\" src=\"../image/fig.png\""));
     }
@@ -705,3 +749,7 @@ mod tests {
         assert!(!nav.contains("xhtml/0002.xhtml"));
     }
 }
+
+
+
+

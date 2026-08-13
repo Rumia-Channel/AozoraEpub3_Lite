@@ -1,7 +1,7 @@
 use aozora_epub3_lite::{
-    AozoraConfig, BookMeta, EpubAsset, EpubBook, EpubMetadata, Input, TextEntry, TitleType,
-    aozora_text_to_xhtml_sections_with_config, decode_text, detect_meta_with_gaiji, escape_html,
-    file_title_creator, image::process as process_image, image_reference_occurrences,
+    AozoraConfig, BookMeta, EpubAsset, EpubBook, EpubMetadata, Input, NavChapter, TextEntry,
+    TitleType, aozora_text_to_xhtml_sections_with_chapters, decode_text, detect_meta_with_gaiji,
+    escape_html, file_title_creator, image::process as process_image, image_reference_occurrences,
     image_references, inline_to_xhtml,
 };
 use std::env;
@@ -45,7 +45,7 @@ struct CliOptions {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
-    let options = match parse_args(env::args().skip(1)) {
+    let mut options = match parse_args(env::args().skip(1)) {
         Ok(options) => options,
         Err(message) => {
             eprintln!("error: {message}");
@@ -65,11 +65,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         )
         .into());
     }
-    let preset = options
-        .preset
-        .as_deref()
-        .or(options.ini.as_deref())
-        .map(Path::new);
+    let preset = external_settings_path(&options)?;
     let uses_builtin_config = options.config_dirs.is_empty();
     let config_dirs = if uses_builtin_config {
         vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/aozora")]
@@ -79,8 +75,15 @@ fn run() -> Result<(), Box<dyn Error>> {
     let config_dir_refs = config_dirs.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let mut config = AozoraConfig::load_from_dirs(&config_dir_refs, preset)?;
     if uses_builtin_config {
-        config.character_replacements.clear();
+        // Java CLI parity: with no -i/--preset the reference CLI leaves these
+        // flags off (empty profile), while the bundled replace.txt rules stay
+        // active (。」→」, －→―, ＜→〈, ＞→〉).
+        config.auto_yoko = false;
+        config.dakuten_type = 0;
+        config.print_ivs_bmp = false;
+        config.print_ivs_ssp = false;
     }
+    apply_ini_defaults(&mut options, &config);
     let vertical = options
         .horizontal
         .unwrap_or_else(|| config.ini.get_bool("Vertical").unwrap_or(true));
@@ -107,6 +110,28 @@ fn run() -> Result<(), Box<dyn Error>> {
         )?;
     }
     Ok(())
+}
+
+fn apply_ini_defaults(options: &mut CliOptions, config: &AozoraConfig) {
+    if options.out_ext.is_empty()
+        && let Some(extension) = config.ini.get("Ext")
+    {
+        options.out_ext = extension.to_owned();
+    }
+    if options.cover.is_none() {
+        options.cover = config.ini.get("Cover").map(str::to_owned);
+    }
+}
+
+fn external_settings_path(options: &CliOptions) -> Result<Option<&Path>, io::Error> {
+    match (options.ini.as_deref(), options.preset.as_deref()) {
+        (Some(_), Some(_)) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "-i/--ini and --preset cannot be used together",
+        )),
+        (Some(path), None) | (None, Some(path)) => Ok(Some(Path::new(path))),
+        (None, None) => Ok(None),
+    }
 }
 
 /// Converts one input path (TXT or ZIP/TXTZ/CBZ). Archives produce one EPUB
@@ -169,7 +194,18 @@ fn convert_input(
         let title = title.unwrap_or_else(|| title_from_path(input_path));
         let creator = options.creator.as_deref().or(creator.as_deref());
 
-        let mut sections = aozora_text_to_xhtml_sections_with_config(&body_text, config)?;
+        // The reference pre-read consumes the first-chapter slot at the title
+        // line; the body scan therefore starts without a pending chapter.
+        let initial_add_section_chapter = detected.title_line.is_none();
+        let (mut sections, chapter_records) =
+            aozora_text_to_xhtml_sections_with_chapters(&body_text, config, initial_add_section_chapter)?;
+        let title_page_selected = config.title_page_write && matches!(config.title_page_type, 1 | 2);
+        let nav_chapters = chapter_records
+            .into_iter()
+            .map(|record| {
+                NavChapter::new(record.label, format!("xhtml/{:04}.xhtml", record.section_index + 1))
+            })
+            .collect::<Vec<_>>();
         let cover_setting = options.cover.as_deref();
         let (assets, cover) = collect_assets(&input, entry, &text, cover_setting, config)?;
         for collected in &assets {
@@ -192,7 +228,6 @@ fn convert_input(
             .into_iter()
             .map(|item| item.asset)
             .collect::<Vec<_>>();
-        sanitize_anchor_links(&mut sections);
         decorate_image_tags(&mut sections, &assets, config);
         reflow_image_sections(&mut sections, &assets, config);
 
@@ -249,10 +284,11 @@ fn convert_input(
             suffix.as_deref(),
         );
         let mut book = EpubBook::from_sections(metadata, sections)
-            .with_title_page_if(config.title_page_write && matches!(config.title_page_type, 1 | 2))
+            .with_title_page_if(title_page_selected)
             .with_vertical(vertical)
             .with_kindle(is_kindle(options))
             .with_assets(assets)
+            .with_chapters(nav_chapters)
             .with_metadata_markup(title_markup, creator_markup);
         if let Some(title_page_markup) = title_page_markup {
             book = book.with_title_page_markup(title_page_markup);
@@ -889,67 +925,6 @@ fn is_no_cover(value: &str) -> bool {
     matches!(value.trim(), "" | "表紙無し" | "[表紙無し]")
 }
 
-fn sanitize_anchor_links(sections: &mut [String]) {
-    let mut ids = std::collections::BTreeMap::new();
-    for (section_index, section) in sections.iter().enumerate() {
-        let mut cursor = 0;
-        while let Some(offset) = section[cursor..].find(" id=\"") {
-            let start = cursor + offset + 5;
-            let Some(end) = section[start..].find('"') else {
-                break;
-            };
-            ids.insert(section[start..start + end].to_owned(), section_index);
-            cursor = start + end + 1;
-        }
-    }
-    for (section_index, section) in sections.iter_mut().enumerate() {
-        let mut cursor = 0;
-        while let Some(offset) = section[cursor..].find("<a href=\"") {
-            let start = cursor + offset;
-            let href_start = start + "<a href=\"".len();
-            let Some(href_end) = section[href_start..].find('"') else {
-                break;
-            };
-            let href_end = href_start + href_end;
-            let href = &section[href_start..href_end];
-            let replacement = if let Some(fragment) = href.strip_prefix('#') {
-                ids.get(fragment).map(|target_index| {
-                    if *target_index == section_index {
-                        format!("<a href=\"#{fragment}\">")
-                    } else {
-                        format!("<a href=\"{:04}.xhtml#{fragment}\">", target_index + 1)
-                    }
-                })
-            } else if is_external_reference(href) {
-                None
-            } else {
-                ids.get(href).map(|target_index| {
-                    if *target_index == section_index {
-                        format!("<a href=\"#{href}\">")
-                    } else {
-                        format!("<a href=\"{:04}.xhtml#{href}\">", target_index + 1)
-                    }
-                })
-            };
-            if let Some(replacement) = replacement {
-                let tag_end = section[start..].find('>').map(|value| start + value + 1);
-                if let Some(tag_end) = tag_end {
-                    section.replace_range(start..tag_end, &replacement);
-                    cursor = start + replacement.len();
-                    continue;
-                }
-            } else {
-                let tag_end = section[start..].find('>').map(|value| start + value + 1);
-                if let Some(tag_end) = tag_end {
-                    section.replace_range(start..tag_end, "<a>");
-                    cursor = start + 3;
-                    continue;
-                }
-            }
-            cursor = href_end + 1;
-        }
-    }
-}
 /// Rewrites `<img src="../image/REF">` to the resolved asset path in all
 /// sections (needed when an archive stores the image under the text entry's
 /// parent directory).
@@ -1408,7 +1383,7 @@ fn escape_image_alt(value: &str) -> String {
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
         .replace("&times;", "×");
-    escape_html(&decoded).replace('×', "&times;")
+    escape_html(&decoded).replace('×', "&#215;")
 }
 
 fn render_image_tag(
@@ -1649,7 +1624,7 @@ fn image_orientation(dimensions: ImageDimensions, config: &AozoraConfig) -> i32 
     }
 }
 
-fn image_width_ratio(dimensions: ImageDimensions, config: &AozoraConfig, has_caption: bool) -> f32 {
+fn image_width_ratio(dimensions: ImageDimensions, config: &AozoraConfig, has_caption: bool) -> f64 {
     let scale = image_setting_f32(config, "ImageScale", 1.0);
     if scale == 0.0 {
         return 0.0;
@@ -1662,8 +1637,9 @@ fn image_width_ratio(dimensions: ImageDimensions, config: &AozoraConfig, has_cap
     if display_width <= 0.0 || display_height <= 0.0 {
         return 0.0;
     }
-    let mut width_ratio = dimensions.width as f32 / display_width * scale * 100.0;
-    let height_ratio = dimensions.height as f32 / display_height * scale * 100.0;
+    // Java は double で (double)imgW/dispW*scale*100 の順に計算する
+    let mut width_ratio = dimensions.width as f64 / display_width as f64 * scale as f64 * 100.0;
+    let height_ratio = dimensions.height as f64 / display_height as f64 * scale as f64 * 100.0;
     if has_caption && height_ratio >= 90.0 {
         width_ratio *= 100.0 / height_ratio * 0.9;
     } else if height_ratio >= 100.0 {
@@ -1960,30 +1936,34 @@ fn usage() -> &'static str {
     "Usage: AozoraEpub3_Lite [options] input_files(txt, zip, txtz, cbz)\n\
      options:\n\
      \x20 -h, --help             show usage\n\
-     \x20 -i, --ini <file>       load settings from an ini file\n\
+     \x20 -i, --ini <file>       load external INI settings\n\
      \x20 -t <index>             title type: 0:title->author (default) 1:author->title\n\
      \x20                         2:title->author(subtitle first) 3:title only\n\
      \x20                         4:title+author only 5:none\n\
      \x20 -tf                    use the input file name for title/creator\n\
-     \x20 -c, --cover <value>    0:first illustration 1:same-name image <file name>\n\
-     \x20 -ext <extension>       output extension (default .epub)\n\
-     \x20 -d, --dst <dir>        output directory\n\
-     \x20 -enc <encoding>        input encoding: AUTO (default), MS932, UTF-8\n\
-     \x20 -hor                   horizontal writing (default vertical)\n\
-     \x20 --language <lang>        EPUB language (default ja)\n\
+     \x20 -c, --cover <value>    cover: 0:first illustration 1:same-name image <file name>\n\
+     \x20                         uses INI Cover when omitted\n\
+     \x20 -ext, --ext <extension> output extension (INI Ext or .epub by default)\n\
+     \x20 -of, --of               use the input file name for output\n\
+     \x20 -d, --dst <dir>         output directory\n\
+     \x20 -enc, --encoding <name> input encoding: AUTO (default), MS932, UTF-8\n\
+     \x20 -hor, --horizontal      horizontal writing (default vertical)\n\
+     \x20 --vertical             vertical writing\n\
+     \x20 -device, --device <kindle> enable Kindle-specific output handling\n\
+     \x20 --language <lang>      EPUB language (default ja)\n\
      \x20 --creator <name>       override creator\n\
      \x20 --config-dir <dir>     configuration directory (repeatable)\n\
-     \x20 --preset <file>        preset ini file\n\
-     \x20 --vertical             vertical writing"
+     \x20 --preset <file>        load external preset INI settings"
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         AozoraConfig, CliOptions, EpubAsset, ImageDimensions, ImagePageType, TitleType,
-        decorate_image_tags, image_dimensions, image_page_type, java_name_uuid, output_path,
-        parse_args, reflow_image_sections, remove_metadata_lines, remove_missing_image_sources,
-        sanitize_anchor_links, should_rotate,
+        apply_ini_defaults, decorate_image_tags, external_settings_path, image_dimensions,
+        image_page_type, java_name_uuid, output_path, parse_args, reflow_image_sections,
+        remove_metadata_lines, remove_missing_image_sources, should_rotate,
+        usage,
     };
     use aozora_epub3_lite::{IniSettings, decode_text, detect_meta};
     use std::path::Path;
@@ -2062,6 +2042,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_long_aliases_for_all_java_cli_file_options() {
+        let options = parse(&[
+            "--ext=.kepub.epub",
+            "--of",
+            "--horizontal",
+            "--device=kindle",
+            "--encoding=MS932",
+            "book.txt",
+        ])
+        .unwrap();
+        assert_eq!(options.out_ext, ".kepub.epub");
+        assert!(options.out_from_input_name);
+        assert_eq!(options.horizontal, Some(false));
+        assert_eq!(options.device.as_deref(), Some("kindle"));
+        assert_eq!(options.encoding.as_deref(), Some("MS932"));
+    }
+
+    #[test]
     fn treats_options_after_positionals_as_inputs() {
         let options = parse(&["a.txt", "-t", "2"]).unwrap();
         assert_eq!(
@@ -2080,6 +2078,55 @@ mod tests {
         assert!(parse(&["-t"]).is_err());
         assert!(parse(&["--nope", "x.txt"]).is_err());
         assert!(parse(&["-i"]).is_err());
+    }
+
+    #[test]
+    fn rejects_ambiguous_ini_and_preset_selection() {
+        let options = parse(&["-i", "base.ini", "--preset", "profile.ini", "book.txt"]).unwrap();
+        let error = external_settings_path(&options).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "-i/--ini and --preset cannot be used together"
+        );
+    }
+
+    #[test]
+    fn applies_ini_defaults_without_overriding_cli_values() {
+        let config =
+            AozoraConfig::from_ini(IniSettings::parse("Ext=.kepub.epub\nCover=1\n").unwrap());
+        let mut defaults = parse(&["book.txt"]).unwrap();
+        apply_ini_defaults(&mut defaults, &config);
+        assert_eq!(defaults.out_ext, ".kepub.epub");
+        assert_eq!(defaults.cover.as_deref(), Some("1"));
+
+        let mut explicit = parse(&["-ext", ".epub", "-c", "0", "book.txt"]).unwrap();
+        apply_ini_defaults(&mut explicit, &config);
+        assert_eq!(explicit.out_ext, ".epub");
+        assert_eq!(explicit.cover.as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn documents_every_cli_option_in_help() {
+        let help = usage();
+        for option in [
+            "-i, --ini",
+            "-t <index>",
+            "-tf",
+            "-c, --cover",
+            "-ext, --ext",
+            "-of, --of",
+            "-d, --dst",
+            "-enc, --encoding",
+            "-hor, --horizontal",
+            "--vertical",
+            "-device, --device <kindle>",
+            "--language",
+            "--creator",
+            "--config-dir",
+            "--preset",
+        ] {
+            assert!(help.contains(option), "missing help option: {option}");
+        }
     }
 
     #[test]
@@ -2299,7 +2346,7 @@ mod tests {
         ];
         decorate_image_tags(&mut sections, &[asset], &config);
         assert!(sections[0].contains("<span class=\"img ft\""));
-        assert!(sections[0].contains("style=\"width:83.33333%\""));
+        assert!(sections[0].contains("style=\"width:83.33333333333334%\""));
     }
 
     #[test]
@@ -2345,16 +2392,7 @@ mod tests {
         assert_eq!(sections[0], "<p>前</p>\n<p><br/></p>\n<p>後</p>");
     }
 
-    #[test]
-    fn removes_unresolved_local_anchor_targets() {
-        let mut sections = vec![
-            r##"<p><a href="#missing">参照</a></p>"##.to_owned(),
-            r##"<p><a id="present">本文</a><a href="#present">参照</a></p>"##.to_owned(),
-        ];
-        sanitize_anchor_links(&mut sections);
-        assert_eq!(sections[0], "<p><a>参照</a></p>");
-        assert!(sections[1].contains(r##"<a href="#present">参照</a>"##));
-    }
+    
 
     #[test]
     fn classifies_large_standalone_images_as_pages() {
@@ -2447,14 +2485,5 @@ mod tests {
         assert!(sections[0].contains("<p>後</p>"));
     }
 
-    #[test]
-    fn removes_external_anchor_targets() {
-        let mut sections = vec![
-            r##"<p><a href="https://example.com">外部</a></p>"##.to_owned(),
-            r##"<p><a href="//cdn.example.com/book">CDN</a></p>"##.to_owned(),
-        ];
-        sanitize_anchor_links(&mut sections);
-        assert_eq!(sections[0], "<p><a>外部</a></p>");
-        assert_eq!(sections[1], "<p><a>CDN</a></p>");
-    }
+    
 }
