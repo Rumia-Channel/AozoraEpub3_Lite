@@ -181,11 +181,7 @@ fn gaiji_replacement(
     let bare = marker
         .strip_prefix("※［＃")
         .and_then(|value| value.strip_suffix('］'));
-    let key = bare.and_then(|value| {
-        value
-            .split(|character| character == '、' || character == ',')
-            .next()
-    });
+    let key = bare.and_then(|value| value.split(['、', ',']).next());
     gaiji
         .get(marker)
         .or_else(|| gaiji.get(&normalized))

@@ -469,10 +469,7 @@ fn rewrite_alternative_gaiji(input: &str, config: &AozoraConfig) -> String {
                 .strip_prefix("※［＃")
                 .and_then(|value| value.strip_suffix('］'))
                 .unwrap_or(&note);
-            let key = bare_note
-                .split(|character| character == '、' || character == ',')
-                .next()
-                .unwrap_or(bare_note);
+            let key = bare_note.split(['、', ',']).next().unwrap_or(bare_note);
             let normalized_key = crate::config::normalize_gaiji_key(key);
             let key_note = format!("※［＃{key}］");
             let normalized_key_note = format!("※［＃{normalized_key}］");
@@ -952,10 +949,7 @@ fn parse_gaiji_note(
         .strip_prefix("※［＃")
         .and_then(|value| value.strip_suffix('］'))
         .unwrap_or(&note);
-    let key = bare_note
-        .split(|character| character == '、' || character == ',')
-        .next()
-        .unwrap_or(bare_note);
+    let key = bare_note.split(['、', ',']).next().unwrap_or(bare_note);
     let normalized_key = crate::config::normalize_gaiji_key(key);
     let key_note = format!("※［＃{key}］");
     let normalized_key_note = format!("※［＃{normalized_key}］");

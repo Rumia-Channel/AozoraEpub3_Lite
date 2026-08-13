@@ -720,10 +720,7 @@ fn load_gaiji_rows(target: &mut BTreeMap<String, String>, input: &str) {
             .strip_prefix("※［＃")
             .and_then(|value| value.strip_suffix('］'))
             .unwrap_or(note);
-        let key = bare_note
-            .split(|character| character == '、' || character == ',')
-            .next()
-            .unwrap_or(bare_note);
+        let key = bare_note.split(['、', ',']).next().unwrap_or(bare_note);
         target
             .entry(key.to_owned())
             .or_insert_with(|| character.to_owned());

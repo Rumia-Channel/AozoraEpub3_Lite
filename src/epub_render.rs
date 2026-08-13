@@ -612,7 +612,7 @@ pub(super) fn render_section(
                 }
             })
             .unwrap_or_default();
-        let creator_break_count = if let Some(markup) = title_page_markup.as_deref() {
+        let creator_break_count = if let Some(markup) = title_page_markup {
             markup.matches("class=\"creator ").count()
                 + markup.matches("class=\"subcreator ").count()
         } else if creator_markup.is_some() || metadata.creator.is_some() {
