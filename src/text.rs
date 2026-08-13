@@ -469,6 +469,7 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
                 }
                 if let Some((open_tag, close_tag)) = generated_indent_block(note) {
                     fragment.push_str(&open_tag);
+                    fragment.push('\n');
                     blocks.push(OpenBlock::Generated { close_tag });
                     continue;
                 }
@@ -478,12 +479,13 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
                     fragment.push_str(spec.element);
                     fragment.push_str(" class=\"");
                     fragment.push_str(spec.class_name);
-                    fragment.push_str("\">");
+                    fragment.push_str("\">\n");
                     blocks.push(OpenBlock::Hardcoded(spec));
                     continue;
                 }
                 if let Some(open_tag) = config.block_open_tags.get(note) {
                     fragment.push_str(open_tag);
+                    fragment.push('\n');
                     blocks.push(OpenBlock::Configured {
                         fallback_close_tag: fallback_close_tag(open_tag),
                     });
@@ -528,6 +530,8 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
                 if !rest.trim().is_empty() {
                     fragment.push_str(&convert_inline(rest.trim_start(), config));
                     fragment.push('\n');
+                } else {
+                    fragment.push('\n');
                 }
                 blocks.push(OpenBlock::Generated { close_tag });
                 continue;
@@ -540,6 +544,8 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
                 fragment.push_str("\">");
                 if !rest.trim().is_empty() {
                     fragment.push_str(&convert_inline(rest.trim_start(), config));
+                    fragment.push('\n');
+                } else {
                     fragment.push('\n');
                 }
                 blocks.push(OpenBlock::Hardcoded(spec));
@@ -568,6 +574,8 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
                 fragment.push_str(open_tag);
                 if !rest.trim().is_empty() {
                     fragment.push_str(&convert_inline(rest.trim_start(), config));
+                    fragment.push('\n');
+                } else {
                     fragment.push('\n');
                 }
                 blocks.push(OpenBlock::Configured {
