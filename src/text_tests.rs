@@ -494,6 +494,10 @@ fn emits_configured_dakuten_glyph_font() {
     let output =
         super::plain_text_to_xhtml_with_config("※［＃濁点付き平仮名え］", &config).unwrap();
     assert!(output.contains("<span class=\"glyph u3048-u3099\">え</span>"));
+    let located =
+        super::plain_text_to_xhtml_with_config("※［＃濁点付き平仮名え、ページ数-行数］", &config)
+            .unwrap();
+    assert!(located.contains("<span class=\"glyph u3048-u3099\">え</span>"));
 }
 
 #[test]

@@ -154,7 +154,7 @@ fn convert_gaiji_notes(input: &str, gaiji: &std::collections::BTreeMap<String, S
         };
         let end = note_start + relative_end + '］'.len_utf8();
         let marker = &input[start..end];
-        if let Some(replacement) = gaiji.get(marker) {
+        if let Some(replacement) = gaiji_replacement(marker, gaiji) {
             if replacement.chars().count() == 1
                 && replacement
                     .chars()
@@ -163,7 +163,7 @@ fn convert_gaiji_notes(input: &str, gaiji: &std::collections::BTreeMap<String, S
             {
                 output.push('※');
             }
-            output.push_str(replacement);
+            output.push_str(&replacement);
         } else {
             output.push_str(marker);
         }
@@ -171,6 +171,52 @@ fn convert_gaiji_notes(input: &str, gaiji: &std::collections::BTreeMap<String, S
     }
     output.push_str(&input[cursor..]);
     output
+}
+
+fn gaiji_replacement(
+    marker: &str,
+    gaiji: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    let normalized = crate::config::normalize_gaiji_key(marker);
+    let bare = marker
+        .strip_prefix("※［＃")
+        .and_then(|value| value.strip_suffix('］'));
+    let key = bare.and_then(|value| value.split('、').next());
+    gaiji
+        .get(marker)
+        .or_else(|| gaiji.get(&normalized))
+        .or_else(|| bare.and_then(|value| gaiji.get(value)))
+        .or_else(|| key.and_then(|value| gaiji.get(value)))
+        .or_else(|| {
+            key.map(crate::config::normalize_gaiji_key)
+                .and_then(|value| gaiji.get(&value))
+        })
+        .cloned()
+        .or_else(|| unicode_gaiji_replacement(marker))
+}
+
+fn unicode_gaiji_replacement(note: &str) -> Option<String> {
+    let upper = note.to_ascii_uppercase();
+    let marker = upper.find("U+")?;
+    let start = marker + 2;
+    let end = upper[start..]
+        .char_indices()
+        .find_map(|(offset, character)| (!character.is_ascii_hexdigit()).then_some(start + offset))
+        .unwrap_or(upper.len());
+    let code = u32::from_str_radix(&upper[start..end], 16).ok()?;
+    let mut replacement = char::from_u32(code)?.to_string();
+    if upper.get(end..).is_some_and(|tail| tail.starts_with("-U+")) {
+        let variation_start = end + 3;
+        let variation_end = upper[variation_start..]
+            .char_indices()
+            .find_map(|(offset, character)| {
+                (!character.is_ascii_hexdigit()).then_some(variation_start + offset)
+            })
+            .unwrap_or(upper.len());
+        let variation = u32::from_str_radix(&upper[variation_start..variation_end], 16).ok()?;
+        replacement.push(char::from_u32(variation)?);
+    }
+    Some(replacement)
 }
 
 /// Same as [`detect_meta`] with a caller-provided page-break note set.
@@ -839,10 +885,36 @@ fn remove_image_anchor_tags(line: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BookMeta, TitleType, detect_meta, file_title_creator};
+    use super::{BookMeta, TitleType, detect_meta, detect_meta_with_gaiji, file_title_creator};
+    use std::collections::BTreeMap;
 
     fn meta(input: &str, title_type: TitleType) -> BookMeta {
         detect_meta(input, title_type, false)
+    }
+
+    #[test]
+    fn resolves_unicode_gaiji_notes_before_metadata_detection() {
+        let gaiji = BTreeMap::new();
+        let book = detect_meta_with_gaiji(
+            "外字※［＃サッカーボール、U+26BD、ページ数-行数］\n著者\n\n本文",
+            TitleType::TitleAuthor,
+            false,
+            &gaiji,
+        );
+        assert_eq!(book.title.as_deref(), Some("外字⚽"));
+        assert_eq!(book.creator.as_deref(), Some("著者"));
+    }
+    #[test]
+    fn resolves_gaiji_notes_with_location_suffixes() {
+        let mut gaiji = BTreeMap::new();
+        gaiji.insert("二の字点".to_owned(), "〻".to_owned());
+        let book = detect_meta_with_gaiji(
+            "表題※［＃二の字点、1-2-22、ページ数-行数］\n著者\n\n本文",
+            TitleType::TitleAuthor,
+            false,
+            &gaiji,
+        );
+        assert_eq!(book.title.as_deref(), Some("表題〻"));
     }
 
     #[test]

@@ -714,6 +714,17 @@ fn load_gaiji_rows(target: &mut BTreeMap<String, String>, input: &str) {
             continue;
         }
         let canonical_note = normalize_gaiji_key(note);
+        let bare_note = note
+            .strip_prefix("※［＃")
+            .and_then(|value| value.strip_suffix('］'))
+            .unwrap_or(note);
+        let key = bare_note.split('、').next().unwrap_or(bare_note);
+        target
+            .entry(key.to_owned())
+            .or_insert_with(|| character.to_owned());
+        target
+            .entry(normalize_gaiji_key(key))
+            .or_insert_with(|| character.to_owned());
         target
             .entry(note.to_owned())
             .or_insert_with(|| character.to_owned());

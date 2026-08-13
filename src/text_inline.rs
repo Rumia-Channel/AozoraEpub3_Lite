@@ -465,7 +465,20 @@ fn rewrite_alternative_gaiji(input: &str, config: &AozoraConfig) -> String {
 
     while index < chars.len() {
         if let Some((end, note)) = gaiji_note_range(&chars, index) {
-            if let Some(replacement) = config.gaiji_alternatives.get(&note) {
+            let bare_note = note
+                .strip_prefix("※［＃")
+                .and_then(|value| value.strip_suffix('］'))
+                .unwrap_or(&note);
+            let key = bare_note.split('、').next().unwrap_or(bare_note);
+            let key_note = format!("※［＃{key}］");
+            let normalized_note = crate::config::normalize_gaiji_key(&note);
+            if let Some(replacement) = config
+                .gaiji_alternatives
+                .get(&note)
+                .or_else(|| config.gaiji_alternatives.get(&normalized_note))
+                .or_else(|| config.gaiji_alternatives.get(bare_note))
+                .or_else(|| config.gaiji_alternatives.get(&key_note))
+            {
                 output.push_str(replacement);
             } else {
                 output.extend(chars[index..end].iter());
@@ -933,6 +946,7 @@ fn parse_gaiji_note(
         .and_then(|value| value.strip_suffix('］'))
         .unwrap_or(&note);
     let key = bare_note.split('、').next().unwrap_or(bare_note);
+    let key_note = format!("※［＃{key}］");
     if bare_note.contains("※［＃") {
         return Some((end, escape_html(&note)));
     }
@@ -943,6 +957,7 @@ fn parse_gaiji_note(
         .or_else(|| config.gaiji.get(&normalized_note))
         .or_else(|| config.gaiji.get(bare_note))
         .or_else(|| config.gaiji.get(key))
+        .or_else(|| config.gaiji.get(&key_note))
     {
         return Some((end, render_gaiji_replacement(replacement, config)));
     }
