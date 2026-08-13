@@ -319,7 +319,7 @@ fn renders_inline_and_block_headings() {
     let block =
         plain_text_to_xhtml("［＃ここから中見出し］\n章題\n［＃ここで中見出し終わり］\n本文")
             .unwrap();
-    assert!(block.contains("<h2 class=\"font-1em30\">章題\n</h2>"));
+    assert!(block.contains("<h2 class=\"font-1em30\"><p>章題</p>\n</h2>"));
     assert!(block.contains("<p>本文</p>"));
 }
 #[test]
@@ -327,7 +327,7 @@ fn renders_basic_indent_blocks() {
     let output =
         plain_text_to_xhtml("［＃ここから１字下げ］\n字下げ本文\n［＃ここで字下げ終わり］")
             .unwrap();
-    assert!(output.contains("<div class=\"mt1\">字下げ本文\n</div>"));
+    assert!(output.contains("<div class=\"mt1\"><p>字下げ本文</p>\n</div>"));
 }
 
 #[test]
@@ -360,7 +360,7 @@ fn renders_configured_block_and_inline_block_tags() {
         &config,
     )
     .unwrap();
-    assert!(output.contains("<div class=\"bold\">本文\n</div>"));
+    assert!(output.contains("<div class=\"bold\"><p>本文</p>\n</div>"));
     assert!(output.contains("<h1 class=\"custom\">題名</h1>"));
     assert!(output.contains("<p><br/></p>"));
 }
@@ -390,7 +390,9 @@ fn converts_default_grounding_and_special_brackets() {
              ［＃ここで地付き終わり］ ※［＃始め二重山括弧］本文※［＃終わり二重山括弧］",
     )
     .unwrap();
-    assert!(output.contains("<div class=\"btm\"><span class=\"kogaki\">注記</span>"));
+    assert!(
+        output.contains("<div class=\"btm\"><p><span class=\"kogaki\">注記</span></p>\n</div>")
+    );
     assert!(output.contains("《本文》"));
     assert!(!output.contains("［＃"));
 }
@@ -423,9 +425,9 @@ fn renders_java_compound_indent_blocks() {
          ［＃ここで字下げ終わり］",
     )
     .unwrap();
-    assert!(output.contains("<div class=\"pt2 idt3\">折り返し本文\n</div>"));
-    assert!(output.contains("<div class=\"pt3 jzm4\">字詰め本文\n</div>"));
-    assert!(output.contains("<div class=\"mt2 border center\">複合本文\n</div>"));
+    assert!(output.contains("<div class=\"pt2 idt3\"><p>折り返し本文</p>\n</div>"));
+    assert!(output.contains("<div class=\"pt3 jzm4\"><p>字詰め本文</p>\n</div>"));
+    assert!(output.contains("<div class=\"mt2 border center\"><p>複合本文</p>\n</div>"));
     assert!(!output.contains("［＃"));
 }
 
@@ -447,10 +449,9 @@ fn nests_configured_blocks_and_handles_single_tags_inside() {
         &config,
     )
     .unwrap();
-    assert!(
-        output
-            .contains("<div class=\"mt2\"><div class=\"bold\">本文\n<p><br/></p>\n</div>\n</div>")
-    );
+    assert!(output.contains(
+        "<div class=\"mt2\"><div class=\"bold\"><p>本文</p>\n<p><br/></p>\n</div>\n</div>"
+    ));
     assert!(!output.contains("［＃"));
 }
 #[test]

@@ -399,6 +399,17 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
             fragment.push_str("</p>\n");
             continue;
         }
+        if let Some((start, end, open_tag, close_tag, no_br)) = find_inline_block_note(line, config)
+        {
+            fragment.push_str(&convert_inline(&line[..start], config));
+            fragment.push_str(&open_tag);
+            fragment.push_str(&convert_inline(&line[end..], config));
+            fragment.push_str(&close_tag);
+            if !no_br {
+                fragment.push('\n');
+            }
+            continue;
+        }
         let trimmed = line.trim();
 
         if let Some((open_tag, close_tag)) = pending_config_heading.take() {
@@ -488,10 +499,10 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
                     continue;
                 }
             }
-
-            fragment.push_str(&convert_inline(line, config));
-            fragment.push('\n');
-            continue;
+            if !blocks.is_empty() {
+                append_block_line(&mut fragment, line, config);
+                continue;
+            }
         }
 
         if let Some(note) = page_break_note(trimmed)
@@ -735,6 +746,35 @@ fn split_block_notes(line: &str, markers: &[String]) -> Vec<String> {
     }
     pieces
 }
+fn find_inline_block_note(
+    line: &str,
+    config: &AozoraConfig,
+) -> Option<(usize, usize, String, String, bool)> {
+    for (start, _) in line.match_indices("［＃") {
+        let note_start = start + "［＃".len();
+        let close = note_start + line[note_start..].find('］')?;
+        let end = close + '］'.len_utf8();
+        let note = &line[note_start..close];
+        let Some((open_tag, close_tag)) = config.block_inline_tags.get(note) else {
+            continue;
+        };
+        if start == 0 || line[..start].trim().is_empty() {
+            continue;
+        }
+        let closing_note = format!("［＃{note}終わり］");
+        if line[end..].contains(&closing_note) {
+            continue;
+        }
+        return Some((
+            start,
+            end,
+            open_tag.clone(),
+            close_tag.clone(),
+            config.block_open_tags.contains_key(note),
+        ));
+    }
+    None
+}
 
 fn heading_note_at_start(line: &str) -> Option<(&str, &str)> {
     let line = line.trim_start();
@@ -915,6 +955,16 @@ fn append_line(fragment: &mut String, line: &str, config: &AozoraConfig) {
         fragment.push_str("    <p><br/></p>\n");
     } else {
         fragment.push_str("    <p>");
+        fragment.push_str(&convert_inline(line, config));
+        fragment.push_str("</p>\n");
+    }
+}
+
+fn append_block_line(fragment: &mut String, line: &str, config: &AozoraConfig) {
+    if line.is_empty() {
+        fragment.push_str("<p><br/></p>\n");
+    } else {
+        fragment.push_str("<p>");
         fragment.push_str(&convert_inline(line, config));
         fragment.push_str("</p>\n");
     }

@@ -87,7 +87,9 @@ fn nav_entries(sections: &[EpubSection], title_markup: Option<&str>) -> Vec<NavE
             first_body_entry = false;
             continue;
         }
-        first_body_entry = false;
+        if !is_title {
+            first_body_entry = false;
+        }
         let label = if is_title {
             title_markup.unwrap_or("タイトル").to_owned()
         } else {
