@@ -444,7 +444,7 @@ fn build_metadata(
     publisher: Option<&str>,
     language: Option<&str>,
 ) -> EpubMetadata {
-    let identifier = format!("urn:aozoraepub3-lite:{}", percent_encode(title));
+    let identifier = format!("urn:uuid:{}", java_name_uuid(title, creator.unwrap_or("")));
     let mut metadata = EpubMetadata::new(title, identifier);
     if let Some(creator) = creator {
         metadata = metadata.with_creator(creator);
@@ -456,6 +456,31 @@ fn build_metadata(
         metadata = metadata.with_language(language);
     }
     metadata
+}
+
+fn java_name_uuid(title: &str, creator: &str) -> String {
+    let mut digest = md5::compute(format!("{title}-{creator}").as_bytes()).0;
+    digest[6] = (digest[6] & 0x0f) | 0x30;
+    digest[8] = (digest[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        digest[0],
+        digest[1],
+        digest[2],
+        digest[3],
+        digest[4],
+        digest[5],
+        digest[6],
+        digest[7],
+        digest[8],
+        digest[9],
+        digest[10],
+        digest[11],
+        digest[12],
+        digest[13],
+        digest[14],
+        digest[15],
+    )
 }
 
 fn build_title_page_markup(
@@ -1733,28 +1758,6 @@ fn title_from_path(path: &Path) -> String {
         .to_owned()
 }
 
-fn percent_encode(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            encoded.push(byte as char);
-        } else {
-            encoded.push('%');
-            encoded.push(hex_digit(byte >> 4));
-            encoded.push(hex_digit(byte & 0x0f));
-        }
-    }
-    encoded
-}
-
-fn hex_digit(value: u8) -> char {
-    match value {
-        0..=9 => (b'0' + value) as char,
-        10..=15 => (b'A' + value - 10) as char,
-        _ => unreachable!(),
-    }
-}
-
 /// Parses command-line arguments with Java-compatible semantics: option
 /// parsing stops at the first positional argument, everything after is an
 /// input file.
@@ -1894,8 +1897,8 @@ fn usage() -> &'static str {
 mod tests {
     use super::{
         AozoraConfig, CliOptions, EpubAsset, ImageDimensions, ImagePageType, TitleType,
-        decorate_image_tags, image_dimensions, image_page_type, output_path, parse_args,
-        reflow_image_sections, remove_metadata_lines, remove_missing_image_sources,
+        decorate_image_tags, image_dimensions, image_page_type, java_name_uuid, output_path,
+        parse_args, reflow_image_sections, remove_metadata_lines, remove_missing_image_sources,
         sanitize_anchor_links, should_rotate,
     };
     use aozora_epub3_lite::{IniSettings, decode_text, detect_meta};
@@ -1903,6 +1906,14 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<CliOptions, String> {
         parse_args(args.iter().map(|value| value.to_string()))
+    }
+
+    #[test]
+    fn generates_java_compatible_name_uuid() {
+        assert_eq!(
+            java_name_uuid("横書き横組み", "テスト"),
+            "27128c1c-ed73-341e-ae9d-9d052775453a"
+        );
     }
 
     #[test]
