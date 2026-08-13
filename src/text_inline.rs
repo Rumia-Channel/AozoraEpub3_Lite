@@ -117,7 +117,7 @@ fn convert_inline_with_auto_yoko(input: &str, config: &AozoraConfig, auto_yoko: 
             && let Some(close) = find_closing_latin_bracket(&chars, index)
         {
             let inner = &chars[index + 1..close];
-            if inner.iter().copied().all(is_half_space) {
+            if !inner.is_empty() && inner.iter().copied().all(is_half_space) {
                 let separated = inner.iter().collect::<String>();
                 let replacement = convert_latin(&separated, config);
                 output.push_str(&escape_html(&replacement));

@@ -959,21 +959,23 @@ fn append_heading(fragment: &mut String, spec: HeadingSpec, text: &str, config: 
 }
 
 fn append_line(fragment: &mut String, line: &str, config: &AozoraConfig) {
-    if line.is_empty() {
+    let converted = convert_inline(line, config);
+    if converted.trim().is_empty() {
         fragment.push_str("    <p><br/></p>\n");
     } else {
         fragment.push_str("    <p>");
-        fragment.push_str(&convert_inline(line, config));
+        fragment.push_str(&converted);
         fragment.push_str("</p>\n");
     }
 }
 
 fn append_block_line(fragment: &mut String, line: &str, config: &AozoraConfig) {
-    if line.is_empty() {
+    let converted = convert_inline(line, config);
+    if converted.trim().is_empty() {
         fragment.push_str("<p><br/></p>\n");
     } else {
         fragment.push_str("<p>");
-        fragment.push_str(&convert_inline(line, config));
+        fragment.push_str(&converted);
         fragment.push_str("</p>\n");
     }
 }
