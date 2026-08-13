@@ -221,6 +221,14 @@ fn strip_ruby_readings(input: &str) -> String {
     output
 }
 
+fn asset_manifest_id(path: &str, fallback: usize) -> String {
+    let filename = path.rsplit('/').next().unwrap_or(path);
+    let stem = filename.split('.').next().unwrap_or(filename);
+    stem.parse::<u32>()
+        .map(|number| format!("img{number:04}"))
+        .unwrap_or_else(|_| format!("img{fallback:04}"))
+}
+
 pub(super) fn render_package(
     metadata: &EpubMetadata,
     sections: &[EpubSection],
@@ -329,15 +337,21 @@ pub(super) fn render_package(
         ));
     }
     let mut manifest_assets = String::new();
+    let mut gaiji_number = 0;
     for (index, asset) in assets.iter().enumerate() {
         let properties = if !image_only && cover_asset == Some(asset.path.as_str()) {
             " properties=\"cover-image\""
         } else {
             ""
         };
+        let id = if asset.path.starts_with("gaiji/") {
+            gaiji_number += 1;
+            format!("gaiji_{gaiji_number}")
+        } else {
+            asset_manifest_id(&asset.path, index + 1)
+        };
         manifest_assets.push_str(&format!(
-            "\t\t<item id=\"img{:04}\" href=\"{}\" media-type=\"{}\"{properties}/>\n",
-            index + 1,
+            "\t\t<item id=\"{id}\" href=\"{}\" media-type=\"{}\"{properties}/>\n",
             xml_escape(&asset.path),
             xml_escape(&asset.media_type),
         ));
