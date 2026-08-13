@@ -854,7 +854,7 @@ fn generated_indent_block(note: &str) -> Option<(String, String)> {
         let (wrapped, rest) = parse_fullwidth_number(rest)?;
         let rest = rest.strip_prefix("字下げ")?;
         (
-            format!("pt{wrapped} idt{}", indent.saturating_sub(wrapped)),
+            format!("pt{wrapped} idt{}", indent as isize - wrapped as isize),
             rest,
         )
     } else if let Some(width) = parse_fullwidth_number(rest)
