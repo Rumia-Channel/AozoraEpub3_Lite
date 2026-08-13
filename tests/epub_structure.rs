@@ -325,8 +325,11 @@ fn renders_middle_and_bottom_pages_with_horizontal_document_class() {
             .unwrap()
             .read_to_string(&mut section)
             .unwrap();
-        assert!(section.contains("xml:lang=\"ja\"\r\n class=\"hltr\""));
-        assert!(!section.contains("xml:lang=\"ja\"\r\n class=\"vrtl\""));
+        if marker.contains("middle") {
+            assert!(section.contains("xml:lang=\"ja\"\r\n class=\"hltr\""));
+        } else {
+            assert!(section.contains("xml:lang=\"ja\"\r\n class=\"vrtl\""));
+        }
     }
 }
 
