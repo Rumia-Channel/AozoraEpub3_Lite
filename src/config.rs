@@ -336,7 +336,8 @@ impl Default for AozoraConfig {
         config.load_ivs_text(include_str!("../assets/aozora/chuki_ivs.txt"));
         config.load_alt_text(include_str!("../assets/aozora/chuki_alt.txt"));
         config.load_latin_text(include_str!("../assets/aozora/chuki_latin.txt"));
-        config.load_replace_text(include_str!("../assets/aozora/replace.txt"));
+        // replace.txt is an optional user override. The bundled file documents
+        // rules that are only enabled when the file is explicitly supplied.
         config
     }
 }
@@ -922,5 +923,17 @@ mod tests {
         config.load_latin_text("A`\tÀ\t164\t8883\nAE&\tÆ\n");
         assert_eq!(config.latin_replacements.get("A`"), Some(&"À".to_owned()));
         assert_eq!(config.latin_replacements.get("AE&"), Some(&"Æ".to_owned()));
+    }
+
+    #[test]
+    fn leaves_optional_character_replacements_disabled_by_default() {
+        let mut config = AozoraConfig::default();
+        assert!(config.character_replacements.is_empty());
+
+        config.load_replace_text("＜\t〈\n");
+        assert_eq!(
+            config.character_replacements.get("＜"),
+            Some(&"〈".to_owned())
+        );
     }
 }

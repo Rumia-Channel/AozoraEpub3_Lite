@@ -1330,7 +1330,9 @@ fn parse_inline_note(
 fn should_preserve_unconverted_note(note: &str) -> bool {
     note.contains('「')
         && note.contains('」')
-        && !(note.contains("左に") && (note.contains("ルビ") || note.contains("注記付き")))
+        // Java drops unsupported left-side annotations rather than emitting
+        // their source marker into the XHTML.
+        && !note.contains("左に")
 }
 fn parse_configured_markup(
     chars: &[char],

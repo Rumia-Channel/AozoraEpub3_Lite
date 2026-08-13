@@ -638,10 +638,13 @@ fn drops_java_unsupported_left_ruby_notes() {
 fn preserves_java_unconverted_notes_and_drops_unknown_markers() {
     let output = plain_text_to_xhtml(
         "大空文庫［＃「大空文庫」に「ママ」の注記］\n\
-         本文［＃注記未定義］",
+         本文［＃注記未定義］\n\
+         責［＃「責」の左に未知傍点］空文庫",
     )
     .unwrap();
     assert!(output.contains("大空文庫［＃「大空文庫」に「ママ」の注記］"));
     assert!(output.contains("<p>本文</p>"));
+    assert!(output.contains("<p>責空文庫</p>"));
     assert!(!output.contains("注記未定義"));
+    assert!(!output.contains("未知傍点"));
 }
