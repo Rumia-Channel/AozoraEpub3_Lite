@@ -2,6 +2,7 @@ use super::{EpubAsset, EpubMetadata, EpubSection, TITLE_PAGE_MARKER, is_title_pa
 const PAGE_MIDDLE_MARKER: &str = "<!-- aozora-page-middle -->";
 const PAGE_BOTTOM_MARKER: &str = "<!-- aozora-page-bottom -->";
 const PAGE_NO_CHAPTER_MARKER: &str = "<!-- aozora-page-no-chapter -->";
+const PAGE_CHAPTER_MARKER: &str = "<!-- aozora-page-chapter -->";
 
 pub(super) fn section_path(section: &EpubSection, body_number: usize) -> String {
     if is_title_page(section) {
@@ -23,21 +24,70 @@ fn is_no_chapter(section: &EpubSection) -> bool {
         .trim_start()
         .starts_with(PAGE_NO_CHAPTER_MARKER)
 }
+fn is_separator_section(section: &EpubSection) -> bool {
+    let Some(label) = first_text_label_raw(&section.body_fragment) else {
+        return false;
+    };
+    let leading_equals = label
+        .chars()
+        .take_while(|character| *character == '=')
+        .count();
+    let trailing_equals = label
+        .chars()
+        .rev()
+        .take_while(|character| *character == '=')
+        .count();
+    leading_equals >= 2 && trailing_equals >= 2
+}
+
+fn is_image_only_section(section: &EpubSection) -> bool {
+    section.body_fragment.contains("<img") && strip_html(&section.body_fragment).trim().is_empty()
+}
+
+fn normalize_chapter_label(label: String) -> String {
+    let trimmed = label.trim();
+    let leading_equals = trimmed
+        .chars()
+        .take_while(|character| *character == '=')
+        .count();
+    let trailing_equals = trimmed
+        .chars()
+        .rev()
+        .take_while(|character| *character == '=')
+        .count();
+    if leading_equals >= 2
+        && trailing_equals >= 2
+        && leading_equals + trailing_equals < trimmed.len()
+    {
+        let inner = &trimmed[leading_equals..trimmed.len() - trailing_equals];
+        format!("={inner}=")
+    } else {
+        trimmed.to_owned()
+    }
+}
 fn nav_entries(sections: &[EpubSection], title_markup: Option<&str>) -> Vec<NavEntry> {
     let body_count = sections
         .iter()
-        .filter(|section| !is_title_page(section) && !is_no_chapter(section))
+        .filter(|section| {
+            !is_title_page(section) && !is_no_chapter(section) && !is_image_only_section(section)
+        })
         .count();
     let mut body_number = 0;
     let mut entries = Vec::with_capacity(sections.len());
+    let mut first_body_entry = true;
     for section in sections {
         if !is_title_page(section) {
             body_number += 1;
         }
-        if is_no_chapter(section) {
+        let is_title = is_title_page(section);
+        if is_no_chapter(section) || (!is_title && is_image_only_section(section)) {
             continue;
         }
-        let is_title = is_title_page(section);
+        if !is_title && first_body_entry && is_separator_section(section) {
+            first_body_entry = false;
+            continue;
+        }
+        first_body_entry = false;
         let label = if is_title {
             title_markup.unwrap_or("タイトル").to_owned()
         } else {
@@ -97,13 +147,13 @@ fn first_heading(body: &str) -> Option<(usize, String)> {
         let content_end = content_start + close_offset;
         let label = strip_html(&body[content_start..content_end]);
         if !label.trim().is_empty() {
-            return Some((level + 1, label.trim().to_owned()));
+            return Some((level + 1, normalize_chapter_label(label)));
         }
     }
     None
 }
 
-fn first_text_label(body: &str) -> Option<String> {
+fn first_text_label_raw(body: &str) -> Option<String> {
     let mut offset = 0usize;
     while let Some(relative_start) = body[offset..].find("<p") {
         let start = offset + relative_start;
@@ -116,6 +166,10 @@ fn first_text_label(body: &str) -> Option<String> {
         offset = content_end + "</p>".len();
     }
     None
+}
+
+fn first_text_label(body: &str) -> Option<String> {
+    first_text_label_raw(body).map(normalize_chapter_label)
 }
 fn unescape_html(value: &str) -> String {
     value
@@ -536,12 +590,13 @@ pub(super) fn render_ncx(
         nav_points.push_str(&format!("{close_indent}</navPoint>\n"));
         current_depth -= 1;
     }
+    let depth = entries.iter().map(|entry| entry.level).max().unwrap_or(1);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
 <head>
 <meta name="dtb:uid" content="urn:uuid:{identifier}"/>
-<meta name="dtb:depth" content="1"/>
+<meta name="dtb:depth" content="{depth}"/>
 <meta name="dtb:totalPageCount" content="0"/>
 <meta name="dtb:maxPageNumber" content="0"/>
 </head>
@@ -554,6 +609,7 @@ pub(super) fn render_ncx(
 "#,
         identifier = xml_escape(identifier),
         title = xml_escape(&metadata.title),
+        depth = depth,
         nav_points = nav_points,
     )
 }
@@ -899,10 +955,19 @@ fn replace_tag_name(tag: &str, replacement: &str) -> String {
 }
 
 fn section_page_mode(body: &str) -> (&'static str, &str) {
+    let body = body
+        .strip_prefix(PAGE_CHAPTER_MARKER)
+        .map_or(body, str::trim_start);
     if let Some(body) = body.strip_prefix(PAGE_MIDDLE_MARKER) {
+        let body = body
+            .strip_prefix(PAGE_CHAPTER_MARKER)
+            .map_or(body, str::trim_start);
         return (" class=\"p-middle\"", body.trim());
     }
     if let Some(body) = body.strip_prefix(PAGE_BOTTOM_MARKER) {
+        let body = body
+            .strip_prefix(PAGE_CHAPTER_MARKER)
+            .map_or(body, str::trim_start);
         return (" class=\"p-bottom\"", body.trim());
     }
     if let Some(body) = body.strip_prefix(PAGE_NO_CHAPTER_MARKER) {

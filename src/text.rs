@@ -226,11 +226,11 @@ pub fn aozora_text_to_xhtml_sections_with_config(
                     current.clear();
                 }
                 page_marker = if config.page_middle_notes.contains(&note) {
-                    Some(PAGE_MIDDLE_MARKER)
+                    Some(PAGE_CHAPTER_MIDDLE_MARKER)
                 } else if config.page_bottom_notes.contains(&note) {
-                    Some(PAGE_BOTTOM_MARKER)
+                    Some(PAGE_CHAPTER_BOTTOM_MARKER)
                 } else {
-                    None
+                    Some(PAGE_CHAPTER_MARKER)
                 };
             }
             remainder = &remainder[end..];
@@ -259,9 +259,6 @@ fn append_section_line(
     page_marker: &mut Option<&'static str>,
     config: &AozoraConfig,
 ) {
-    if line.trim().is_empty() && current.is_empty() && page_marker.is_some() {
-        return;
-    }
     if is_colophon_line(line) && !current.is_empty() {
         trim_trailing_empty_lines(current);
         if !current.is_empty() {
@@ -346,9 +343,10 @@ fn find_page_break_note(line: &str, config: &AozoraConfig) -> Option<(usize, usi
         .min_by_key(|(offset, _, _)| *offset)
 }
 
-const PAGE_MIDDLE_MARKER: &str = "<!-- aozora-page-middle -->";
-const PAGE_BOTTOM_MARKER: &str = "<!-- aozora-page-bottom -->";
 const PAGE_NO_CHAPTER_MARKER: &str = "<!-- aozora-page-no-chapter -->";
+const PAGE_CHAPTER_MARKER: &str = "<!-- aozora-page-chapter -->";
+const PAGE_CHAPTER_MIDDLE_MARKER: &str = "<!-- aozora-page-middle --><!-- aozora-page-chapter -->";
+const PAGE_CHAPTER_BOTTOM_MARKER: &str = "<!-- aozora-page-bottom --><!-- aozora-page-chapter -->";
 const RAW_COMMENT_PREFIX: &str = "\u{0000}aozora-raw-comment\u{0000}";
 
 fn render_marked_lines<'a>(
