@@ -179,7 +179,7 @@ fn convert_input(
             &image_references(&text),
             &resolved_references,
         );
-        let assets = assets
+        let mut assets = assets
             .into_iter()
             .map(|item| item.asset)
             .collect::<Vec<_>>();
@@ -201,6 +201,13 @@ fn convert_input(
             };
             inline_to_xhtml(source, config)
         });
+        append_gaiji_assets(
+            &mut assets,
+            config,
+            &sections,
+            &title_markup,
+            creator_markup.as_deref(),
+        )?;
         let metadata = build_metadata(
             &title,
             creator,
@@ -228,6 +235,37 @@ fn convert_input(
         }
         let file = File::create(&output)?;
         book.write_to(file)?;
+    }
+    Ok(())
+}
+
+fn append_gaiji_assets(
+    assets: &mut Vec<EpubAsset>,
+    config: &AozoraConfig,
+    sections: &[String],
+    title_markup: &str,
+    creator_markup: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
+    for (class_name, path) in &config.gaiji_fonts {
+        let marker = format!("class=\"glyph {class_name}\"");
+        let used = sections.iter().any(|section| section.contains(&marker))
+            || title_markup.contains(&marker)
+            || creator_markup.is_some_and(|markup| markup.contains(&marker));
+        if !used {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(OsStr::to_str) else {
+            continue;
+        };
+        let epub_path = format!("gaiji/{file_name}");
+        if assets.iter().any(|asset| asset.path == epub_path) {
+            continue;
+        }
+        assets.push(EpubAsset::new(
+            epub_path,
+            "application/font-sfnt",
+            fs::read(path)?,
+        ));
     }
     Ok(())
 }

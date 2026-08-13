@@ -1,5 +1,6 @@
 use std::fmt;
 use std::io::{self, Seek, Write};
+use std::path::Path;
 
 use zip::write::{SimpleFileOptions, ZipWriter};
 use zip::{CompressionMethod, result::ZipError};
@@ -83,6 +84,42 @@ font-family: 'ＭＳ ゴシック','MS Gothic',sans-serif;
 .hltr .b { font-weight: bold; }
 .hltr .i { font-style: italic; }
 "#;
+
+fn render_text_css(assets: &[EpubAsset]) -> String {
+    let marker = "/** 外字フォント */";
+    let mut font_css = String::new();
+    for asset in assets {
+        if asset.media_type != "application/font-sfnt" {
+            continue;
+        }
+        let Some(file_name) = asset.path.strip_prefix("gaiji/") else {
+            continue;
+        };
+        let Some(stem) = Path::new(file_name)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+        else {
+            continue;
+        };
+        font_css.push_str(&format!(
+            "@font-face {{font-family:\"{stem}\"; src:url(../gaiji/{file_name});}}\n\
+             .{stem} {{font-family:\"{stem}\";}}\n"
+        ));
+    }
+    if font_css.is_empty() {
+        return TEXT_CSS.to_owned();
+    }
+    let Some(marker_end) = TEXT_CSS.find(marker).map(|index| index + marker.len()) else {
+        return TEXT_CSS.to_owned();
+    };
+    let mut css = String::with_capacity(TEXT_CSS.len() + font_css.len());
+    css.push_str(&TEXT_CSS[..marker_end]);
+    css.push('\n');
+    css.push_str(&font_css);
+    css.push_str(&TEXT_CSS[marker_end..]);
+    css
+}
 
 const TITLE_PAGE_MARKER: &str = "<!-- aozora-title-page -->";
 
@@ -401,10 +438,11 @@ impl EpubBook {
             )?;
         }
         if !image_only {
+            let text_css = render_text_css(&self.assets);
             write_entry(
                 &mut archive,
                 "item/style/text.css",
-                TEXT_CSS.as_bytes(),
+                text_css.as_bytes(),
                 CompressionMethod::Deflated,
             )?;
         }

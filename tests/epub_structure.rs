@@ -112,6 +112,52 @@ fn writes_assets_and_manifest_entries() {
 }
 
 #[test]
+fn writes_gaiji_font_assets_and_dynamic_font_css() {
+    let book = EpubBook::new(
+        EpubMetadata::new("外字", "urn:test:gaiji"),
+        "<p><span class=\"glyph u3048-u3099\">え</span></p>",
+    )
+    .with_assets([EpubAsset::new(
+        "gaiji/u3048-u3099.ttf",
+        "application/font-sfnt",
+        vec![0, 1, 2, 3],
+    )]);
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+
+    let mut font = Vec::new();
+    archive
+        .by_name("item/gaiji/u3048-u3099.ttf")
+        .unwrap()
+        .read_to_end(&mut font)
+        .unwrap();
+    assert_eq!(font, vec![0, 1, 2, 3]);
+
+    let mut package = String::new();
+    archive
+        .by_name("item/standard.opf")
+        .unwrap()
+        .read_to_string(&mut package)
+        .unwrap();
+    assert!(
+        package.contains("href=\"gaiji/u3048-u3099.ttf\" media-type=\"application/font-sfnt\"")
+    );
+
+    let mut css = String::new();
+    archive
+        .by_name("item/style/text.css")
+        .unwrap()
+        .read_to_string(&mut css)
+        .unwrap();
+    assert!(
+        css.contains(
+            "@font-face {font-family:\"u3048-u3099\"; src:url(../gaiji/u3048-u3099.ttf);}"
+        )
+    );
+    assert!(css.contains(".u3048-u3099 {font-family:\"u3048-u3099\";}"));
+}
+
+#[test]
 fn writes_cover_document_and_cover_manifest_property() {
     let book = EpubBook::new(
         EpubMetadata::new("表紙", "urn:test:cover"),
