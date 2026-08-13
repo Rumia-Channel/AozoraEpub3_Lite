@@ -464,6 +464,10 @@ fn render_lines<'a>(lines: impl IntoIterator<Item = &'a str>, config: &AozoraCon
                 if closes_configured && let Some(close_tag) = config.block_close_tags.get(note) {
                     fragment.push_str(close_tag);
                     fragment.push('\n');
+                    if close_tag == "</span>" && image_wrapper_is_open(&fragment) {
+                        fragment.push_str("</span>");
+                        fragment.push('\n');
+                    }
                     blocks.pop();
                     continue;
                 }
@@ -958,8 +962,38 @@ fn append_heading(fragment: &mut String, spec: HeadingSpec, text: &str, config: 
     fragment.push_str(">\n");
 }
 
+fn image_wrapper_is_open(value: &str) -> bool {
+    let mut search_end = value.len();
+    while let Some(start) = value[..search_end].rfind("<span") {
+        let tail = &value[start..];
+        if tail.contains("<img") && tail.matches("<span").count() > tail.matches("</span>").count()
+        {
+            return true;
+        }
+        search_end = start;
+    }
+    false
+}
+
+fn append_open_image_line(fragment: &mut String, converted: &str) -> bool {
+    let already_open = image_wrapper_is_open(fragment);
+    if !already_open && !image_wrapper_is_open(converted) {
+        return false;
+    }
+    fragment.push_str(converted);
+    if already_open && converted.contains("class=\"caption") {
+        fragment.push('\n');
+        fragment.push_str("</span>");
+    }
+    fragment.push('\n');
+    true
+}
+
 fn append_line(fragment: &mut String, line: &str, config: &AozoraConfig) {
     let converted = convert_inline(line, config);
+    if append_open_image_line(fragment, &converted) {
+        return;
+    }
     if converted.trim().is_empty() {
         fragment.push_str("    <p><br/></p>\n");
     } else {
@@ -968,9 +1002,11 @@ fn append_line(fragment: &mut String, line: &str, config: &AozoraConfig) {
         fragment.push_str("</p>\n");
     }
 }
-
 fn append_block_line(fragment: &mut String, line: &str, config: &AozoraConfig) {
     let converted = convert_inline(line, config);
+    if append_open_image_line(fragment, &converted) {
+        return;
+    }
     if converted.trim().is_empty() {
         fragment.push_str("<p><br/></p>\n");
     } else {
@@ -979,7 +1015,6 @@ fn append_block_line(fragment: &mut String, line: &str, config: &AozoraConfig) {
         fragment.push_str("</p>\n");
     }
 }
-
 #[cfg(test)]
 #[path = "text_tests.rs"]
 mod tests;

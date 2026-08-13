@@ -277,6 +277,19 @@ fn converts_and_collects_image_notes() {
     assert_eq!(image_references(input), vec!["fig/sample.png"]);
 }
 #[test]
+fn keeps_captioned_image_wrapper_outside_paragraphs() {
+    let output = plain_text_to_xhtml(
+        "［＃「図」のキャプション付きの図（fig/sample.png）入る］\n\
+         図［＃「図」はキャプション］",
+    )
+    .unwrap();
+    assert!(output.contains("<span><img class=\"fit\""));
+    assert!(output.contains("<span class=\"caption"));
+    assert!(!output.contains("<p><span><img class=\"fit\""));
+    assert!(output.contains("</span>\n"));
+}
+
+#[test]
 fn image_notes_without_description_have_empty_alt() {
     let output = plain_text_to_xhtml("［＃（fig/sample.png）］").unwrap();
     assert!(output.contains(r#"src="../image/fig/sample.png" alt="""#));
