@@ -469,15 +469,23 @@ fn rewrite_alternative_gaiji(input: &str, config: &AozoraConfig) -> String {
                 .strip_prefix("※［＃")
                 .and_then(|value| value.strip_suffix('］'))
                 .unwrap_or(&note);
-            let key = bare_note.split('、').next().unwrap_or(bare_note);
+            let key = bare_note
+                .split(|character| character == '、' || character == ',')
+                .next()
+                .unwrap_or(bare_note);
+            let normalized_key = crate::config::normalize_gaiji_key(key);
             let key_note = format!("※［＃{key}］");
+            let normalized_key_note = format!("※［＃{normalized_key}］");
             let normalized_note = crate::config::normalize_gaiji_key(&note);
             if let Some(replacement) = config
                 .gaiji_alternatives
                 .get(&note)
                 .or_else(|| config.gaiji_alternatives.get(&normalized_note))
                 .or_else(|| config.gaiji_alternatives.get(bare_note))
+                .or_else(|| config.gaiji_alternatives.get(key))
+                .or_else(|| config.gaiji_alternatives.get(&normalized_key))
                 .or_else(|| config.gaiji_alternatives.get(&key_note))
+                .or_else(|| config.gaiji_alternatives.get(&normalized_key_note))
             {
                 output.push_str(replacement);
             } else {
@@ -934,7 +942,6 @@ fn parse_hex_code(input: &str, start: usize) -> Option<(u32, usize)> {
     }
     Some((u32::from_str_radix(&input[start..end], 16).ok()?, end))
 }
-
 fn parse_gaiji_note(
     chars: &[char],
     start: usize,
@@ -945,8 +952,13 @@ fn parse_gaiji_note(
         .strip_prefix("※［＃")
         .and_then(|value| value.strip_suffix('］'))
         .unwrap_or(&note);
-    let key = bare_note.split('、').next().unwrap_or(bare_note);
+    let key = bare_note
+        .split(|character| character == '、' || character == ',')
+        .next()
+        .unwrap_or(bare_note);
+    let normalized_key = crate::config::normalize_gaiji_key(key);
     let key_note = format!("※［＃{key}］");
+    let normalized_key_note = format!("※［＃{normalized_key}］");
     if bare_note.contains("※［＃") {
         return Some((end, escape_html(&note)));
     }
@@ -957,7 +969,9 @@ fn parse_gaiji_note(
         .or_else(|| config.gaiji.get(&normalized_note))
         .or_else(|| config.gaiji.get(bare_note))
         .or_else(|| config.gaiji.get(key))
+        .or_else(|| config.gaiji.get(&normalized_key))
         .or_else(|| config.gaiji.get(&key_note))
+        .or_else(|| config.gaiji.get(&normalized_key_note))
     {
         return Some((end, render_gaiji_replacement(replacement, config)));
     }
@@ -1597,7 +1611,6 @@ fn push_escaped_char(output: &mut String, character: char) {
         '<' => output.push_str("&lt;"),
         '>' => output.push_str("&gt;"),
         '"' => output.push_str("&quot;"),
-        '\'' => output.push_str("&apos;"),
         _ => output.push(character),
     }
 }

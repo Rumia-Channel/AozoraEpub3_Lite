@@ -8,10 +8,10 @@ use std::path::PathBuf;
 
 #[test]
 fn escapes_text_and_preserves_empty_lines() {
-    let output = plain_text_to_xhtml("A<&>\n\nB").unwrap();
+    let output = plain_text_to_xhtml("A<&>'\n\nB").unwrap();
     assert_eq!(
         output,
-        "    <p>A&lt;&amp;&gt;</p>\n    <p><br/></p>\n    <p>B</p>\n"
+        "    <p>A&lt;&amp;&gt;'</p>\n    <p><br/></p>\n    <p>B</p>\n"
     );
 }
 
@@ -530,6 +530,15 @@ fn normalizes_shift_jis_dash_variants_in_gaiji_notes() {
     let mut config = AozoraConfig::default();
     config.load_ivs_text("U+0001\tU+E0101\t検\t※［＃「foo－bar」］\n");
     let output = super::plain_text_to_xhtml_with_config("※［＃「foo―bar」］", &config).unwrap();
+    assert!(output.contains("<p>検</p>"));
+    assert!(!output.contains("行右小書き"));
+}
+
+#[test]
+fn resolves_gaiji_aliases_with_spacing_and_ascii_separators() {
+    let mut config = AozoraConfig::default();
+    config.load_utf_text("U+0001\t\t検\t※［＃fooBar,説明］\n");
+    let output = super::plain_text_to_xhtml_with_config("※［＃foo Bar、説明］", &config).unwrap();
     assert!(output.contains("<p>検</p>"));
     assert!(!output.contains("行右小書き"));
 }
