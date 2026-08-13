@@ -52,7 +52,6 @@ fn convert_inline_with_options(
         if chars[index] == '※'
             && let Some((end, replacement)) = parse_image_note(&chars, index + 1, config)
         {
-            output.push('※');
             output.push_str(&replacement);
             index = end;
             continue;
@@ -705,6 +704,7 @@ fn rewrite_auto_yoko(input: &str, config: &AozoraConfig) -> String {
                 0
             };
             if take > 0
+                && !image_note_follows(&chars, run_end)
                 && tcy_boundary_before(&chars, index)
                 && tcy_boundary_after(&chars, index + take)
             {
@@ -720,6 +720,14 @@ fn rewrite_auto_yoko(input: &str, config: &AozoraConfig) -> String {
         index += 1;
     }
     output
+}
+fn image_note_follows(chars: &[char], index: usize) -> bool {
+    let start = if chars.get(index) == Some(&'※') {
+        index + 1
+    } else {
+        index
+    };
+    image_note_parts(chars, start).is_some()
 }
 
 fn tcy_boundary_before(chars: &[char], index: usize) -> bool {
