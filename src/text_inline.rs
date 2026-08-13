@@ -1009,6 +1009,9 @@ fn parse_gaiji_note(
     if bare_note.contains("※［＃") {
         return Some((end, escape_html(&note)));
     }
+    if let Some(replacement) = unicode_replacement(bare_note, config) {
+        return Some((end, replacement));
+    }
     let normalized_note = crate::config::normalize_gaiji_key(&note);
     if let Some(replacement) = config
         .gaiji
@@ -1021,9 +1024,6 @@ fn parse_gaiji_note(
         .or_else(|| config.gaiji.get(&normalized_key_note))
     {
         return Some((end, render_gaiji_replacement(replacement, config)));
-    }
-    if let Some(replacement) = unicode_replacement(bare_note, config) {
-        return Some((end, replacement));
     }
     let open = config
         .inline_notes
