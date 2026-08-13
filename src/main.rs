@@ -70,13 +70,17 @@ fn run() -> Result<(), Box<dyn Error>> {
         .as_deref()
         .or(options.ini.as_deref())
         .map(Path::new);
-    let config_dirs = if options.config_dirs.is_empty() {
+    let uses_builtin_config = options.config_dirs.is_empty();
+    let config_dirs = if uses_builtin_config {
         vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/aozora")]
     } else {
         options.config_dirs.iter().map(PathBuf::from).collect()
     };
     let config_dir_refs = config_dirs.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-    let config = AozoraConfig::load_from_dirs(&config_dir_refs, preset)?;
+    let mut config = AozoraConfig::load_from_dirs(&config_dir_refs, preset)?;
+    if uses_builtin_config {
+        config.character_replacements.clear();
+    }
     let vertical = options
         .horizontal
         .unwrap_or_else(|| config.ini.get_bool("Vertical").unwrap_or(true));
@@ -166,7 +170,7 @@ fn convert_input(
         let creator = options.creator.as_deref().or(creator.as_deref());
 
         let mut sections = aozora_text_to_xhtml_sections_with_config(&body_text, config)?;
-        let cover_setting = options.cover.as_deref().or_else(|| config.ini.get("Cover"));
+        let cover_setting = options.cover.as_deref();
         let (assets, cover) = collect_assets(&input, entry, &text, cover_setting, config)?;
         for collected in &assets {
             for reference in &collected.references {
@@ -382,7 +386,6 @@ fn convert_image_only(
     let input_path = input.path();
     let mut sections = Vec::new();
     let mut assets = Vec::new();
-    let mut cover_path = None;
     for (index, (path, data)) in input.images().iter().enumerate() {
         let extension = path
             .rsplit_once('.')
@@ -396,8 +399,7 @@ fn convert_image_only(
             )
         })?;
         let output_name = format!("{:04}.{extension}", index + 1);
-        let is_cover = index == 0;
-        let processed_data = process_image(data, media_type, &config.ini, is_cover)?;
+        let processed_data = process_image(data, media_type, &config.ini, index == 0)?;
         let fragment = image_dimensions(&processed_data, media_type)
             .map(|dimensions| svg_image_fragment(&output_name, dimensions))
             .unwrap_or_else(|| {
@@ -407,11 +409,11 @@ fn convert_image_only(
                 )
             });
         sections.push(fragment);
-        let epub_path = format!("image/{output_name}");
-        if is_cover {
-            cover_path = Some(epub_path.clone());
-        }
-        assets.push(EpubAsset::new(epub_path, media_type, processed_data));
+        assets.push(EpubAsset::new(
+            format!("image/{output_name}"),
+            media_type,
+            processed_data,
+        ));
     }
     if assets.is_empty() {
         return Err(io::Error::new(
@@ -428,7 +430,6 @@ fn convert_image_only(
         options.language.as_deref(),
     );
     decorate_image_tags(&mut sections, &assets, config);
-    let cover = cover_path.expect("image-only input has at least one asset");
     let output = output_path(
         input_path,
         options.dst.as_deref().map(Path::new),
@@ -441,8 +442,7 @@ fn convert_image_only(
     let book = EpubBook::from_sections(metadata, sections)
         .with_vertical(vertical)
         .with_kindle(is_kindle(options))
-        .with_assets(assets)
-        .with_cover_asset(cover);
+        .with_assets(assets);
     let file = File::create(&output)?;
     book.write_to(file)?;
     Ok(())
