@@ -207,7 +207,15 @@ fn convert_inline_with_options(
             && index > 0
             && (ruby_base_kind(chars[index - 1]).is_some()
                 || latin_bracket_start_ending_at(&chars, index).is_some()
-                || image_note_start_ending_at(&chars, index).is_some())
+                || image_note_start_ending_at(&chars, index).is_some()
+                || gaiji_note_start_ending_at(&chars, index)
+                    .is_some_and(|note_start| {
+                        note_rendered_kind(&chars[note_start..index], config).is_some_and(|kind| kind != EMPTY_NOTE_KIND)
+                    })
+                || unicode_note_start_ending_at(&chars, index, config).is_some_and(|note_start| {
+                    note_rendered_kind(&chars[note_start..index], config)
+                        .is_some_and(|kind| kind != EMPTY_NOTE_KIND)
+                }))
         {
             let bracket_start = latin_bracket_start_ending_at(&chars, index);
             let mut base_start = bracket_start
@@ -220,6 +228,8 @@ fn convert_inline_with_options(
                     }
                 })
                 .or_else(|| image_note_start_ending_at(&chars, index))
+                .or_else(|| gaiji_note_start_ending_at(&chars, index))
+                .or_else(|| unicode_note_start_ending_at(&chars, index, config))
                 .unwrap_or(index - 1);
             // 現在のラン種別。注記をまたぐ場合は注記の描画種別で継続する
             // (Java: 基底はルビ直前の文字種ラン。外字→漢字等の基底文字なら注記もランに含む)。
