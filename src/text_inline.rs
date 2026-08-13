@@ -30,7 +30,11 @@ fn convert_inline_with_options(
     let mut tcy_depth = 0usize;
     let mut implicit_ruby_open = false;
     while index < chars.len() {
-        if implicit_ruby_open && chars[index] != '《' && ruby_base_kind(chars[index]).is_none() {
+        if implicit_ruby_open
+            && chars[index] != '《'
+            && ruby_base_kind(chars[index]).is_none()
+            && !image_note_followed_by_ruby(&chars, index)
+        {
             output.push_str("</ruby>");
             implicit_ruby_open = false;
         }
@@ -142,13 +146,26 @@ fn convert_inline_with_options(
             let base = chars[index + 1..open].iter().collect::<String>();
             if !base.is_empty() {
                 let reading = chars[open + 1..close].iter().collect::<String>();
-                push_ruby(
-                    &mut output,
-                    &base,
-                    &reading,
-                    config,
-                    auto_yoko && tcy_depth == 0,
-                );
+                let continues = has_following_implicit_ruby(&chars, close + 1);
+                if continues {
+                    output.push_str("<ruby>");
+                    push_ruby_part(
+                        &mut output,
+                        &base,
+                        &reading,
+                        config,
+                        auto_yoko && tcy_depth == 0,
+                    );
+                    implicit_ruby_open = true;
+                } else {
+                    push_ruby(
+                        &mut output,
+                        &base,
+                        &reading,
+                        config,
+                        auto_yoko && tcy_depth == 0,
+                    );
+                }
                 index = close + 1;
                 continue;
             }
@@ -1111,7 +1128,7 @@ fn parse_image_note(
             .replace("&amp;times;", "&times;")
             .replace('×', "&times;")
     } else {
-        "挿絵".to_owned()
+        String::new()
     };
     let mut replacement = config
         .inline_notes
@@ -1702,7 +1719,17 @@ fn ruby_base_kind(character: char) -> Option<u8> {
     }
 }
 
+fn image_note_followed_by_ruby(chars: &[char], index: usize) -> bool {
+    let Some((note_end, _, _, _)) = image_note_parts(chars, index) else {
+        return false;
+    };
+    chars.get(note_end) == Some(&'《') && find_closing_ruby(chars, note_end).is_some()
+}
+
 fn has_following_implicit_ruby(chars: &[char], mut index: usize) -> bool {
+    if image_note_followed_by_ruby(chars, index) {
+        return true;
+    }
     let Some(first_kind) = chars
         .get(index)
         .and_then(|character| ruby_base_kind(*character))

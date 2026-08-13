@@ -276,6 +276,11 @@ fn converts_and_collects_image_notes() {
     assert!(output.contains("<img class=\"fit\" src=\"../image/fig/sample.png\" alt=\"sample\"/>"));
     assert_eq!(image_references(input), vec!["fig/sample.png"]);
 }
+#[test]
+fn image_notes_without_description_have_empty_alt() {
+    let output = plain_text_to_xhtml("［＃（fig/sample.png）］").unwrap();
+    assert!(output.contains(r#"src="../image/fig/sample.png" alt="""#));
+}
 
 #[test]
 fn attaches_following_ruby_to_image_notes() {
@@ -287,6 +292,17 @@ fn attaches_following_ruby_to_image_notes() {
         "<ruby><span><img class=\"fit\" src=\"../image/img/fig.png\" alt=\"底本が「ラン」とルビを付した梵字\"/></span><rt>ラン</rt></ruby>"
     ));
     assert!(!output.contains("</span>《ラン》"));
+}
+#[test]
+fn groups_consecutive_image_rubies() {
+    let output = plain_text_to_xhtml(
+        "｜［＃画像一（img/one.png）入る］《一》［＃画像二（img/two.png）入る］《二》",
+    )
+    .unwrap();
+    assert_eq!(output.matches("<ruby>").count(), 1);
+    assert_eq!(output.matches("</ruby>").count(), 1);
+    assert!(output.contains("<rt>一</rt><span>"));
+    assert!(output.contains("<rt>二</rt>"));
 }
 
 #[test]
