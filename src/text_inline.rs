@@ -72,7 +72,9 @@ fn convert_inline_with_options(
         if chars[index] == '※'
             && let Some((end, replacement)) = parse_image_note(&chars, index + 1, config)
         {
-            output.push_str(&replacement);
+            // Java: ※付きの画像注記（※［＃…（img/…）入る］）は画像を出力しない
+            // （※ は外字注記開始として消費され、注記本体は画像注記として処理されない）
+            let _ = replacement;
             index = end;
             continue;
         }
