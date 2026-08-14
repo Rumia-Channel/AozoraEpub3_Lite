@@ -1068,8 +1068,6 @@ impl ImagePageType {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ImagePageFit {
     None,
-    Height,
-    HeightPercent(f32),
 }
 
 fn image_setting_f32(config: &AozoraConfig, key: &str, default: f32) -> f32 {
@@ -1189,15 +1187,8 @@ fn image_page_fit(
         return ImagePageFit::None;
     }
     match image_setting_usize(config, "ImageSizeType", 2) {
-        1 => ImagePageFit::None,
-        3 => ImagePageFit::None,
-        2 if image_width / image_height > display_width / display_height => {
-            ImagePageFit::HeightPercent(
-                (image_height / image_width * display_width / display_height * 100.0)
-                    .clamp(0.0, 100.0),
-            )
-        }
-        _ => ImagePageFit::Height,
+        // Java: ImageHeight はヘッダ出力後に設定されるため単ページ img に style は付かない
+        _ => ImagePageFit::None,
     }
 }
 
@@ -1535,32 +1526,21 @@ fn decorate_image_tags(
             }
 
             let page_fit = image_page_fit(dimensions, config, has_caption, page_type);
+            let _ = page_fit; // Java: ImageHeight はヘッダ出力後に設定されるため style 無し
             let float_type = image_float_type(dimensions, config);
             let page_float =
                 page_type.is_page() && image_setting_bool(config, "ImageFloatPage", false);
             let block_float =
                 !page_type.is_page() && image_setting_bool(config, "ImageFloatBlock", false);
             let (wrapper_replacement, image_class, image_style, image_dimensions) = if page_float {
-                let style = match page_fit {
-                    ImagePageFit::Height => Some("height:100%;".to_owned()),
-                    ImagePageFit::HeightPercent(value) => {
-                        Some(format!("height:{value:.1}%; min-height:{value:.1}%;"))
-                    }
-                    ImagePageFit::None => None,
-                };
                 (
                     Some("<span class=\"img fpage\">".to_owned()),
                     None,
-                    style,
+                    None,
                     None,
                 )
             } else if page_type.is_page() {
-                let style = match page_fit {
-                    ImagePageFit::HeightPercent(value) => {
-                        Some(format!("height:{value:.1}%; min-height:{value:.1}%;"))
-                    }
-                    ImagePageFit::Height | ImagePageFit::None => None,
-                };
+                let style = None;
                 let dimensions = rotation
                     .filter(|_| should_rotate(dimensions, display_width, display_height))
                     .map(|_| dimensions);
@@ -2424,8 +2404,8 @@ mod tests {
                 .to_owned(),
         ];
         decorate_image_tags(&mut sections, &[asset], &[false], &config);
-        assert!(sections[0].contains("height:37.5%"));
         assert!(sections[0].contains("<img class=\"fit\""));
+        assert!(!sections[0].contains("height:"));
     }
     #[test]
     fn removes_missing_image_only_paragraphs() {
