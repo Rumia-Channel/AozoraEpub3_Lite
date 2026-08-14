@@ -1358,6 +1358,10 @@ fn parse_raw_image(chars: &[char], start: usize, config: &AozoraConfig) -> Optio
         return None;
     }
     let source = raw_tag_attribute(&raw, "src")?;
+    if source.trim().is_empty() {
+        // Java: src 空の img は画像取得失敗で出力されない
+        return Some((end + 1, String::new()));
+    }
     let source = normalize_image_path(source.trim())?;
     let alt = escape_html(raw_tag_attribute(&raw, "alt").unwrap_or_default().trim());
     let source = format!("../image/{}", escape_html(&source));
