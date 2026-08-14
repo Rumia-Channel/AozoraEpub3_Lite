@@ -904,7 +904,12 @@ fn suffix_note_at(chars: &[char], start: usize) -> Option<(usize, String, String
     let target = chars[target_start + 1..target_end]
         .iter()
         .collect::<String>();
-    let suffix = chars[target_end + 1..close].iter().collect::<String>();
+    // Java chukiSufPattern の suffix は [^」|^］]+（先頭の 」 を含まない）
+    let suffix = chars[target_end + 1..close]
+        .iter()
+        .collect::<String>()
+        .trim_start_matches('」')
+        .to_owned();
     (!target.is_empty() && !suffix.is_empty()).then_some((close + 1, target, suffix))
 }
 
