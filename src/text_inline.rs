@@ -891,11 +891,30 @@ fn suffix_note_at(chars: &[char], start: usize) -> Option<(usize, String, String
         }
         found?
     };
-    let target_end = chars
-        .iter()
-        .enumerate()
-        .skip(target_start + 1)
-        .find_map(|(index, character)| (*character == '」').then_some(index))?;
+    let target_end = {
+        // Java chukiSufPattern「([^］]+)」: 対象は ］ までの最後の 」 まで（「」入れ子）。
+        // ただし suffix 側に「…」ペアがある注記（に「読み」のルビ等）は最初の 」 で区切る。
+        let first_close = chars
+            .iter()
+            .enumerate()
+            .skip(target_start + 1)
+            .find_map(|(index, character)| (*character == '」').then_some(index))?;
+        let suffix_part = chars[first_close + 1..]
+            .iter()
+            .take_while(|character| **character != '］')
+            .collect::<String>();
+        if suffix_part.contains('「') {
+            first_close
+        } else {
+            chars
+                .iter()
+                .enumerate()
+                .skip(first_close + 1)
+                .take_while(|(_, character)| **character != '］')
+                .find_map(|(index, character)| (*character == '」').then_some(index))
+                .unwrap_or(first_close)
+        }
+    };
     let close = chars
         .iter()
         .enumerate()
