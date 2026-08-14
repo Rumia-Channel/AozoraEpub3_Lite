@@ -143,7 +143,7 @@ Java 参照（`target/java-run/out-all`、1ファイル1プロセス生成）と
 
 残差分（約91行）:
 - 0049同Line化はsplit_block_notesのmerge+887-branchで実装試行したが、1045/10の行頭空白が消えるためrevert。Jは中見出し内rawタグ（<IMG>/<A>）を保持しつつsrc空img・href付きaのみ除去（attr欠落は保持、attr空は除去の傾向）
-- 目次0002の章名タグ: Jは中見出し内rawタグを保持しつつ src空img・href付きaのみ除去（parse_raw_anchorのhref無しaを保持に変更する案）。src空imgの破棄は実装済み
+- 目次0002の章名タグ: Jは中見出し内で src空img・href付きaのみ除去し<IMG>/<A>等は生タグ保持。href無しaの生タグ保持を試したがname属性aまで保持して0007/0049を壊すためrevert。Jのa分岐（linkStartedフラグ）の正確な再現が必要
 - 0048破損注記はJのchukiSufPattern非マッチ（対象に］）だが、同条件はルビ※※・目次の注記付き/は中見出しを壊すため未適用。suffix_note_atに特殊注記（の注記付き終わり等）を除外して限定適用するのが次の一手
 - **画像 float/単ページ分類（約39行）**: 注記0002/0005/0008（`fit` vs `width:%`、alt）、画像回り込み24（`fit`+height-fix、alt取り違え）、出版社5
 - **0030 注記内注記（6行）**: DDF行の画像注記（Jはimg除去・Rはimg表示）
