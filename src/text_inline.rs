@@ -246,6 +246,8 @@ fn convert_inline_with_options(
                 .unwrap_or(index - 1);
             // 現在のラン種別。注記をまたぐ場合は注記の描画種別で継続する
             // (Java: 基底はルビ直前の文字種ラン。外字→漢字等の基底文字なら注記もランに含む)。
+            // 画像注記は注記タグ単体で基底になる（Java は外字の直後が《なら｜を挿入して
+            // img のみを基底にする。テキスト部は基底に含めない）。
             let mut run_kind = if bracket_start.is_some() {
                 Some(3)
             } else if let Some(note_start) = gaiji_note_start_ending_at(&chars, index)
@@ -253,6 +255,9 @@ fn convert_inline_with_options(
             {
                 // 注記始まりの基底は注記の描画種別から始める
                 note_rendered_kind(&chars[note_start..index], config)
+            } else if image_note_start_ending_at(&chars, index).is_some() {
+                // 画像注記直後の《…》は img だけを基底にする（スキャンは注記先頭で止める）
+                Some(EMPTY_NOTE_KIND)
             } else {
                 ruby_base_kind(chars[base_start])
             };
@@ -302,6 +307,10 @@ fn convert_inline_with_options(
                 let Some(previous_kind) = ruby_base_kind(chars[base_start - 1]) else {
                     break;
                 };
+                // 画像注記で始まる基底は注記より前へ遡らない（Java の｜挿入相当）
+                if run_kind == Some(EMPTY_NOTE_KIND) {
+                    break;
+                }
                 if run_kind.is_some_and(|kind| kind != previous_kind) {
                     break;
                 }

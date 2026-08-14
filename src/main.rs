@@ -1431,7 +1431,7 @@ fn escape_image_alt(value: &str) -> String {
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
         .replace("&times;", "×");
-    escape_html(&decoded).replace('×', "&#215;")
+    escape_html(&decoded).replace('×', "&times;")
 }
 
 fn render_image_tag(
