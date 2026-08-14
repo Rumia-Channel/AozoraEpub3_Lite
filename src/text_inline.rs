@@ -1256,7 +1256,11 @@ fn parse_image_note(
             .unwrap_or_else(|| format!(r#"<img class="gaiji" src="{source}" alt=""/>"#));
         return Some((end, replacement));
     }
-    let alt = if config.inline_notes.contains_key("画像") && !description.is_empty() {
+    let alt = if let Some(stem) = image_stem(&path)
+        && let Some(mapped) = config.image_alt_map.get(&stem)
+    {
+        escape_html(mapped).replace('×', "&times;")
+    } else if config.inline_notes.contains_key("画像") && !description.is_empty() {
         escape_html(&description).replace('×', "&times;")
     } else {
         String::new()
@@ -1619,6 +1623,62 @@ pub fn image_references(input: &str) -> Vec<String> {
         }
     }
     references
+}
+
+/// 本文全体から画像の alt を収集する（Java の imageAltMap 相当）。
+/// 画像注記の説明文と raw `<img>` の alt をファイル名ステムで最後勝ちで記録する。
+pub fn collect_image_alts(input: &str, config: &mut AozoraConfig) {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        if let Some((end, path, description, _)) = image_note_parts(&chars, index) {
+            let description = description.trim();
+            if !description.is_empty()
+                && let Some(stem) = image_stem(&path)
+            {
+                config
+                    .image_alt_map
+                    .insert(stem, description.to_owned());
+            }
+            index = end;
+            continue;
+        }
+        if chars[index] == '<'
+            && chars.get(index + 1).is_some_and(|c| c.eq_ignore_ascii_case(&'i'))
+            && chars.get(index + 2).is_some_and(|c| c.eq_ignore_ascii_case(&'m'))
+            && chars.get(index + 3).is_some_and(|c| c.eq_ignore_ascii_case(&'g'))
+        {
+            let Some(end_offset) = chars[index..]
+                .iter()
+                .position(|character| *character == '>')
+            else {
+                break;
+            };
+            let end = index + end_offset + 1;
+            let raw = chars[index..end].iter().collect::<String>();
+            let alt = raw_tag_attribute(&raw, "alt").unwrap_or_default().trim();
+            if !alt.is_empty()
+                && let Some(source) =
+                    raw_tag_attribute(&raw, "src").and_then(|source| normalize_image_path(source.trim()))
+                && let Some(stem) = image_stem(&source)
+            {
+                config.image_alt_map.insert(stem, alt.to_owned());
+            }
+            index = end;
+            continue;
+        }
+        index += 1;
+    }
+}
+
+fn image_stem(path: &str) -> Option<String> {
+    path.rsplit_once('/')
+        .map(|(_, name)| name)
+        .unwrap_or(path)
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .filter(|stem| !stem.is_empty())
+        .map(str::to_owned)
 }
 
 fn parse_inline_note(

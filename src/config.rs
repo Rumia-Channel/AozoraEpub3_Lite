@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -158,6 +158,8 @@ pub struct AozoraConfig {
     pub suffix_notes: BTreeMap<String, SuffixNoteRule>,
     pub gaiji: BTreeMap<String, String>,
     pub gaiji_alternatives: BTreeMap<String, String>,
+    /// 画像ファイル（正規化パス）→ alt の最終値（Java imageAltMap 相当）
+    pub image_alt_map: HashMap<String, String>,
     pub gaiji_fonts: BTreeMap<String, PathBuf>,
     pub latin_replacements: BTreeMap<String, String>,
     pub character_replacements: BTreeMap<String, String>,
@@ -249,6 +251,7 @@ impl Default for AozoraConfig {
                 ("くの字点（濁点付き）".to_owned(), "／″＼".to_owned()),
             ]),
             gaiji_alternatives: BTreeMap::new(),
+            image_alt_map: HashMap::new(),
             gaiji_fonts: BTreeMap::new(),
             latin_replacements: BTreeMap::new(),
             character_replacements: BTreeMap::new(),

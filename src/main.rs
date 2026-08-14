@@ -1,8 +1,8 @@
 use aozora_epub3_lite::{
     AozoraConfig, BookMeta, EpubAsset, EpubBook, EpubMetadata, Input, NavChapter, TextEntry,
-    TitleType, aozora_text_to_xhtml_sections_with_chapters, decode_text, detect_meta_with_gaiji,
-    escape_html, file_title_creator, image::process as process_image, image_reference_occurrences,
-    image_references, inline_to_xhtml,
+    TitleType, aozora_text_to_xhtml_sections_with_chapters, collect_image_alts, decode_text,
+    detect_meta_with_gaiji, escape_html, file_title_creator, image::process as process_image,
+    image_reference_occurrences, image_references, inline_to_xhtml,
 };
 use std::env;
 use std::error::Error;
@@ -103,7 +103,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         convert_input(
             input,
             &options,
-            &config,
+            &mut config,
             title_type,
             publisher_first,
             vertical,
@@ -140,7 +140,7 @@ fn external_settings_path(options: &CliOptions) -> Result<Option<&Path>, io::Err
 fn convert_input(
     input_arg: &str,
     options: &CliOptions,
-    config: &AozoraConfig,
+    config: &mut AozoraConfig,
     title_type: TitleType,
     publisher_first: bool,
     vertical: bool,
@@ -197,6 +197,7 @@ fn convert_input(
         // The reference pre-read consumes the first-chapter slot at the title
         // line; the body scan therefore starts without a pending chapter.
         let initial_add_section_chapter = detected.title_line.is_none();
+        collect_image_alts(&body_text, config);
         let (mut sections, chapter_records) =
             aozora_text_to_xhtml_sections_with_chapters(&body_text, config, initial_add_section_chapter)?;
         let title_page_selected = config.title_page_write && matches!(config.title_page_type, 1 | 2);

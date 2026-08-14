@@ -9,7 +9,7 @@ use inline::convert_inline;
 pub fn inline_to_xhtml(input: &str, config: &AozoraConfig) -> String {
     convert_inline(input, config)
 }
-pub use inline::{escape_html, image_reference_occurrences, image_references};
+pub use inline::{collect_image_alts, escape_html, image_reference_occurrences, image_references};
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum TextError {
