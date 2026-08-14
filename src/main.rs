@@ -496,9 +496,22 @@ fn convert_image_only(
         &options.out_ext,
         None,
     );
+    // Java: 画像ページは sectionIndex==1 または 5 の倍数で章（画像番号）を追加
+    let chapters = sections
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index == 0 || (*index + 1) % 5 == 0)
+        .map(|(index, _)| {
+            NavChapter::new(
+                (index + 1).to_string(),
+                format!("xhtml/{:04}.xhtml", index + 1),
+            )
+        })
+        .collect::<Vec<_>>();
     let book = EpubBook::from_sections(metadata, sections)
         .with_vertical(vertical)
         .with_kindle(is_kindle(options))
+        .with_chapters(chapters)
         .with_assets(assets);
     let file = File::create(&output)?;
     book.write_to(file)?;
