@@ -74,7 +74,17 @@ fn convert_inline_with_options(
         {
             // Java: ※付きの画像注記（※［＃…（img/…）入る］）は画像を出力しない
             // （※ は外字注記開始として消費され、注記本体は画像注記として処理されない）
-            let _ = replacement;
+            // ただし #GAIJI# フラグ付き（外字画像）は出力する
+            if !chars[index + 1..end]
+                .iter()
+                .collect::<String>()
+                .contains("#GAIJI#")
+            {
+                let _ = replacement;
+                index = end;
+                continue;
+            }
+            output.push_str(&replacement);
             index = end;
             continue;
         }
