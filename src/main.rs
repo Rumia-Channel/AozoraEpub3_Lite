@@ -1,6 +1,7 @@
 use aozora_epub3_lite::{
     AozoraConfig, BookMeta, EpubAsset, EpubBook, EpubMetadata, Input, NavChapter, TextEntry,
-    TitleType, aozora_text_to_xhtml_sections_with_chapters, collect_image_alts, decode_text,
+    ChapterRecord, TitleType, aozora_text_to_xhtml_sections_with_chapters,
+    collect_image_alts, decode_text,
     detect_meta_with_gaiji, escape_html, file_title_creator, image::process as process_image,
     image_reference_occurrences, image_references, inline_to_xhtml,
 };
@@ -198,15 +199,9 @@ fn convert_input(
         // line; the body scan therefore starts without a pending chapter.
         let initial_add_section_chapter = detected.title_line.is_none();
         collect_image_alts(&body_text, config);
-        let (mut sections, chapter_records) =
+        let (mut sections, mut chapter_records) =
             aozora_text_to_xhtml_sections_with_chapters(&body_text, config, initial_add_section_chapter)?;
         let title_page_selected = config.title_page_write && matches!(config.title_page_type, 1 | 2);
-        let nav_chapters = chapter_records
-            .into_iter()
-            .map(|record| {
-                NavChapter::new(record.label, format!("xhtml/{:04}.xhtml", record.section_index + 1))
-            })
-            .collect::<Vec<_>>();
         let cover_setting = options.cover.as_deref();
         let (assets, cover) = collect_assets(&input, entry, &text, cover_setting, config)?;
         for collected in &assets {
@@ -234,8 +229,14 @@ fn convert_input(
             .map(|item| item.asset)
             .collect::<Vec<_>>();
         decorate_image_tags(&mut sections, &assets, &missing_sources, config);
-        reflow_image_sections(&mut sections, &assets, config);
+        reflow_image_sections(&mut sections, &mut chapter_records, &assets, config);
 
+        let nav_chapters = chapter_records
+            .into_iter()
+            .map(|record| {
+                NavChapter::new(record.label, format!("xhtml/{:04}.xhtml", record.section_index + 1))
+            })
+            .collect::<Vec<_>>();
         let title_markup_input = if options.use_file_name {
             title.as_str()
         } else {
@@ -1350,16 +1351,30 @@ fn standalone_image_page_type(
     )
 }
 
-fn reflow_image_sections(sections: &mut Vec<String>, assets: &[EpubAsset], config: &AozoraConfig) {
-    let split = sections
-        .drain(..)
-        .flat_map(|section| split_image_page_sections(&section, assets, config))
-        .filter(|section| !section.trim().is_empty() && !is_page_marker_only_fragment(section))
-        .collect::<Vec<_>>();
+fn reflow_image_sections(
+    sections: &mut Vec<String>,
+    chapters: &mut [ChapterRecord],
+    assets: &[EpubAsset],
+    config: &AozoraConfig,
+) {
+    // 元セクション番号を添えて分割（後で章の section_index をリマップする）
+    let mut split: Vec<(usize, String)> = Vec::new();
+    for (index, section) in sections.drain(..).enumerate() {
+        for piece in split_image_page_sections(&section, assets, config) {
+            if !piece.trim().is_empty() && !is_page_marker_only_fragment(&piece) {
+                split.push((index, piece));
+            }
+        }
+    }
     let mut output: Vec<String> = Vec::with_capacity(split.len());
+    let mut origins: Vec<usize> = Vec::with_capacity(split.len());
     let mut pending = String::new();
-    for section in split {
+    let mut pending_origin = 0usize;
+    for (origin, section) in split {
         if standalone_image_page_type(&section, assets, config) == Some(ImagePageType::Inline) {
+            if pending.is_empty() && output.is_empty() {
+                pending_origin = origin;
+            }
             if !pending.is_empty() {
                 pending.push_str(&section);
             } else if let Some(previous) = output.last_mut() {
@@ -1370,8 +1385,10 @@ fn reflow_image_sections(sections: &mut Vec<String>, assets: &[EpubAsset], confi
         } else {
             if !pending.is_empty() {
                 output.push(std::mem::take(&mut pending));
+                origins.push(pending_origin);
             }
             output.push(section);
+            origins.push(origin);
         }
     }
     if !pending.is_empty() {
@@ -1382,6 +1399,15 @@ fn reflow_image_sections(sections: &mut Vec<String>, assets: &[EpubAsset], confi
         }
     }
     *sections = output;
+    // 分割されたセクションに応じて章の section_index を振り直す
+    for chapter in chapters.iter_mut() {
+        if let Some(new_index) = origins
+            .iter()
+            .position(|&origin| origin == chapter.section_index)
+        {
+            chapter.section_index = new_index;
+        }
+    }
 }
 
 fn image_wrapper_range(original: &str, image_start: usize) -> Option<(usize, usize)> {
@@ -2485,7 +2511,7 @@ mod tests {
             "<p>前</p>\n<p><span><img class=\"fit\" src=\"../image/large.png\" alt=\"\"/></span></p>\n<p>後</p>\n"
                 .to_owned(),
         ];
-        reflow_image_sections(&mut sections, &[asset], &config);
+        reflow_image_sections(&mut sections, &mut [], &[asset], &config);
         assert_eq!(sections.len(), 3);
         assert!(sections[1].contains("<p><span><img"));
         assert!(sections[0].contains("<p>前</p>"));
@@ -2509,7 +2535,7 @@ mod tests {
              </div>\n"
                 .to_owned(),
         ];
-        reflow_image_sections(&mut sections, &[asset], &config);
+        reflow_image_sections(&mut sections, &mut [], &[asset], &config);
         assert_eq!(sections.len(), 1);
         assert!(sections[0].contains("<div class=\"mt5\">"));
         assert!(sections[0].contains("<img class=\"fit\""));
