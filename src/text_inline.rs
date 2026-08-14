@@ -1256,6 +1256,7 @@ fn parse_image_note(
     } else {
         String::new()
     };
+
     let mut replacement = config
         .inline_notes
         .get("画像")

@@ -909,12 +909,13 @@ fn section_page_mode(body: &str) -> (&'static str, &str) {
 
 fn image_page_body(body: &str) -> Option<&str> {
     // Java は単ページ画像セクションのみ <span><img class="fit"> を p 無しで出力し
-    // <html class="hltr"> + <body class="p-image"> にする。本文中の fit は p 内。
+    // <html class="hltr"> + <body class="p-image"> にする。本文中の fit は p 内 span。
     let body = body.trim();
     if body.starts_with("<span><img class=\"fit\"") && body.ends_with("</span>") {
         return Some(body);
     }
-    (body.starts_with("<img class=\"fit\"") && body.ends_with("/>")).then_some(body)
+    let inner = body.strip_prefix("<p>")?.strip_suffix("</p>")?.trim();
+    (inner.starts_with("<img class=\"fit\"") && inner.ends_with("/>")).then_some(body)
 }
 
 fn xml_escape(value: &str) -> String {
