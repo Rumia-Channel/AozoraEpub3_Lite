@@ -131,7 +131,7 @@ cargo run --quiet -- -d target/progress-check \
 ```
 
 3件のEPUBが生成され、`unzip -t` によるZIP整合性確認に成功した。さらに現行実装で
-`test_data` 内の21件のローカルフィクスチャをCLI変換し、すべてEPUBCheckを通過した。
+`test_data` 内の21件のローカルフィクスチャをCLI変換し、すべてEPUBCheck: R生成20/21クリーン（注記のみJ参照と同一のplayOrder/#linkエラー3件）
 
 ## 既知の残存事項
 
@@ -168,7 +168,7 @@ CLI の主要オプションと外部設定の基本経路は実装・テスト�
 
 - 差分計測: `target/xhtml-diff-report*.txt`（旧）、最新は `target/parity-rust-fresh` と `target/java-run/out-all` の直接比較（Python + difflib）。
 - `tests/epub_parity.rs` は比較用のJava/Rust生成ディレクトリが必要なため通常は ignored。新参照（out-all）に合わせて更新が必要。
-- `target/epubcheck-all` に現行実装で生成した21件を `java -jar C:/EPUBCheck/epubcheck.jar` で検証し、0エラー・0警告だった。
+- `target/parity-rust-fresh` に現行実装で生成した21件を EPUBCheck で検証し、20/21 が 0 エラー。注記のみ J 参照と同一の playOrder 重複 2 件 + 未定義フラグメント 1 件（J も同一エラーを出力）。
 - テスト: `cargo test --all` 157 passed / 1 ignored、`cargo clippy --all-targets --all-features -D warnings` 通過。
 
 ### 4. 対象外
