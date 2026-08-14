@@ -224,11 +224,15 @@ fn convert_input(
             &image_references(&text),
             &resolved_references,
         );
+        let missing_sources = assets
+            .iter()
+            .map(|item| !item.original_available)
+            .collect::<Vec<_>>();
         let mut assets = assets
             .into_iter()
             .map(|item| item.asset)
             .collect::<Vec<_>>();
-        decorate_image_tags(&mut sections, &assets, config);
+        decorate_image_tags(&mut sections, &assets, &missing_sources, config);
         reflow_image_sections(&mut sections, &assets, config);
 
         let title_markup_input = if options.use_file_name {
@@ -479,7 +483,8 @@ fn convert_image_only(
         None,
         options.language.as_deref(),
     );
-    decorate_image_tags(&mut sections, &assets, config);
+    let missing_sources = vec![false; assets.len()];
+    decorate_image_tags(&mut sections, &assets, &missing_sources, config);
     let output = output_path(
         input_path,
         options.dst.as_deref().map(Path::new),
@@ -624,6 +629,10 @@ struct CollectedAsset {
     /// Path the asset is stored at inside the EPUB (without the `image/`
     /// prefix).
     resolved: String,
+    /// Whether the original reference (before extension fallback) existed
+    /// on disk; mirrors Java's `getImageInfo` which returns null for
+    /// missing/unknown-extension sources, yielding the `fit` template.
+    original_available: bool,
 }
 
 /// Collects EPUB assets for all image references in the text (plus the
@@ -644,6 +653,11 @@ fn collect_assets(
 
     for reference in image_reference_occurrences(text) {
         image_index += 1;
+        let original_available = if input.is_archive() {
+            input.resolve_image(entry, &reference).is_some()
+        } else {
+            base.join(reference.replace('\\', "/")).is_file()
+        };
         let resolved = if input.is_archive() {
             input
                 .resolve_image(entry, &reference)
@@ -688,6 +702,7 @@ fn collect_assets(
             references: vec![reference],
             source: source_path,
             resolved: output_name,
+            original_available,
         });
     }
 
@@ -717,6 +732,7 @@ fn collect_assets(
                 references: Vec::new(),
                 source: source.to_string_lossy().replace('\\', "/"),
                 resolved: output_name,
+                original_available: true,
             });
             cover_asset = Some(epub_path);
         }
@@ -743,6 +759,7 @@ fn collect_assets(
                     references: Vec::new(),
                     source: normalized,
                     resolved: output_name,
+                    original_available: true,
                 });
                 cover_asset = Some(epub_path);
             } else {
@@ -1409,7 +1426,12 @@ fn render_image_tag(
     )
 }
 
-fn decorate_image_tags(sections: &mut [String], assets: &[EpubAsset], config: &AozoraConfig) {
+fn decorate_image_tags(
+    sections: &mut [String],
+    assets: &[EpubAsset],
+    missing_sources: &[bool],
+    config: &AozoraConfig,
+) {
     let display_width = image_setting_f32(config, "DispW", 600.0);
     let display_height = image_setting_f32(config, "DispH", 800.0);
     let rotation = image_rotation(config);
@@ -1436,6 +1458,11 @@ fn decorate_image_tags(sections: &mut [String], assets: &[EpubAsset], config: &A
                 cursor = end;
                 continue;
             };
+            let asset_index = assets
+                .iter()
+                .position(|candidate| candidate == asset)
+                .unwrap_or(0);
+            let source_missing = missing_sources.get(asset_index).copied().unwrap_or(false);
             let Some(dimensions) = image_dimensions(&asset.data, &asset.media_type) else {
                 cursor = end;
                 continue;
@@ -1450,6 +1477,9 @@ fn decorate_image_tags(sections: &mut [String], assets: &[EpubAsset], config: &A
             let page_type =
                 image_page_type(dimensions, config, has_caption, usize::from(has_open_block));
             let ratio = if page_type.is_page() {
+                0.0
+            } else if source_missing {
+                // Java: 元参照が無い/未知拡張子なら getImageInfo が null → ratio 0 → fit
                 0.0
             } else {
                 image_width_ratio(dimensions, config, has_caption)
@@ -2300,7 +2330,7 @@ mod tests {
         );
         let mut sections =
             vec!["<p><img class=\"fit\" src=\"../image/fig.png\" alt=\"図\"/></p>".to_owned()];
-        decorate_image_tags(&mut sections, &[asset], &config);
+        decorate_image_tags(&mut sections, &[asset], &[false], &config);
         assert!(sections[0].contains("width=\"1600\" height=\"900\""));
 
         assert!(sections[0].contains("transform: rotate(90deg)"));
@@ -2321,7 +2351,7 @@ mod tests {
             "<p><span><img class=\"fit\" src=\"../image/fig.png\" alt=\"図\"/></span></p>"
                 .to_owned(),
         ];
-        decorate_image_tags(&mut sections, &[asset], &config);
+        decorate_image_tags(&mut sections, &[asset], &[false], &config);
         assert!(sections[0].contains("<span class=\"img\" style=\"width:76.5%\">"));
         assert!(sections[0].contains("<img style=\"width:100%\""));
         assert!(!sections[0].contains("width=\"459\""));
@@ -2344,7 +2374,7 @@ mod tests {
             "<p><span><img class=\"fit\" src=\"../image/float.png\" alt=\"\"/></span></p>"
                 .to_owned(),
         ];
-        decorate_image_tags(&mut sections, &[asset], &config);
+        decorate_image_tags(&mut sections, &[asset], &[false], &config);
         assert!(sections[0].contains("<span class=\"img ft\""));
         assert!(sections[0].contains("style=\"width:83.33333333333334%\""));
     }
@@ -2366,7 +2396,7 @@ mod tests {
             "<p><span><img class=\"fit\" src=\"../image/page.png\" alt=\"\"/></span></p>"
                 .to_owned(),
         ];
-        decorate_image_tags(&mut sections, &[asset], &config);
+        decorate_image_tags(&mut sections, &[asset], &[false], &config);
         assert!(sections[0].contains("height:37.5%"));
         assert!(sections[0].contains("<img class=\"fit\""));
     }
