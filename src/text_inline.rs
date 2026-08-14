@@ -41,6 +41,7 @@ fn convert_inline_with_options(
             && chars[index] != '《'
             && ruby_base_kind(chars[index]).is_none()
             && !image_note_followed_by_ruby(&chars, index)
+            && !gaiji_note_followed_by_ruby(&chars, index)
         {
             output.push_str("</ruby>");
             implicit_ruby_open = false;
@@ -2028,6 +2029,15 @@ fn ruby_base_kind(character: char) -> Option<u8> {
         _ => None,
     }
 }
+fn gaiji_note_followed_by_ruby(chars: &[char], index: usize) -> bool {
+    if chars.get(index) != Some(&'※') {
+        return false;
+    }
+    let Some((note_end, _)) = gaiji_note_range(chars, index) else {
+        return false;
+    };
+    chars.get(note_end) == Some(&'《') && find_closing_ruby(chars, note_end).is_some()
+}
 
 fn image_note_followed_by_ruby(chars: &[char], index: usize) -> bool {
     let Some((note_end, _, _, _)) = image_note_parts(chars, index) else {
@@ -2037,7 +2047,7 @@ fn image_note_followed_by_ruby(chars: &[char], index: usize) -> bool {
 }
 
 fn has_following_implicit_ruby(chars: &[char], mut index: usize) -> bool {
-    if image_note_followed_by_ruby(chars, index) {
+    if image_note_followed_by_ruby(chars, index) || gaiji_note_followed_by_ruby(chars, index) {
         return true;
     }
     let Some(first_kind) = chars
