@@ -942,6 +942,28 @@ fn suffix_note_at(chars: &[char], start: usize) -> Option<(usize, String, String
         .enumerate()
         .skip(target_end + 1)
         .find_map(|(index, character)| (*character == '］').then_some(index))?;
+    // Java replaceChukiSufTag: 注記内の入れ子注記（レベル2）は除去されるため、
+    // target 内でレベル0の ］ が残る場合（＝閉じられていない注記開始）は
+    // chukiSufPattern [^］]+ が非マッチとなりリテラル出力になる。
+    // （ルビ※※等の入れ子注記はレベル1で閉じるため対象外）
+    {
+        let mut level = 0usize;
+        let mut target_index = target_start + 1;
+        while target_index + 1 < target_end {
+            if chars[target_index] == '［' && chars[target_index + 1] == '＃' {
+                level += 1;
+                target_index += 2;
+                continue;
+            }
+            if chars[target_index] == '］' {
+                if level == 0 {
+                    return None;
+                }
+                level -= 1;
+            }
+            target_index += 1;
+        }
+    }
     let target = chars[target_start + 1..target_end]
         .iter()
         .collect::<String>();
