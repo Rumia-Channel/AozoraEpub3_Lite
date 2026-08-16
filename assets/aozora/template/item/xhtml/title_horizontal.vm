@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html
+xmlns="http://www.w3.org/1999/xhtml"
+xmlns:epub="http://www.idpf.org/2007/ops"
+xml:lang="ja"
+class="hltr"
+>
+<head>
+<meta charset="UTF-8"/>
+<title>${title}</title>
+<link rel="stylesheet" type="text/css" href="../style/book-style.css"/>
+</head>
+<body class="p-titlepage">
+<div class="main">
+
+<div class="book-title">
+#if (${SERIES})
+<div class="book-title-before">
+<p>${SERIES}</p>
+</div>
+#end
+<div class="book-title-main">
+<p>${TITLE}</p>
+</div>
+#if (${SUBTITLE})
+<div class="book-title-after">
+<p>${SUBTITLE}</p>
+</div>
+#end
+</div>
+
+<div class="author">
+#if (${CREATOR})
+<p>${CREATOR}</p>
+#end
+#if (${SUBCREATOR})
+<p>${SUBCREATOR}</p>
+#end
+</div>
+#if (${PUBLISHER})
+<div class="label">
+<p class="label-name">${PUBLISHER}</p>
+</div>
+#end
+</div>
+</body>
+</html>
+

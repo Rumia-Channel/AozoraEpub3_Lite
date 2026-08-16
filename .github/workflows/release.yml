@@ -1,0 +1,163 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate tag matches Cargo.toml version
+        id: version
+        shell: pwsh
+        run: |
+          $cargoToml = Get-Content Cargo.toml -Raw
+          if ($cargoToml -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+            throw "Could not find package version in Cargo.toml."
+          }
+
+          $version = $Matches[1]
+          $tag = "${{ github.ref_name }}"
+          $escapedVersion = [regex]::Escape($version)
+          if ($tag -notmatch "^(?:v)?$escapedVersion(?:[-+][0-9A-Za-z.-]+)?$") {
+            throw "Tag '$tag' does not match Cargo.toml version '$version' or an allowed prerelease/build variant of it."
+          }
+
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $isPrerelease = $tag -match "^[^+]*-"
+          "prerelease=$($isPrerelease.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-2025
+            platform: win
+            arch: x64
+            binary: AozoraEpub3_Lite.exe
+            target: x86_64-pc-windows-msvc
+          - name: Windows ARM64
+            os: windows-11-arm
+            platform: win
+            arch: arm64
+            binary: AozoraEpub3_Lite.exe
+            target: aarch64-pc-windows-msvc
+          - name: macOS x64
+            os: macos-15-intel
+            platform: mac
+            arch: x64
+            binary: AozoraEpub3_Lite
+            target: x86_64-apple-darwin
+          - name: macOS ARM64
+            os: macos-15
+            platform: mac
+            arch: arm64
+            binary: AozoraEpub3_Lite
+            target: aarch64-apple-darwin
+          - name: Linux x64
+            os: ubuntu-24.04
+            platform: linux
+            arch: x64
+            binary: AozoraEpub3_Lite
+            target: x86_64-unknown-linux-gnu
+          - name: Linux ARM64
+            os: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+            binary: AozoraEpub3_Lite
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.os }}-${{ matrix.target }}
+
+      - name: Add Rust target
+        shell: pwsh
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build release binary
+        shell: pwsh
+        run: cargo build --locked --release --target "${{ matrix.target }}" --bin AozoraEpub3_Lite
+
+      - name: Package release asset
+        id: package
+        shell: pwsh
+        run: |
+          $archivePath = & .\scripts\package-release.ps1 `
+            -BinaryPath "target/${{ matrix.target }}/release/${{ matrix.binary }}" `
+            -Platform "${{ matrix.platform }}" `
+            -Arch "${{ matrix.arch }}" `
+            -Version "${{ needs.validate.outputs.version }}" `
+            -OutputDir "dist"
+
+          "archive_path=$archivePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "archive_name=$([System.IO.Path]::GetFileName($archivePath))" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.archive_name }}
+          path: ${{ steps.package.outputs.archive_path }}
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs:
+      - validate
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+          IS_PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+        shell: pwsh
+        run: |
+          $repo = $env:REPOSITORY
+          $tag = $env:TAG_NAME
+          $assets = Get-ChildItem -Path "release-assets" -File | Sort-Object Name
+          if ($assets.Count -eq 0) {
+            throw "No release assets were downloaded."
+          }
+
+          $releaseArgs = @("--title", $tag, "--verify-tag", "--generate-notes")
+          if ($env:IS_PRERELEASE -eq "true") {
+            $releaseArgs += "--prerelease"
+          }
+
+          gh release view $tag --repo $repo *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo $repo @releaseArgs
+          } elseif ($env:IS_PRERELEASE -eq "true") {
+            gh release edit $tag --repo $repo --prerelease
+          }
+
+          foreach ($asset in $assets) {
+            gh release upload $tag $asset.FullName --repo $repo --clobber
+          }
