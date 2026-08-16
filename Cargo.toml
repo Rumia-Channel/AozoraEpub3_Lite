@@ -1,10 +1,16 @@
 [package]
-name = "AozoraEpub3_Lite"
+name = "aozora_epub3_lite"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
+description = "Aozora Bunko text to EPUB 3 converter (Rust lightweight port of AozoraEpub3)"
+
 [lib]
 name = "aozora_epub3_lite"
+
+[[bin]]
+name = "AozoraEpub3_Lite"
+path = "src/main.rs"
 
 [dependencies]
 zip = { version = "6.0", default-features = false, features = ["deflate"] }
