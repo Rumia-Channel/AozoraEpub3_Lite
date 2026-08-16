@@ -6,10 +6,14 @@ use encoding_rs::{Encoding, SHIFT_JIS, UTF_8};
 mod inline;
 
 use inline::convert_inline;
+use inline::convert_inline_with_yoko;
 pub fn inline_to_xhtml(input: &str, config: &AozoraConfig) -> String {
     convert_inline(input, config)
 }
-pub use inline::{collect_image_alts, escape_html, image_reference_occurrences, image_references};
+pub use inline::{
+    apply_alt_upright, collect_image_alts, escape_html, image_reference_occurrences,
+    image_references,
+};
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum TextError {
@@ -706,6 +710,8 @@ fn render_lines<'a>(
     let mut pending_config_heading: Option<(String, String)> = None;
     let mut output_count = 0usize;
     let mut chapter_done = false;
+    // Java の inYoko フィールド相当: ここから横組み〜ここで横組み終わり で切替
+    let mut in_yoko = false;
 
     let block_markers = config
         .block_open_tags
@@ -713,17 +719,23 @@ fn render_lines<'a>(
         .chain(config.block_close_tags.keys())
         .map(|note| format!("［＃{note}］"))
         .collect::<Vec<_>>();
-    let expanded_lines = lines
-        .into_iter()
-        .enumerate()
-        .flat_map(|(index, line)| {
-            split_block_notes(line, &block_markers)
-                .into_iter()
-                .map(move |piece| (index, piece))
-        })
-        .collect::<Vec<_>>();
+    let expanded_lines = merge_same_line_block_pieces(
+        lines
+            .into_iter()
+            .enumerate()
+            .flat_map(|(index, line)| {
+                split_block_notes(line, &block_markers)
+                    .into_iter()
+                    .map(move |piece| (index, piece))
+            })
+            .collect::<Vec<_>>(),
+        config,
+    );
 
-    for (line_index, line) in expanded_lines.iter().map(|(index, line)| (*index, line.as_str())) {
+    for (line_index, line) in expanded_lines
+        .iter()
+        .map(|(index, line)| (*index, line.as_str()))
+    {
         has_line = true;
         let line_no_br = no_br.get(line_index).copied().unwrap_or(false);
         let chapter_id = if !chapter_done && chapter_line == Some(line_index) {
@@ -735,7 +747,7 @@ fn render_lines<'a>(
         if line_no_br {
             // 前-part of a mid-line page break: output bare, no <p> wrapper.
             output_count += 1;
-            let converted = convert_inline(line, config);
+            let converted = convert_inline_with_yoko(line, config, in_yoko);
             let converted = chapter_id
                 .map(|id| inject_kobo_id(&converted, &id))
                 .unwrap_or(converted);
@@ -755,23 +767,26 @@ fn render_lines<'a>(
         {
             output_count += 1;
             // Java: インライン字下げ注記でも字下げブロック継続時は前ブロックを閉じる
-            let note = &line[start + "［＃".len()..line[start..].find('］').map_or(start, |o| start + o)];
+            let note =
+                &line[start + "［＃".len()..line[start..].find('］').map_or(start, |o| start + o)];
             if note.contains("字下げ")
                 && blocks.iter().any(OpenBlock::is_indent)
                 && let Some(block) = blocks.pop()
             {
                 let close = match block {
                     OpenBlock::Generated { close_tag, .. } => close_tag,
-                    OpenBlock::Configured { fallback_close_tag, .. } => fallback_close_tag,
+                    OpenBlock::Configured {
+                        fallback_close_tag, ..
+                    } => fallback_close_tag,
                 };
                 fragment.push_str(&close);
             }
-            fragment.push_str(&convert_inline(&line[..start], config));
+            fragment.push_str(&convert_inline_with_yoko(&line[..start], config, in_yoko));
             let open_tag = chapter_id
                 .map(|id| inject_kobo_id(&open_tag, &id))
                 .unwrap_or(open_tag);
             fragment.push_str(&open_tag);
-            fragment.push_str(&convert_inline(&line[end..], config));
+            fragment.push_str(&convert_inline_with_yoko(&line[end..], config, in_yoko));
             fragment.push_str(&close_tag);
             if !no_newline {
                 fragment.push('\n');
@@ -786,7 +801,7 @@ fn render_lines<'a>(
                 .map(|id| inject_kobo_id(&open_tag, &id))
                 .unwrap_or(open_tag);
             fragment.push_str(&open_tag);
-            fragment.push_str(&convert_inline(line, config));
+            fragment.push_str(&convert_inline_with_yoko(line, config, in_yoko));
             fragment.push_str(&close_tag);
             fragment.push('\n');
             continue;
@@ -800,6 +815,7 @@ fn render_lines<'a>(
                 config,
                 &mut output_count,
                 chapter_id.as_deref(),
+                in_yoko,
             );
             continue;
         }
@@ -817,15 +833,20 @@ fn render_lines<'a>(
                 {
                     let close = match block {
                         OpenBlock::Generated { close_tag, .. } => close_tag,
-                        OpenBlock::Configured { fallback_close_tag, .. } => fallback_close_tag,
+                        OpenBlock::Configured {
+                            fallback_close_tag, ..
+                        } => fallback_close_tag,
                     };
                     fragment.push_str(&close);
                 }
                 let open_tag = chapter_id
                     .map(|id| inject_kobo_id(open_tag, &id))
                     .unwrap_or_else(|| open_tag.clone());
+                // Java: 注記前の行頭空白（leading）は convertEscapedText で無トリム出力される
+                let leading_len = line.len() - line.trim_start().len();
+                fragment.push_str(&line[..leading_len]);
                 fragment.push_str(&open_tag);
-                fragment.push_str(&convert_inline(rest.trim_start(), config));
+                fragment.push_str(&convert_inline_with_yoko(rest, config, in_yoko));
                 fragment.push_str(close_tag);
                 fragment.push('\n');
                 continue;
@@ -850,6 +871,9 @@ fn render_lines<'a>(
                 let closes_configured = matches!(blocks.last(), Some(OpenBlock::Configured { .. }));
                 if closes_configured && let Some(close_tag) = config.block_close_tags.get(note) {
                     output_count += 1;
+                    if note.contains("横組み終わり") {
+                        in_yoko = false;
+                    }
                     let leading_len = line.len() - line.trim_start().len();
                     fragment.push_str(&line[..leading_len]);
                     fragment.push_str(close_tag);
@@ -867,7 +891,10 @@ fn render_lines<'a>(
                     // Java: 字下げブロック継続時は前の字下げブロックを閉じて同じ行で開く
                     if note.contains("字下げ")
                         && blocks.iter().any(OpenBlock::is_indent)
-                        && let Some(OpenBlock::Generated { close_tag: previous, .. }) = blocks.pop()
+                        && let Some(OpenBlock::Generated {
+                            close_tag: previous,
+                            ..
+                        }) = blocks.pop()
                     {
                         fragment.push_str(&line[..leading_len]);
                         fragment.push_str(&previous);
@@ -891,8 +918,7 @@ fn render_lines<'a>(
                     if note.contains("字下げ")
                         && blocks.iter().any(OpenBlock::is_indent)
                         && let Some(OpenBlock::Configured {
-                            fallback_close_tag,
-                            ..
+                            fallback_close_tag, ..
                         }) = blocks.pop()
                     {
                         fragment.push_str(&line[..leading_len]);
@@ -929,6 +955,7 @@ fn render_lines<'a>(
                     config,
                     &mut output_count,
                     chapter_id.as_deref(),
+                    in_yoko,
                 );
                 continue;
             }
@@ -959,6 +986,7 @@ fn render_lines<'a>(
                         config,
                         &mut output_count,
                         chapter_id.as_deref(),
+                        in_yoko,
                     );
                 }
                 continue;
@@ -970,15 +998,19 @@ fn render_lines<'a>(
                     .unwrap_or(open_tag);
                 fragment.push_str(&open_tag);
                 if !rest.trim().is_empty() {
-                    fragment.push_str(&convert_inline(rest.trim_start(), config));
+                    fragment.push_str(&convert_inline_with_yoko(
+                        rest.trim_start(),
+                        config,
+                        in_yoko,
+                    ));
                     fragment.push('\n');
                 } else {
                     fragment.push('\n');
                 }
                 blocks.push(OpenBlock::Generated {
-                        close_tag,
-                        indent: false,
-                    });
+                    close_tag,
+                    indent: false,
+                });
                 continue;
             }
             if let Some(tag) = config.block_single_tags.get(note) {
@@ -988,7 +1020,11 @@ fn render_lines<'a>(
                     .unwrap_or_else(|| tag.to_owned());
                 fragment.push_str(&tag);
                 if !rest.trim().is_empty() {
-                    fragment.push_str(&convert_inline(rest.trim_start(), config));
+                    fragment.push_str(&convert_inline_with_yoko(
+                        rest.trim_start(),
+                        config,
+                        in_yoko,
+                    ));
                 }
                 fragment.push('\n');
                 continue;
@@ -1011,14 +1047,18 @@ fn render_lines<'a>(
                     {
                         let close = match block {
                             OpenBlock::Generated { close_tag, .. } => close_tag,
-                            OpenBlock::Configured { fallback_close_tag, .. } => {
-                                fallback_close_tag
-                            }
+                            OpenBlock::Configured {
+                                fallback_close_tag, ..
+                            } => fallback_close_tag,
                         };
                         fragment.push_str(&close);
                     }
                     fragment.push_str(&open_tag);
-                    fragment.push_str(&convert_inline(rest.trim_start(), config));
+                    fragment.push_str(&convert_inline_with_yoko(
+                        rest.trim_start(),
+                        config,
+                        in_yoko,
+                    ));
                     fragment.push_str(close_tag);
                     fragment.push('\n');
                 }
@@ -1026,12 +1066,38 @@ fn render_lines<'a>(
             }
             if let Some(open_tag) = config.block_open_tags.get(note) {
                 output_count += 1;
+                if note.contains("横組み") {
+                    in_yoko = true;
+                }
                 let open_tag = chapter_id
                     .map(|id| inject_kobo_id(open_tag, &id))
                     .unwrap_or_else(|| open_tag.to_owned());
+                let rest_trimmed = rest.trim();
+                // 同一行クローズ（merge_same_line_block_pieces で結合された片）:
+                // Java は行全体を1バッファで処理し、行頭空白＋開タグ＋内容＋閉タグ
+                // を 1 行に出力する（<p> は付けない）。
+                if !rest_trimmed.is_empty()
+                    && let Some(close_note) = config
+                        .block_close_tags
+                        .keys()
+                        .find(|close_note| rest_trimmed.ends_with(&format!("［＃{close_note}］")))
+                {
+                    let marker_len = format!("［＃{close_note}］").len();
+                    let content = rest_trimmed[..rest_trimmed.len() - marker_len].trim_end();
+                    let leading_len = line.len() - line.trim_start().len();
+                    fragment.push_str(&line[..leading_len]);
+                    fragment.push_str(&open_tag);
+                    fragment.push_str(&convert_inline_with_yoko(content, config, in_yoko));
+                    fragment.push_str(config.block_close_tags.get(close_note).unwrap());
+                    fragment.push('\n');
+                    if close_note.contains("横組み終わり") {
+                        in_yoko = false;
+                    }
+                    continue;
+                }
                 fragment.push_str(&open_tag);
-                if !rest.trim().is_empty() {
-                    fragment.push_str(&convert_inline(rest.trim_start(), config));
+                if !rest_trimmed.is_empty() {
+                    fragment.push_str(&convert_inline_with_yoko(rest_trimmed, config, in_yoko));
                     fragment.push('\n');
                 } else {
                     fragment.push('\n');
@@ -1044,7 +1110,14 @@ fn render_lines<'a>(
             }
         }
 
-        append_line(&mut fragment, line, config, &mut output_count, chapter_id.as_deref());
+        append_line(
+            &mut fragment,
+            line,
+            config,
+            &mut output_count,
+            chapter_id.as_deref(),
+            in_yoko,
+        );
     }
 
     while let Some(block) = blocks.pop() {
@@ -1054,7 +1127,9 @@ fn render_lines<'a>(
                 fragment.push_str(&close_tag);
                 fragment.push('\n');
             }
-            OpenBlock::Configured { fallback_close_tag, .. } => {
+            OpenBlock::Configured {
+                fallback_close_tag, ..
+            } => {
                 fragment.push_str(&fallback_close_tag);
                 fragment.push('\n');
             }
@@ -1065,7 +1140,15 @@ fn render_lines<'a>(
         fragment.push_str(&close_tag);
         fragment.push('\n');
     } else if let Some(spec) = pending_heading {
-        append_heading(&mut fragment, spec, "", config, &mut output_count, None);
+        append_heading(
+            &mut fragment,
+            spec,
+            "",
+            config,
+            &mut output_count,
+            None,
+            in_yoko,
+        );
     }
 
     if !has_line {
@@ -1223,6 +1306,52 @@ fn split_block_notes(line: &str, markers: &[String]) -> Vec<String> {
     }
     pieces
 }
+
+/// 同一入力行に「開注記のみ片 + 内容片 + 閉注記片」が並ぶとき1片に結合する。
+/// Java は行全体を1つのバッファで注記→タグ置換し、printLineBuffer の
+/// isBlockTag 判定で <p> を付けずに 1 行出力する（例: `　　　<div
+/// class="font-1em30">あ１</div>`）。Rust は行を分割して各片を独立処理
+/// するため、この結合で 1 行化を再現する。
+fn merge_same_line_block_pieces(
+    pieces: Vec<(usize, String)>,
+    config: &AozoraConfig,
+) -> Vec<(usize, String)> {
+    let mut merged: Vec<(usize, String)> = Vec::with_capacity(pieces.len());
+    let mut i = 0;
+    while i < pieces.len() {
+        let (line_index, piece) = &pieces[i];
+        let is_open_only = piece
+            .trim()
+            .strip_prefix("［＃")
+            .and_then(|value| value.strip_suffix('］'))
+            .is_some_and(|note| config.block_open_tags.contains_key(note));
+        if is_open_only
+            && let (Some((li2, content)), Some((li3, close_piece))) =
+                (pieces.get(i + 1), pieces.get(i + 2))
+        {
+            let content_ok = li2 == line_index
+                && !content.trim().is_empty()
+                && !content.trim().starts_with("［＃");
+            let close_note = close_piece
+                .trim()
+                .strip_prefix("［＃")
+                .and_then(|value| value.strip_suffix('］'));
+            if content_ok
+                && li3 == line_index
+                && close_note.is_some_and(|note| config.block_close_tags.contains_key(note))
+            {
+                let combined = format!("{piece}{content}{close_piece}");
+                merged.push((*line_index, combined));
+                i += 3;
+                continue;
+            }
+        }
+        merged.push((*line_index, piece.clone()));
+        i += 1;
+    }
+    merged
+}
+
 fn find_inline_block_note(
     line: &str,
     config: &AozoraConfig,
@@ -1377,6 +1506,7 @@ fn append_heading(
     config: &AozoraConfig,
     output_count: &mut usize,
     chapter_id: Option<&str>,
+    in_yoko: bool,
 ) {
     *output_count += 1;
     fragment.push('<');
@@ -1389,7 +1519,7 @@ fn append_heading(
     fragment.push_str(" class=\"");
     fragment.push_str(spec.class_name);
     fragment.push_str("\">");
-    fragment.push_str(&convert_inline(text, config));
+    fragment.push_str(&convert_inline_with_yoko(text, config, in_yoko));
     fragment.push_str("</");
     fragment.push_str(spec.element);
     fragment.push_str(">\n");
@@ -1452,8 +1582,9 @@ fn append_line(
     config: &AozoraConfig,
     output_count: &mut usize,
     chapter_id: Option<&str>,
+    in_yoko: bool,
 ) {
-    let converted = convert_inline(line, config);
+    let converted = convert_inline_with_yoko(line, config, in_yoko);
     if append_open_image_line(fragment, &converted) {
         return;
     }
@@ -1484,8 +1615,9 @@ fn append_block_line(
     config: &AozoraConfig,
     output_count: &mut usize,
     chapter_id: Option<&str>,
+    in_yoko: bool,
 ) {
-    let converted = convert_inline(line, config);
+    let converted = convert_inline_with_yoko(line, config, in_yoko);
     if append_open_image_line(fragment, &converted) {
         return;
     }

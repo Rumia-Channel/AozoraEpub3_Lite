@@ -3,11 +3,21 @@ const WRC_BREAK_MARKER: char = '\u{0001}';
 const EMPTY_NOTE_KIND: u8 = 0xFF;
 
 pub(super) fn convert_inline(input: &str, config: &AozoraConfig) -> String {
-    convert_inline_with_options(input, config, true, true)
+    convert_inline_with_options(input, config, true, true, false)
+}
+
+/// ブロック横組み（ここから横組み…ここで横組み終わり）内の行変換。
+/// Java の inYoko フィールド相当: 縦書き文字正規化（“→〝 等）を抑止する。
+pub(super) fn convert_inline_with_yoko(
+    input: &str,
+    config: &AozoraConfig,
+    in_yoko: bool,
+) -> String {
+    convert_inline_with_options(input, config, true, true, in_yoko)
 }
 
 fn convert_inline_without_auto_yoko(input: &str, config: &AozoraConfig) -> String {
-    convert_inline_with_options(input, config, false, true)
+    convert_inline_with_options(input, config, false, true, false)
 }
 
 fn convert_inline_with_options(
@@ -15,6 +25,7 @@ fn convert_inline_with_options(
     config: &AozoraConfig,
     auto_yoko: bool,
     allow_upright: bool,
+    in_yoko: bool,
 ) -> String {
     let input = rewrite_character_replacements(input, config);
     // エスケープペア: ＜＜→※《 ＞＞→※》 <<→※《 >>→※》 (Java convertEscapedText)
@@ -25,7 +36,8 @@ fn convert_inline_with_options(
     let input = rewrite_suffix_notes(&input, config);
     let input = rewrite_warichu_breaks(&input);
     let input = rewrite_alternative_gaiji(&input, config);
-    let input = if auto_yoko {
+    let input = if auto_yoko && !in_yoko {
+        // Java: 自動縦中横は inYoko（横組み内）では抑止される
         rewrite_auto_yoko(&input, config)
     } else {
         input
@@ -34,6 +46,8 @@ fn convert_inline_with_options(
     let mut output = String::new();
     let mut index = 0;
     let mut tcy_depth = 0usize;
+    let mut yoko_depth = usize::from(in_yoko);
+    let mut in_mado = false;
     let mut link_started = false;
     let mut implicit_ruby_open = false;
     while index < chars.len() {
@@ -124,11 +138,39 @@ fn convert_inline_with_options(
             index = end;
             continue;
         }
+        // Java: 窓*見出しは行頭のみ対応。行単位の inMado 状態で、行頭でない
+        // 窓中見出し（2個目以降）はタグを出力しない（noTagAppend=true 相当）。
+        if chars[index] == '［'
+            && chars.get(index + 1) == Some(&'＃')
+            && let Some(close_offset) = chars[index + 2..].iter().position(|&c| c == '］')
+        {
+            let note: String = chars[index + 2..index + 2 + close_offset].iter().collect();
+            if note.starts_with('窓') && config.inline_notes.contains_key(&note) {
+                let end = index + 2 + close_offset + 1;
+                let prefix: String = chars[..index].iter().collect();
+                let suppress = !in_mado && !strip_chuki_whitespace(&prefix).is_empty();
+                if !suppress {
+                    in_mado = !in_mado || !note.ends_with("終わり");
+                    if let Some(tag) = config.inline_notes.get(&note) {
+                        output.push_str(tag);
+                    }
+                }
+                index = end;
+                continue;
+            }
+        }
         if let Some((end, replacement)) = parse_inline_note(&chars, index, config) {
             if is_tcy_open(&replacement, config) {
                 tcy_depth += 1;
             } else if is_tcy_close(&replacement, config) {
                 tcy_depth = tcy_depth.saturating_sub(1);
+            }
+            // Java: 注記名の接尾辞で横組み開始/終了を判定（endsWith("横組み"/"横組み終わり")）
+            let note_name = &chars[index + 2..end - 1];
+            if note_name.ends_with(&['横', '組', 'み', '終', 'わ', 'り']) {
+                yoko_depth = yoko_depth.saturating_sub(1);
+            } else if note_name.ends_with(&['横', '組', 'み']) {
+                yoko_depth += 1;
             }
             output.push_str(&replacement);
             index = end;
@@ -221,10 +263,10 @@ fn convert_inline_with_options(
             && (ruby_base_kind(chars[index - 1]).is_some()
                 || latin_bracket_start_ending_at(&chars, index).is_some()
                 || image_note_start_ending_at(&chars, index).is_some()
-                || gaiji_note_start_ending_at(&chars, index)
-                    .is_some_and(|note_start| {
-                        note_rendered_kind(&chars[note_start..index], config).is_some_and(|kind| kind != EMPTY_NOTE_KIND)
-                    })
+                || gaiji_note_start_ending_at(&chars, index).is_some_and(|note_start| {
+                    note_rendered_kind(&chars[note_start..index], config)
+                        .is_some_and(|kind| kind != EMPTY_NOTE_KIND)
+                })
                 || unicode_note_start_ending_at(&chars, index, config).is_some_and(|note_start| {
                     note_rendered_kind(&chars[note_start..index], config)
                         .is_some_and(|kind| kind != EMPTY_NOTE_KIND)
@@ -357,6 +399,7 @@ fn convert_inline_with_options(
             index,
             config,
             allow_upright && tcy_depth == 0,
+            yoko_depth > 0,
         );
     }
     if implicit_ruby_open {
@@ -364,6 +407,28 @@ fn convert_inline_with_options(
     }
     output
 }
+
+/// Java: 行頭プレフィクスから ［＃…］ 注記を除去し、半角/全角空白のみなら空文字列。
+/// 窓*見出しの「行頭のみ対応」判定（AozoraEpub3Converter.java:1954 相当）に使用。
+fn strip_chuki_whitespace(prefix: &str) -> String {
+    let chars: Vec<char> = prefix.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '［'
+            && chars.get(i + 1) == Some(&'＃')
+            && let Some(close) = chars[i + 2..].iter().position(|&c| c == '］')
+        {
+            i += 2 + close + 1;
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out.retain(|c| c != ' ' && c != '　');
+    out
+}
+
 /// ＜＜・＞＞・<<・>> の2連続を ※《・※》・※《・※》 へ変換する。
 /// 3連続以上の連続では変換しない（Java convertEscapedText と同じ条件）。
 fn rewrite_escape_pairs(input: &str) -> String {
@@ -555,13 +620,7 @@ fn rewrite_suffix_notes(input: &str, config: &AozoraConfig) -> String {
                 if let Some(rule) = config.suffix_notes.get(&suffix) {
                     let prefix = chars[..index].iter().collect::<String>();
                     if suffix_target_range(&prefix, &target).is_some() && selected.is_none() {
-                        selected = Some((
-                            index,
-                            end,
-                            target,
-                            rule.start.clone(),
-                            rule.end.clone(),
-                        ));
+                        selected = Some((index, end, target, rule.start.clone(), rule.end.clone()));
                     }
                 }
                 index = end;
@@ -726,7 +785,7 @@ fn contains_literal_gaiji_note(input: &str) -> bool {
 }
 
 fn convert_ruby_reading(reading: &str, config: &AozoraConfig) -> String {
-    convert_inline_with_options(reading, config, false, false)
+    convert_inline_with_options(reading, config, false, false, false)
 }
 fn rewrite_auto_yoko(input: &str, config: &AozoraConfig) -> String {
     if !config.vertical || !config.auto_yoko {
@@ -1009,8 +1068,6 @@ fn suffix_visible_text(input: &str) -> String {
     output
 }
 
-
-
 fn suffix_target_range_by_len(prefix: &str, target_len: usize) -> Option<(usize, usize)> {
     if target_len == 0 {
         return None;
@@ -1112,7 +1169,7 @@ fn render_gaiji_replacement(input: &str, config: &AozoraConfig, allow_upright: b
             index += 1;
             continue;
         }
-        index += push_text_char(&mut output, &chars, index, config, allow_upright);
+        index += push_text_char(&mut output, &chars, index, config, allow_upright, false);
     }
     output
 }
@@ -1215,7 +1272,10 @@ fn parse_gaiji_note(
         .or_else(|| config.gaiji.get(&key_note))
         .or_else(|| config.gaiji.get(&normalized_key_note))
     {
-        return Some((end, render_gaiji_replacement(replacement, config, allow_upright)));
+        return Some((
+            end,
+            render_gaiji_replacement(replacement, config, allow_upright),
+        ));
     }
     if let Some(replacement) = jis_note_replacement(bare_note, config, allow_upright) {
         return Some((end, replacement));
@@ -1237,11 +1297,7 @@ fn parse_gaiji_note(
 /// Resolves JIS X 0213 丸数字 codes (1面 8/12/13区) used by the reference
 /// converter's JisConverter table. Only the JIS code part (after the last
 /// `、` or after the 第3/第4水準 marker) is parsed.
-fn jis_note_replacement(
-    note: &str,
-    config: &AozoraConfig,
-    allow_upright: bool,
-) -> Option<String> {
+fn jis_note_replacement(note: &str, config: &AozoraConfig, allow_upright: bool) -> Option<String> {
     let code_part = if let Some(position) = note.find("第3水準") {
         &note[position + "第3水準".len()..]
     } else if let Some(position) = note.find("第4水準") {
@@ -1256,7 +1312,11 @@ fn jis_note_replacement(
     let row = parts.next()?.parse::<u8>().ok()?;
     let cell = parts.next()?.parse::<u8>().ok()?;
     let character = jis_to_unicode(plane, row, cell)?;
-    Some(render_gaiji_replacement(&character.to_string(), config, allow_upright))
+    Some(render_gaiji_replacement(
+        &character.to_string(),
+        config,
+        allow_upright,
+    ))
 }
 
 /// JIS X 0213 1面 8区(㉑-㊿)・12区(❶-❿,⓫-⓴)・13区(①-⑳) → Unicode.
@@ -1442,7 +1502,6 @@ fn raw_tag_attribute<'a>(tag: &'a str, attribute: &str) -> Option<&'a str> {
     Some(&value[..end])
 }
 
-
 fn parse_raw_anchor(chars: &[char], start: usize) -> Option<(usize, String)> {
     let end = chars
         .iter()
@@ -1453,9 +1512,11 @@ fn parse_raw_anchor(chars: &[char], start: usize) -> Option<(usize, String)> {
     let lower = raw.to_ascii_lowercase();
     let replacement = if lower == "</a>" {
         "</a>".to_owned()
-    } else if lower.starts_with("<a") {
-        // Java: href が http または # で始まる場合のみタグを出力し、
-        // それ以外（name のみ・その他 href）は破棄する
+    } else if lower.starts_with("<a ") {
+        // Java: ゲートは `<a `（半角空白必須）。href が http または # で
+        // 始まる場合のみタグを出力し、それ以外（name のみ・その他 href）は
+        // 破棄する。`<A>`/`<A1>`/`<AB>`/`<ab …>` は本文テキストとして
+        // エスケープ保持される（後段の push_text_char で &lt;…&gt; 化）。
         if let Some(href) = raw_tag_attribute(&raw, "href") {
             if href.contains('"') || href.contains('<') || href.contains('>') {
                 return None;
@@ -1703,17 +1764,21 @@ pub fn collect_image_alts(input: &str, config: &mut AozoraConfig) {
             if !description.is_empty()
                 && let Some(stem) = image_stem(&path)
             {
-                config
-                    .image_alt_map
-                    .insert(stem, description.to_owned());
+                config.image_alt_map.insert(stem, description.to_owned());
             }
             index = end;
             continue;
         }
         if chars[index] == '<'
-            && chars.get(index + 1).is_some_and(|c| c.eq_ignore_ascii_case(&'i'))
-            && chars.get(index + 2).is_some_and(|c| c.eq_ignore_ascii_case(&'m'))
-            && chars.get(index + 3).is_some_and(|c| c.eq_ignore_ascii_case(&'g'))
+            && chars
+                .get(index + 1)
+                .is_some_and(|c| c.eq_ignore_ascii_case(&'i'))
+            && chars
+                .get(index + 2)
+                .is_some_and(|c| c.eq_ignore_ascii_case(&'m'))
+            && chars
+                .get(index + 3)
+                .is_some_and(|c| c.eq_ignore_ascii_case(&'g'))
         {
             let Some(end_offset) = chars[index..]
                 .iter()
@@ -1725,8 +1790,8 @@ pub fn collect_image_alts(input: &str, config: &mut AozoraConfig) {
             let raw = chars[index..end].iter().collect::<String>();
             let alt = raw_tag_attribute(&raw, "alt").unwrap_or_default().trim();
             if !alt.is_empty()
-                && let Some(source) =
-                    raw_tag_attribute(&raw, "src").and_then(|source| normalize_image_path(source.trim()))
+                && let Some(source) = raw_tag_attribute(&raw, "src")
+                    .and_then(|source| normalize_image_path(source.trim()))
                 && let Some(stem) = image_stem(&source)
             {
                 config.image_alt_map.insert(stem, alt.to_owned());
@@ -1778,7 +1843,9 @@ fn parse_inline_note(
     };
     let note = chars[start + 2..close].iter().collect::<String>();
     // 訓点送り仮名・返り点: ［＃（X）］ → 行右小書き（. を含む外字画像は除外）
-    if let Some(inner) = note.strip_prefix('（').and_then(|value| value.strip_suffix('）'))
+    if let Some(inner) = note
+        .strip_prefix('（')
+        .and_then(|value| value.strip_suffix('）'))
         && !note.contains('.')
         && !inner.is_empty()
     {
@@ -1812,6 +1879,10 @@ fn should_preserve_unconverted_note(note: &str) -> bool {
         && !note.contains("」に「")
         && !note.ends_with("の注記")
 }
+/// 自動縦中横（rewrite_auto_yoko）が生成した tcy タグのみ素通しする。
+/// Java は convertTcyText でタグを生成した後に convertReplacedChar が
+/// 文字変換を行うため、tcy タグはエスケープされない。それ以外の生タグ
+/// （入力中の `<br/>` 等）は Java と同じく本文テキストとしてエスケープされる。
 fn parse_configured_markup(
     chars: &[char],
     start: usize,
@@ -1826,11 +1897,7 @@ fn parse_configured_markup(
         .skip(start + 1)
         .find_map(|(index, character)| (*character == '>').then_some(index))?;
     let markup = chars[start..=close].iter().collect::<String>();
-    config
-        .inline_notes
-        .values()
-        .any(|value| value == &markup)
-        .then_some((close + 1, markup))
+    (is_tcy_open(&markup, config) || is_tcy_close(&markup, config)).then_some((close + 1, markup))
 }
 
 fn is_tcy_open(markup: &str, config: &AozoraConfig) -> bool {
@@ -1847,6 +1914,7 @@ fn push_text_char(
     index: usize,
     config: &AozoraConfig,
     allow_upright: bool,
+    in_yoko: bool,
 ) -> usize {
     // Single-character replacement (replace.txt): the result is emitted raw,
     // exactly like the reference replaceMap, so it is not re-normalized.
@@ -1900,7 +1968,7 @@ fn push_text_char(
         }
     }
 
-    let character = normalize_vertical_character(chars[index], config.vertical);
+    let character = normalize_vertical_character(chars[index], config.vertical, in_yoko);
     if allow_upright && is_upright_character(character) {
         output.push_str("<span class=\"upr\">");
         push_text_char_escaped(output, character);
@@ -1919,15 +1987,16 @@ fn normalize_dakuten_mark(character: char) -> Option<char> {
     }
 }
 
-fn normalize_vertical_character(character: char, vertical: bool) -> char {
-    match (vertical, character) {
-        (true, '≪') | (false, '≪') => '《',
-        (true, '≫') | (false, '≫') => '》',
-        (true, '“') => '〝',
-        (true, '”') => '〟',
-        (_, '―') => '─',
-        (_, '゙') => '゛',
-        (_, '゚') => '゜',
+fn normalize_vertical_character(character: char, vertical: bool, in_yoko: bool) -> char {
+    match (vertical, in_yoko, character) {
+        (_, _, '≪') => '《',
+        (_, _, '≫') => '》',
+        // Java convertReplacedChar: “→〝 ”→〟 は縦書きかつ横組み外のみ（inYoko で抑止）
+        (true, false, '“') => '〝',
+        (true, false, '”') => '〟',
+        (_, _, '―') => '─',
+        (_, _, '゙') => '゛',
+        (_, _, '゚') => '゜',
         _ => character,
     }
 }
@@ -1969,6 +2038,26 @@ fn is_upright_character(character: char) -> bool {
 △▽▲▼☆★♂♀♪♭§†‡‼⁇⁉⁈©®⁑⁂◐◑◒◓▷▶◁◀\
 ♤♠♢♦♡♥♧♣❤☖☗☎☁☂☃♨▱⊿✿☹☺☻✓✔␣⏎♩♮♫♬ℓ№℡ℵℏ℧";
     UPRIGHT.contains(character)
+}
+
+/// Java: printImageChuki で escapeHtml された alt を含む行バッファ全体が
+/// 事後変換（convertReplacedChar の正立処理）を通るため、alt 文字列内でも
+/// 正立文字は <span class="upr"> で括られる。
+pub fn apply_alt_upright(alt: &str, config: &AozoraConfig) -> String {
+    if !config.vertical {
+        return alt.to_owned();
+    }
+    let mut out = String::with_capacity(alt.len());
+    for c in alt.chars() {
+        if is_upright_character(c) {
+            out.push_str("<span class=\"upr\">");
+            out.push(c);
+            out.push_str("</span>");
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn find_ruby_bounds(chars: &[char], start: usize) -> Option<(usize, usize)> {
@@ -2050,10 +2139,7 @@ fn ruby_base_kind(character: char) -> Option<u8> {
         | 0x4e00..=0x9fff
         | 0xf900..=0xfaff
         | 0x20000..=0x2ffff => Some(0),
-        0x3041..=0x3096
-        | 0x309b..=0x309e
-        | 0x30fc
-        | 0x30fd..=0x30fe => Some(1),
+        0x3041..=0x3096 | 0x309b..=0x309e | 0x30fc | 0x30fd..=0x30fe => Some(1),
         0x30a1..=0x30fa | 0xff61..=0xff9f => Some(2),
         0x20..=0x7e | 0xa0..=0x2af => Some(3),
         0xff10..=0xff19 | 0xff21..=0xff3a | 0xff41..=0xff5a => Some(4),
@@ -2129,13 +2215,18 @@ fn push_ruby_part(
     // Java: 基底と読仮名が同じ長さで読仮名が同一文字なら一文字ずつルビを振る
     if base_chars.len() == reading_chars.len()
         && base_chars.len() > 1
-        && reading_chars.iter().all(|character| *character == reading_chars[0])
+        && reading_chars
+            .iter()
+            .all(|character| *character == reading_chars[0])
     {
         for (base_char, reading_char) in base_chars.iter().zip(reading_chars.iter()) {
             if allow_auto_yoko {
                 output.push_str(&convert_inline(&base_char.to_string(), config));
             } else {
-                output.push_str(&convert_inline_without_auto_yoko(&base_char.to_string(), config));
+                output.push_str(&convert_inline_without_auto_yoko(
+                    &base_char.to_string(),
+                    config,
+                ));
             }
             output.push_str("<rt>");
             output.push_str(&convert_ruby_reading(&reading_char.to_string(), config));
@@ -2185,9 +2276,3 @@ fn push_text_char_escaped(output: &mut String, character: char) {
         _ => output.push(character),
     }
 }
-
-
-
-
-
-

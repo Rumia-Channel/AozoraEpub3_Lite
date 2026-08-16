@@ -43,7 +43,9 @@ fn writes_epub3_layout_with_uncompressed_mimetype_first() {
         .unwrap()
         .read_to_string(&mut section)
         .unwrap();
-    assert!(section.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!DOCTYPE html>\r\n"));
+    assert!(
+        section.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!DOCTYPE html>\r\n")
+    );
     assert!(section.contains("<html\r\n xmlns=\"http://www.w3.org/1999/xhtml\""));
     assert!(section.contains("xmlns:epub=\"http://www.idpf.org/2007/ops\""));
 }
@@ -332,5 +334,3 @@ fn renders_middle_and_bottom_pages_with_horizontal_document_class() {
         }
     }
 }
-
-

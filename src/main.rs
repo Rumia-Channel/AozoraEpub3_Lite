@@ -1,9 +1,9 @@
 use aozora_epub3_lite::{
-    AozoraConfig, BookMeta, EpubAsset, EpubBook, EpubMetadata, Input, NavChapter, TextEntry,
-    ChapterRecord, TitleType, aozora_text_to_xhtml_sections_with_chapters,
-    collect_image_alts, decode_text,
-    detect_meta_with_gaiji, escape_html, file_title_creator, image::process as process_image,
-    image_reference_occurrences, image_references, inline_to_xhtml,
+    AozoraConfig, BookMeta, ChapterRecord, EpubAsset, EpubBook, EpubMetadata, Input, NavChapter,
+    TextEntry, TitleType, aozora_text_to_xhtml_sections_with_chapters, apply_alt_upright,
+    collect_image_alts, decode_text, detect_meta_with_gaiji, escape_html, file_title_creator,
+    image::process as process_image, image_reference_occurrences, image_references,
+    inline_to_xhtml,
 };
 use std::env;
 use std::error::Error;
@@ -198,12 +198,22 @@ fn convert_input(
         // The reference pre-read consumes the first-chapter slot at the title
         // line; the body scan therefore starts without a pending chapter.
         let initial_add_section_chapter = detected.title_line.is_none();
+        // Java は1入力1プロセスで imageAltMap を初期化するため、入力ごとに破棄する
+        config.image_alt_map.clear();
         collect_image_alts(&body_text, config);
-        let (mut sections, mut chapter_records) =
-            aozora_text_to_xhtml_sections_with_chapters(&body_text, config, initial_add_section_chapter)?;
-        let title_page_selected = config.title_page_write && matches!(config.title_page_type, 1 | 2);
+        let (mut sections, mut chapter_records) = aozora_text_to_xhtml_sections_with_chapters(
+            &body_text,
+            config,
+            initial_add_section_chapter,
+        )?;
+        let title_page_selected =
+            config.title_page_write && matches!(config.title_page_type, 1 | 2);
         let cover_setting = options.cover.as_deref();
         let (assets, cover) = collect_assets(&input, entry, &text, cover_setting, config)?;
+        // 装飾を書き換え前に実行: 書き換え前の src（../image/{参照名}）から
+        // 参照単位の available（拡張子違いの解決有無）を判定する。Java の
+        // getImageWidthRatio(srcFilePath) は元の参照名で引けなければ ratio=0 → fit。
+        decorate_image_tags(&mut sections, &assets, config);
         for collected in &assets {
             for reference in &collected.references {
                 if collected.resolved != *reference {
@@ -220,21 +230,19 @@ fn convert_input(
             &image_references(&text),
             &resolved_references,
         );
-        let missing_sources = assets
-            .iter()
-            .map(|item| !item.original_available)
-            .collect::<Vec<_>>();
         let mut assets = assets
             .into_iter()
             .map(|item| item.asset)
             .collect::<Vec<_>>();
-        decorate_image_tags(&mut sections, &assets, &missing_sources, config);
         reflow_image_sections(&mut sections, &mut chapter_records, &assets, config);
 
         let nav_chapters = chapter_records
             .into_iter()
             .map(|record| {
-                NavChapter::new(record.label, format!("xhtml/{:04}.xhtml", record.section_index + 1))
+                NavChapter::new(
+                    record.label,
+                    format!("xhtml/{:04}.xhtml", record.section_index + 1),
+                )
             })
             .collect::<Vec<_>>();
         let title_markup_input = if options.use_file_name {
@@ -375,21 +383,13 @@ fn remove_metadata_lines(input: &str, metadata: &BookMeta) -> String {
         remove_end += 1;
     }
 
-    let mut retained = lines
+    let retained = lines
         .into_iter()
         .enumerate()
         .filter_map(|(index, line)| (index < remove_start || index > remove_end).then_some(line))
         .collect::<Vec<_>>();
-    if remove_start == 0
-        && retained
-            .iter()
-            .find(|line| !line.trim().is_empty())
-            .is_some_and(|line| line.starts_with("-----"))
-    {
-        while retained.first().is_some_and(|line| line.trim().is_empty()) {
-            retained.remove(0);
-        }
-    }
+    // Java はタイトル行後の空行を `<p><br/></p>` として本文に出力するため、
+    // タイトル行の除去に伴う先頭空行の削除は行わない。
     retained.join("\n")
 }
 
@@ -465,11 +465,13 @@ fn convert_image_only(
                 )
             });
         sections.push(fragment);
-        assets.push(EpubAsset::new(
-            format!("image/{output_name}"),
-            media_type,
-            processed_data,
-        ));
+        assets.push(CollectedAsset {
+            asset: EpubAsset::new(format!("image/{output_name}"), media_type, processed_data),
+            references: vec![output_name.clone()],
+            available: vec![true],
+            source: output_name.clone(),
+            resolved: output_name,
+        });
     }
     if assets.is_empty() {
         return Err(io::Error::new(
@@ -485,8 +487,7 @@ fn convert_image_only(
         None,
         options.language.as_deref(),
     );
-    let missing_sources = vec![false; assets.len()];
-    decorate_image_tags(&mut sections, &assets, &missing_sources, config);
+    decorate_image_tags(&mut sections, &assets, config);
     let output = output_path(
         input_path,
         options.dst.as_deref().map(Path::new),
@@ -512,7 +513,12 @@ fn convert_image_only(
         .with_vertical(vertical)
         .with_kindle(is_kindle(options))
         .with_chapters(chapters)
-        .with_assets(assets);
+        .with_assets(
+            assets
+                .into_iter()
+                .map(|item| item.asset)
+                .collect::<Vec<_>>(),
+        );
     let file = File::create(&output)?;
     book.write_to(file)?;
     Ok(())
@@ -639,15 +645,16 @@ struct CollectedAsset {
     asset: EpubAsset,
     /// Paths as referenced in the text (e.g. `"fig.png"`).
     references: Vec<String>,
+    /// `references` と同順: 各参照が元の名前のまま解決できたか。
+    /// Java は `getImageWidthRatio(srcFilePath)` を元の参照名で引き、
+    /// 拡張子違い（例: `img/x.jpg` → 実体 `img/x.png`）では null となり
+    /// ratio=0 → `fit` テンプレートになる。
+    available: Vec<bool>,
     /// Resolved filesystem or archive path used to deduplicate references.
     source: String,
     /// Path the asset is stored at inside the EPUB (without the `image/`
     /// prefix).
     resolved: String,
-    /// Whether the original reference (before extension fallback) existed
-    /// on disk; mirrors Java's `getImageInfo` which returns null for
-    /// missing/unknown-extension sources, yielding the `fit` template.
-    original_available: bool,
 }
 
 /// Collects EPUB assets for all image references in the text (plus the
@@ -700,6 +707,7 @@ fn collect_assets(
         })?;
         if let Some(existing) = assets.iter_mut().find(|asset| asset.source == source_path) {
             existing.references.push(reference);
+            existing.available.push(original_available);
             continue;
         }
         let output_name = format!("{:04}.{extension}", image_index);
@@ -715,9 +723,9 @@ fn collect_assets(
         assets.push(CollectedAsset {
             asset: EpubAsset::new(epub_path, media_type, data),
             references: vec![reference],
+            available: vec![original_available],
             source: source_path,
             resolved: output_name,
-            original_available,
         });
     }
 
@@ -745,9 +753,9 @@ fn collect_assets(
             assets.push(CollectedAsset {
                 asset: EpubAsset::new(epub_path.clone(), media_type, data),
                 references: Vec::new(),
+                available: Vec::new(),
                 source: source.to_string_lossy().replace('\\', "/"),
                 resolved: output_name,
-                original_available: true,
             });
             cover_asset = Some(epub_path);
         }
@@ -772,9 +780,9 @@ fn collect_assets(
                 assets.push(CollectedAsset {
                     asset: EpubAsset::new(epub_path.clone(), media_type, data),
                     references: Vec::new(),
+                    available: Vec::new(),
                     source: normalized,
                     resolved: output_name,
-                    original_available: true,
                 });
                 cover_asset = Some(epub_path);
             } else {
@@ -1199,10 +1207,9 @@ fn image_page_fit(
     if image_width <= display_width && image_height < display_height {
         return ImagePageFit::None;
     }
-    match image_setting_usize(config, "ImageSizeType", 2) {
-        // Java: ImageHeight はヘッダ出力後に設定されるため単ページ img に style は付かない
-        _ => ImagePageFit::None,
-    }
+    // Java: ImageHeight はヘッダ出力後に設定されるため単ページ img に style は付かない
+    let _ = image_setting_usize(config, "ImageSizeType", 2);
+    ImagePageFit::None
 }
 
 fn image_float_type(dimensions: ImageDimensions, config: &AozoraConfig) -> Option<(usize, bool)> {
@@ -1263,6 +1270,19 @@ fn should_split_image_page(
         && !image_setting_bool(config, "ImageFloatPage", false)
 }
 
+/// 単ページ画像行の `<p>…</p>` ラッパーを除去して `<span>` のみにする。
+/// Java は printImagePage → printLineBuffer(noBr=true) で p を付けずに出力する。
+fn unwrap_image_paragraph(line: &str) -> String {
+    match line
+        .trim()
+        .strip_prefix("<p>")
+        .and_then(|value| value.strip_suffix("</p>"))
+    {
+        Some(inner) => format!("{inner}\n"),
+        None => line.to_owned(),
+    }
+}
+
 fn is_empty_paragraph_fragment(fragment: &str) -> bool {
     let fragment = fragment
         .replace('\r', "")
@@ -1312,9 +1332,9 @@ fn split_image_page_sections(
         {
             if !prefix.trim().is_empty() && !is_empty_paragraph_fragment(&prefix) {
                 output.push(prefix);
-                output.push(line.to_owned());
+                output.push(unwrap_image_paragraph(line));
             } else {
-                output.push(format!("{prefix}{line}"));
+                output.push(format!("{prefix}{}", unwrap_image_paragraph(line)));
             }
             current.clear();
         } else {
@@ -1459,8 +1479,7 @@ fn render_image_tag(
 
 fn decorate_image_tags(
     sections: &mut [String],
-    assets: &[EpubAsset],
-    missing_sources: &[bool],
+    collected_assets: &[CollectedAsset],
     config: &AozoraConfig,
 ) {
     let display_width = image_setting_f32(config, "DispW", 600.0);
@@ -1482,18 +1501,25 @@ fn decorate_image_tags(
                 cursor = end;
                 continue;
             };
-            let Some(asset) = source
-                .strip_prefix("../")
-                .and_then(|path| assets.iter().find(|asset| asset.path == path))
+            let reference_name = source.strip_prefix("../image/").unwrap_or(source);
+            let Some(collected) = collected_assets
+                .iter()
+                .find(|collected| collected.references.iter().any(|r| r == reference_name))
             else {
                 cursor = end;
                 continue;
             };
-            let asset_index = assets
+            let asset = &collected.asset;
+            let reference_index = collected
+                .references
                 .iter()
-                .position(|candidate| candidate == asset)
+                .position(|r| r == reference_name)
                 .unwrap_or(0);
-            let source_missing = missing_sources.get(asset_index).copied().unwrap_or(false);
+            let source_missing = !collected
+                .available
+                .get(reference_index)
+                .copied()
+                .unwrap_or(false);
             let Some(dimensions) = image_dimensions(&asset.data, &asset.media_type) else {
                 cursor = end;
                 continue;
@@ -1515,7 +1541,11 @@ fn decorate_image_tags(
             } else {
                 image_width_ratio(dimensions, config, has_caption)
             };
-            let alt = escape_image_alt(tag_attribute(tag, "alt").unwrap_or_default().trim());
+            // Java: 行バッファ全体の事後変換で alt 内の正立文字も <span class="upr"> 化される
+            let alt = apply_alt_upright(
+                &escape_image_alt(tag_attribute(tag, "alt").unwrap_or_default().trim()),
+                config,
+            );
             let wrapper =
                 image_wrapper_range(&original, start).filter(|(wrapper_start, wrapper_end)| {
                     &original[*wrapper_start..*wrapper_end] == "<span>"
@@ -2009,10 +2039,10 @@ fn usage() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        AozoraConfig, CliOptions, EpubAsset, ImageDimensions, ImagePageType, TitleType,
-        apply_ini_defaults, decorate_image_tags, external_settings_path, image_dimensions,
-        image_page_type, java_name_uuid, output_path, parse_args, reflow_image_sections,
-        remove_metadata_lines, remove_missing_image_sources, should_rotate,
+        AozoraConfig, CliOptions, CollectedAsset, EpubAsset, ImageDimensions, ImagePageType,
+        TitleType, apply_ini_defaults, decorate_image_tags, external_settings_path,
+        image_dimensions, image_page_type, java_name_uuid, output_path, parse_args,
+        reflow_image_sections, remove_metadata_lines, remove_missing_image_sources, should_rotate,
         usage,
     };
     use aozora_epub3_lite::{IniSettings, decode_text, detect_meta};
@@ -2020,6 +2050,22 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<CliOptions, String> {
         parse_args(args.iter().map(|value| value.to_string()))
+    }
+
+    /// 1参照1assetの CollectedAsset を構築（src は `../image/{参照名}` の形式）。
+    fn collected(asset: EpubAsset) -> CollectedAsset {
+        let reference = asset
+            .path
+            .strip_prefix("image/")
+            .unwrap_or(&asset.path)
+            .to_owned();
+        CollectedAsset {
+            asset,
+            references: vec![reference.clone()],
+            available: vec![true],
+            source: reference.clone(),
+            resolved: reference,
+        }
     }
 
     #[test]
@@ -2233,17 +2279,18 @@ mod tests {
         assert_eq!(remove_metadata_lines(input, &metadata), "\n本文");
     }
     #[test]
-    fn drops_separator_blank_before_hidden_comment_block() {
+    fn keeps_separator_blank_before_hidden_comment_block() {
+        // Java はタイトル行後の空行を `<p><br/></p>` として本文に出力する
         let input =
             "表題\n著者名\n\n-------------------------------------------------------\n注記\n本文";
         let metadata = detect_meta(input, TitleType::TitleAuthor, false);
         assert_eq!(
             remove_metadata_lines(input, &metadata),
-            "-------------------------------------------------------\n注記\n本文"
+            "\n-------------------------------------------------------\n注記\n本文"
         );
     }
     #[test]
-    fn removes_separator_blank_from_gaiji_title_fixture() {
+    fn keeps_separator_blank_from_gaiji_title_fixture() {
         let input = "｜ルビ※［＃米印］《るび》※［＃米印］※［＃始め二重山括弧］※［＃終わり二重山括弧］\n\
                      テスト《てすと》\n\
                      \n\
@@ -2258,11 +2305,11 @@ mod tests {
         );
         assert_eq!(
             remove_metadata_lines(input, &metadata),
-            "-------------------------------------------------------\n注記"
+            "\n-------------------------------------------------------\n注記"
         );
     }
     #[test]
-    fn removes_separator_blank_from_real_ruby_fixture() {
+    fn keeps_separator_blank_from_real_ruby_fixture() {
         let bytes = std::fs::read("sample/AozoraEpub3/test_data/test_ruby.txt").unwrap();
         let text = decode_text(&bytes, None).unwrap();
         let config = AozoraConfig::default();
@@ -2272,15 +2319,9 @@ mod tests {
             false,
             &config.gaiji,
         );
+        // Java はタイトル行後の空行を本文に残し `<p><br/></p>` として出力する
         let body = remove_metadata_lines(&text, &metadata);
-        assert!(!body.starts_with('\n'), "{body:?}");
-        let sections =
-            aozora_epub3_lite::aozora_text_to_xhtml_sections_with_config(&body, &config).unwrap();
-        assert!(
-            !sections[0].starts_with("    <p><br/></p>"),
-            "{:?}",
-            sections[0]
-        );
+        assert!(body.starts_with('\n'), "{body:?}");
     }
     #[test]
     fn sanitizes_file_name_hostile_characters() {
@@ -2350,7 +2391,7 @@ mod tests {
         );
         let mut sections =
             vec!["<p><img class=\"fit\" src=\"../image/fig.png\" alt=\"図\"/></p>".to_owned()];
-        decorate_image_tags(&mut sections, &[asset], &[false], &config);
+        decorate_image_tags(&mut sections, &[collected(asset)], &config);
         assert!(sections[0].contains("width=\"1600\" height=\"900\""));
 
         assert!(sections[0].contains("transform: rotate(90deg)"));
@@ -2371,10 +2412,40 @@ mod tests {
             "<p><span><img class=\"fit\" src=\"../image/fig.png\" alt=\"図\"/></span></p>"
                 .to_owned(),
         ];
-        decorate_image_tags(&mut sections, &[asset], &[false], &config);
+        decorate_image_tags(&mut sections, &[collected(asset)], &config);
         assert!(sections[0].contains("<span class=\"img\" style=\"width:76.5%\">"));
         assert!(sections[0].contains("<img style=\"width:100%\""));
         assert!(!sections[0].contains("width=\"459\""));
+    }
+
+    #[test]
+    fn uses_fit_template_for_extension_fallback_references() {
+        // Java: getImageWidthRatio(srcFilePath) は元の参照名（img/fig.jpg）で
+        // 画像を引けなければ ratio=0 となり fit テンプレートになる（拡張子
+        // フォールバックで解決された参照では幅%を付けない）
+        let mut png = vec![0; 24];
+        png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        png[16..20].copy_from_slice(&459u32.to_be_bytes());
+        png[20..24].copy_from_slice(&350u32.to_be_bytes());
+        let asset = EpubAsset::new("image/fig.png", "image/png", png);
+        let collected = CollectedAsset {
+            asset,
+            references: vec!["img/fig.jpg".to_owned()],
+            available: vec![false],
+            source: "img/fig.jpg".to_owned(),
+            resolved: "fig.png".to_owned(),
+        };
+        let config = AozoraConfig::from_ini(
+            IniSettings::parse("DispW=600\nDispH=800\nSinglePageWidth=1000\nImageScale=1\n")
+                .unwrap(),
+        );
+        let mut sections = vec![
+            "<p><span><img class=\"fit\" src=\"../image/img/fig.jpg\" alt=\"図\"/></span></p>"
+                .to_owned(),
+        ];
+        decorate_image_tags(&mut sections, &[collected], &config);
+        assert!(sections[0].contains("class=\"fit\""));
+        assert!(!sections[0].contains("width:"));
     }
 
     #[test]
@@ -2394,7 +2465,7 @@ mod tests {
             "<p><span><img class=\"fit\" src=\"../image/float.png\" alt=\"\"/></span></p>"
                 .to_owned(),
         ];
-        decorate_image_tags(&mut sections, &[asset], &[false], &config);
+        decorate_image_tags(&mut sections, &[collected(asset)], &config);
         assert!(sections[0].contains("<span class=\"img ft\""));
         assert!(sections[0].contains("style=\"width:83.33333333333334%\""));
     }
@@ -2416,7 +2487,7 @@ mod tests {
             "<p><span><img class=\"fit\" src=\"../image/page.png\" alt=\"\"/></span></p>"
                 .to_owned(),
         ];
-        decorate_image_tags(&mut sections, &[asset], &[false], &config);
+        decorate_image_tags(&mut sections, &[collected(asset)], &config);
         assert!(sections[0].contains("<img class=\"fit\""));
         assert!(!sections[0].contains("height:"));
     }
@@ -2441,8 +2512,6 @@ mod tests {
         remove_missing_image_sources(&mut sections, &["missing.png".to_owned()], &[]);
         assert_eq!(sections[0], "<p>前</p>\n<p><br/></p>\n<p>後</p>");
     }
-
-    
 
     #[test]
     fn classifies_large_standalone_images_as_pages() {
@@ -2506,7 +2575,9 @@ mod tests {
         ];
         reflow_image_sections(&mut sections, &mut [], &[asset], &config);
         assert_eq!(sections.len(), 3);
-        assert!(sections[1].contains("<p><span><img"));
+        assert!(sections[1].contains("<span><img"));
+        assert!(sections[1].contains("src=\"../image/large.png\""));
+        assert!(!sections[1].contains("<p>"));
         assert!(sections[0].contains("<p>前</p>"));
         assert!(sections[2].contains("<p>後</p>"));
     }
@@ -2534,6 +2605,4 @@ mod tests {
         assert!(sections[0].contains("<img class=\"fit\""));
         assert!(sections[0].contains("<p>後</p>"));
     }
-
-    
 }

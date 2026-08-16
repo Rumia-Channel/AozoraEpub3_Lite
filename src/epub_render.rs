@@ -437,9 +437,8 @@ pub(super) fn render_nav(
     if chapters.is_empty() && sections.iter().any(is_title_page) {
         // Java: タイトルページを目次の先頭に書籍タイトルで追加する
         let title = xml_escape(&metadata.title);
-        nav_items = format!(
-            "\t\t\t<li><a href=\"xhtml/title.xhtml\">{title}</a>\r\n</li>\r\n{nav_items}"
-        );
+        nav_items =
+            format!("\t\t\t<li><a href=\"xhtml/title.xhtml\">{title}</a>\r\n</li>\r\n{nav_items}");
     }
     let toc_style = if toc_vertical {
         "@page {margin:.5em .5em 0 0;}\r\nhtml {\r\n\twriting-mode: vertical-rl;\r\n\t-webkit-writing-mode: vertical-rl;\r\n\t-epub-writing-mode: vertical-rl;\r\n}\r\nh1 {font-size:1.5em; padding-top:1em;}\r\nli {padding:0 .25em 0 0;}\r\nli a {text-decoration:none; border-right-width:1px; border-right-style:solid; padding-right: 1px;}\r\n.tcy {\r\n  -webkit-text-combine:         horizontal;\r\n  -webkit-text-combine-upright: all;\r\n  text-combine-upright:         all;\r\n  -epub-text-combine:           horizontal;\r\n}\r\n.upr {\r\ntext-orientation: upright;\r\n-webkit-text-orientation: upright;\r\n-epub-text-orientation: upright;\r\n}"
@@ -459,7 +458,9 @@ pub(super) fn render_nav(
         });
     let mut landmark = String::new();
     if sections.iter().any(is_title_page) {
-        landmark.push_str("\t\t\t<li><a epub:type=\"titlepage\" href=\"xhtml/title.xhtml\">扉</a></li>\r\n");
+        landmark.push_str(
+            "\t\t\t<li><a epub:type=\"titlepage\" href=\"xhtml/title.xhtml\">扉</a></li>\r\n",
+        );
     }
     if let Some(path) = first_body {
         landmark.push_str(&format!(
@@ -714,7 +715,8 @@ pub(super) fn render_section(
         }
         title_page_body.push_str("\n\n");
         let layout_class = if vertical { "hltr" } else { "vrtl" };
-        return format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!DOCTYPE html>\r\n<html\r\n xmlns=\"http://www.w3.org/1999/xhtml\"\r\n xmlns:epub=\"http://www.idpf.org/2007/ops\"\r\n xml:lang=\"{language}\"\r\n class=\"{layout_class}\"\r\n>\r\n<head>\r\n<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/book-style.css\"/>\r\n\r\n<title>{title_text}</title>\r\n</head>\r\n\r\n\r\n<body class=\"p-titlepage{kindle_class}\">\r\n<div class=\"main vrtl block-align-center\">{title_page_body}</div>\r\n</body>\r\n</html>\r\n",
+        return format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!DOCTYPE html>\r\n<html\r\n xmlns=\"http://www.w3.org/1999/xhtml\"\r\n xmlns:epub=\"http://www.idpf.org/2007/ops\"\r\n xml:lang=\"{language}\"\r\n class=\"{layout_class}\"\r\n>\r\n<head>\r\n<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/book-style.css\"/>\r\n\r\n<title>{title_text}</title>\r\n</head>\r\n\r\n\r\n<body class=\"p-titlepage{kindle_class}\">\r\n<div class=\"main vrtl block-align-center\">{title_page_body}</div>\r\n</body>\r\n</html>\r\n",
             language = xml_escape(&metadata.language),
             title_text = xml_escape(&metadata.title),
             kindle_class = kindle_class,
@@ -724,7 +726,8 @@ pub(super) fn render_section(
     let (page_class, raw_body_fragment) = section_page_mode(trimmed);
     let body_fragment = dedent_fragment(&sanitize_xhtml_fragment(raw_body_fragment));
     if let Some(image) = image_page_body(&body_fragment) {
-        return format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!DOCTYPE html>\r\n<html\r\n xmlns=\"http://www.w3.org/1999/xhtml\"\r\n xmlns:epub=\"http://www.idpf.org/2007/ops\"\r\n xml:lang=\"{language}\"\r\n class=\"hltr\"\r\n>\r\n<head>\r\n<meta charset=\"UTF-8\"/>\r\n<title>{title}</title>\r\n<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/book-style.css\"/>\r\n\r\n</head>\r\n<body class=\"p-image{kindle_class}\">\r\n<div class=\"main\">\r\n{image}\n</div>\r\n</body>\r\n</html>\r\n",
+        return format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!DOCTYPE html>\r\n<html\r\n xmlns=\"http://www.w3.org/1999/xhtml\"\r\n xmlns:epub=\"http://www.idpf.org/2007/ops\"\r\n xml:lang=\"{language}\"\r\n class=\"hltr\"\r\n>\r\n<head>\r\n<meta charset=\"UTF-8\"/>\r\n<title>{title}</title>\r\n<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/book-style.css\"/>\r\n\r\n</head>\r\n<body class=\"p-image{kindle_class}\">\r\n<div class=\"main\">\r\n{image}\n</div>\r\n</body>\r\n</html>\r\n",
             language = xml_escape(&metadata.language),
             title = xml_escape(&metadata.title),
             image = image,
@@ -733,7 +736,8 @@ pub(super) fn render_section(
     }
     if let Some(svg) = svg_image_body(&body_fragment) {
         let (width, height) = svg_view_box(svg).unwrap_or((1, 1));
-        return format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!DOCTYPE html>\r\n<html\r\nxmlns=\"http://www.w3.org/1999/xhtml\"\r\nxmlns:epub=\"http://www.idpf.org/2007/ops\"\r\nxml:lang=\"{language}\"\r\n>\r\n<head>\r\n<meta charset=\"UTF-8\"/>\r\n<title>{title}</title>\r\n<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/fixed-layout-jp.css\"/>\r\n<meta name=\"viewport\" content=\"width={width}, height={height}\"/>\r\n</head>\r\n<body>\r\n<div class=\"main\">\r\n{svg}\n</div>\r\n</body>\r\n</html>\r\n",
+        return format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!DOCTYPE html>\r\n<html\r\nxmlns=\"http://www.w3.org/1999/xhtml\"\r\nxmlns:epub=\"http://www.idpf.org/2007/ops\"\r\nxml:lang=\"{language}\"\r\n>\r\n<head>\r\n<meta charset=\"UTF-8\"/>\r\n<title>{title}</title>\r\n<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/fixed-layout-jp.css\"/>\r\n<meta name=\"viewport\" content=\"width={width}, height={height}\"/>\r\n</head>\r\n<body>\r\n<div class=\"main\">\r\n{svg}\n</div>\r\n</body>\r\n</html>",
             language = xml_escape(&metadata.language),
             title = xml_escape(&metadata.title),
             width = width,
@@ -766,7 +770,8 @@ pub(super) fn render_section(
     } else {
         format!("<div class=\"main\">\n{body_fragment}\n</div>")
     };
-    format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!DOCTYPE html>\r\n<html\r\n xmlns=\"http://www.w3.org/1999/xhtml\"\r\n xmlns:epub=\"http://www.idpf.org/2007/ops\"\r\n xml:lang=\"{language}\"\r\n class=\"{layout_class}\"\r\n>\r\n<head>\r\n<meta charset=\"UTF-8\"/>\r\n<title>{title}</title>\r\n<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/book-style.css\"/>\r\n\r\n</head>\r\n<body{rendered_page_class}>\r\n{body}\n</body>\r\n</html>\r\n",
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!DOCTYPE html>\r\n<html\r\n xmlns=\"http://www.w3.org/1999/xhtml\"\r\n xmlns:epub=\"http://www.idpf.org/2007/ops\"\r\n xml:lang=\"{language}\"\r\n class=\"{layout_class}\"\r\n>\r\n<head>\r\n<meta charset=\"UTF-8\"/>\r\n<title>{title}</title>\r\n<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/book-style.css\"/>\r\n\r\n</head>\r\n<body{rendered_page_class}>\r\n{body}\n</body>\r\n</html>\r\n",
         language = xml_escape(&metadata.language),
         title = xml_escape(&metadata.title),
         layout_class = layout_class,
@@ -910,6 +915,7 @@ fn section_page_mode(body: &str) -> (&'static str, &str) {
 fn image_page_body(body: &str) -> Option<&str> {
     // Java は単ページ画像セクションのみ <span><img class="fit"> を p 無しで出力し
     // <html class="hltr"> + <body class="p-image"> にする。本文中の fit は p 内 span。
+    // 単ページ画像セクションの p 除去は split_image_page_sections 側で行う。
     let body = body.trim();
     if body.starts_with("<span><img class=\"fit\"") && body.ends_with("</span>") {
         return Some(body);

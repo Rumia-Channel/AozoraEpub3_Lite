@@ -215,11 +215,13 @@ fn auto_combines_ruby_bases_when_auto_yoko_is_enabled() {
     assert!(!explicit.contains("<ruby><span class=\"tcy\">29</span>"));
 }
 #[test]
-fn keeps_auto_yoko_markup_inside_horizontal_blocks() {
+fn suppresses_auto_yoko_markup_inside_horizontal_blocks() {
+    // Java: 自動縦中横は inYoko（横組み内）では抑止される
     let output =
         plain_text_to_xhtml("［＃ここから横組み］\n横組み100円\n［＃ここで横組み終わり］").unwrap();
-    assert!(output.contains("<span class=\"tcy\">100</span>"));
+    assert!(!output.contains("<span class=\"tcy\">100</span>"));
     assert!(!output.contains("&lt;span class=&quot;tcy&quot;"));
+    assert!(output.contains("<p>横組み100円</p>"));
 }
 
 #[test]
@@ -746,16 +748,11 @@ fn chapter_names_keep_fullwidth_spaces() {
     assert_eq!(chapters[1].label, "!?　&<>");
 }
 
-
-
-
 #[test]
 fn merges_continuous_indent_block_open_and_close_on_one_line() {
-    let config = crate::config::AozoraConfig::load_from_dirs(
-        &[std::path::Path::new("assets/aozora")],
-        None,
-    )
-    .unwrap();
+    let config =
+        crate::config::AozoraConfig::load_from_dirs(&[std::path::Path::new("assets/aozora")], None)
+            .unwrap();
     let output = super::plain_text_to_xhtml_with_config(
         "［＃ここから２字下げ］\n本文\n［＃ここから４字下げ］\n続き\n",
         &config,
@@ -768,11 +765,9 @@ fn merges_continuous_indent_block_open_and_close_on_one_line() {
 
 #[test]
 fn keeps_leading_space_before_block_open_tags() {
-    let config = crate::config::AozoraConfig::load_from_dirs(
-        &[std::path::Path::new("assets/aozora")],
-        None,
-    )
-    .unwrap();
+    let config =
+        crate::config::AozoraConfig::load_from_dirs(&[std::path::Path::new("assets/aozora")], None)
+            .unwrap();
     let output = super::plain_text_to_xhtml_with_config(
         "［＃ここから４字下げ］\n ［＃ここから１８字詰め］\n 本文\n",
         &config,
@@ -783,8 +778,9 @@ fn keeps_leading_space_before_block_open_tags() {
 
 #[test]
 fn resolves_jis_row8_cells_48_to_62_as_circled_numbers() {
-    let output = super::plain_text_to_xhtml("※［＃丸32、1-8-44］※［＃丸36、1-8-48］※［＃丸50、1-8-62］")
-        .unwrap();
+    let output =
+        super::plain_text_to_xhtml("※［＃丸32、1-8-44］※［＃丸36、1-8-48］※［＃丸50、1-8-62］")
+            .unwrap();
     assert!(output.contains("㉜"));
     assert!(output.contains("㊱"));
     assert!(output.contains("㊿"));
@@ -792,13 +788,46 @@ fn resolves_jis_row8_cells_48_to_62_as_circled_numbers() {
 
 #[test]
 fn includes_leading_gaiji_note_in_implicit_ruby_base() {
-    let output = super::plain_text_to_xhtml(
-        "山※［＃「石＋燗のつくり」、第3水準1-89-13］《さんかん》",
-    )
-    .unwrap();
+    let output =
+        super::plain_text_to_xhtml("山※［＃「石＋燗のつくり」、第3水準1-89-13］《さんかん》")
+            .unwrap();
     // Java: 外字注記（漢字へ解決）はルビ基底に含まれる
     assert!(output.contains("<ruby>山"));
     assert!(output.contains("<rt>さんかん</rt>"));
 }
 
+#[test]
+fn inlines_block_open_close_on_same_line() {
+    // Java: 「ここから中見出し」＋同Line内容＋「ここで中見出し終わり」は
+    // 1行バッファで処理され、行頭空白＋開タグ＋内容＋閉タグを 1 行に出力する
+    // （<p> は付けない）
+    let output =
+        super::plain_text_to_xhtml("　　　［＃ここから中見出し］あ１［＃ここで中見出し終わり］")
+            .unwrap();
+    assert!(output.contains("　　　<div class=\"font-1em30\">あ１</div>"));
+    assert!(!output.contains("<p>あ１</p>"));
+}
 
+#[test]
+fn keeps_vertical_quotes_inside_horizontal_blocks() {
+    // Java: 横組み内では “→〝 変換が抑止される（convertReplacedChar の !inYoko ゲート）
+    let output = super::plain_text_to_xhtml(
+        "［＃ここから横組み］\n“Die Humanität”\n［＃ここで横組み終わり］",
+    )
+    .unwrap();
+    assert!(output.contains("“Die Humanität”"));
+    assert!(!output.contains('〝'));
+}
+
+#[test]
+fn suppresses_non_leading_mado_notes() {
+    // Java: 窓*見出しは行頭のみ対応。行頭でない窓中見出し（2個目以降）は
+    // タグを出力せずテキストを素通しする（inMado フラグ＋行頭プレフィクス判定）
+    let output = super::plain_text_to_xhtml(
+        "龍王岬［＃「龍王岬」は窓中見出し］　是を則　龍王嶋［＃「龍王嶋」は窓中見出し］　と云り。",
+    )
+    .unwrap();
+    assert_eq!(output.matches("<span class=\"mado M\">").count(), 1);
+    assert!(output.contains("<span class=\"mado M\">龍王岬</span>"));
+    assert!(output.contains("是を則　龍王嶋　と云り。"));
+}
