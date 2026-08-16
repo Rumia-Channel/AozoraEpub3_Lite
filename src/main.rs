@@ -209,7 +209,7 @@ fn convert_input(
         let title_page_selected =
             config.title_page_write && matches!(config.title_page_type, 1 | 2);
         let cover_setting = options.cover.as_deref();
-        let (assets, cover) = collect_assets(&input, entry, &text, cover_setting, config)?;
+        let (assets, cover) = collect_assets(&input, entry, &text, cover_setting)?;
         // 装飾を書き換え前に実行: 書き換え前の src（../image/{参照名}）から
         // 参照単位の available（拡張子違いの解決有無）を判定する。Java の
         // getImageWidthRatio(srcFilePath) は元の参照名で引けなければ ratio=0 → fit。
@@ -230,10 +230,6 @@ fn convert_input(
             &image_references(&text),
             &resolved_references,
         );
-        let mut assets = assets
-            .into_iter()
-            .map(|item| item.asset)
-            .collect::<Vec<_>>();
         reflow_image_sections(&mut sections, &mut chapter_records, &assets, config);
 
         let nav_chapters = chapter_records
@@ -273,8 +269,9 @@ fn convert_input(
             );
             fragments.pop().unwrap_or_default()
         });
+        let mut gaiji_assets = Vec::new();
         append_gaiji_assets(
-            &mut assets,
+            &mut gaiji_assets,
             config,
             &sections,
             &title_markup,
@@ -301,7 +298,12 @@ fn convert_input(
             .with_title_page_if(title_page_selected)
             .with_vertical(vertical)
             .with_kindle(is_kindle(options))
-            .with_assets(assets)
+            .with_assets(
+                assets
+                    .iter()
+                    .map(|collected| collected.asset.clone())
+                    .chain(gaiji_assets),
+            )
             .with_chapters(nav_chapters)
             .with_metadata_markup(title_markup, creator_markup);
         if let Some(title_page_markup) = title_page_markup {
@@ -311,7 +313,29 @@ fn convert_input(
             book = book.with_cover_asset(cover);
         }
         let file = File::create(&output)?;
-        book.write_to(file)?;
+        // 画像は書き出し時に1枚ずつ「読む → 処理 → 書く」して、全画像を
+        // メモリに載せない（Java の Epub3ImageWriter と同様）。
+        let base = input
+            .path()
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let provider = |epub_path: &str| -> Option<Vec<u8>> {
+            let collected = assets.iter().find(|asset| asset.asset.path == epub_path)?;
+            let data = if input.is_archive() {
+                input.read_image(&collected.source).ok().flatten()?
+            } else {
+                fs::read(base.join(collected.source.replace('\\', "/"))).ok()?
+            };
+            process_image(
+                &data,
+                &collected.asset.media_type,
+                &config.ini,
+                collected.is_cover,
+            )
+            .ok()
+        };
+        book.write_to_with(file, provider)?;
     }
     Ok(())
 }
@@ -442,7 +466,13 @@ fn convert_image_only(
     let input_path = input.path();
     let mut sections = Vec::new();
     let mut assets = Vec::new();
-    for (index, (path, data)) in input.images().iter().enumerate() {
+    for (index, path) in input.image_paths().iter().enumerate() {
+        let data = input.read_image(path)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("image entry not found: {path}"),
+            )
+        })?;
         let extension = path
             .rsplit_once('.')
             .map(|(_, extension)| extension)
@@ -455,8 +485,9 @@ fn convert_image_only(
             )
         })?;
         let output_name = format!("{:04}.{extension}", index + 1);
-        let processed_data = process_image(data, media_type, &config.ini, index == 0)?;
-        let fragment = image_dimensions(&processed_data, media_type)
+        let processed_data = process_image(&data, media_type, &config.ini, index == 0)?;
+        let dimensions = image_dimensions(&processed_data, media_type);
+        let fragment = dimensions
             .map(|dimensions| svg_image_fragment(&output_name, dimensions))
             .unwrap_or_else(|| {
                 format!(
@@ -471,6 +502,8 @@ fn convert_image_only(
             available: vec![true],
             source: output_name.clone(),
             resolved: output_name,
+            dimensions,
+            is_cover: index == 0,
         });
     }
     if assets.is_empty() {
@@ -655,18 +688,25 @@ struct CollectedAsset {
     /// Path the asset is stored at inside the EPUB (without the `image/`
     /// prefix).
     resolved: String,
+    /// Pre-processing dimensions (header read only), used for layout and
+    /// decoration so image bytes never need to stay resident.
+    dimensions: Option<ImageDimensions>,
+    /// Whether this image is used as the cover; cover images are processed
+    /// with the cover flag when the bytes are read at write time.
+    is_cover: bool,
 }
 
 /// Collects EPUB assets for all image references in the text (plus the
 /// cover image), resolving against the filesystem for TXT inputs or against
-/// the archive for ZIP/TXTZ/CBZ inputs. Returns the assets and the EPUB
-/// asset path of the cover, if any.
+/// the archive for ZIP/TXTZ/CBZ inputs. Only dimensions are kept; the image
+/// bytes are read again, one image at a time, when the EPUB is written via
+/// [`EpubBook::write_to_with`]. Returns the assets and the EPUB asset path
+/// of the cover, if any.
 fn collect_assets(
     input: &Input,
     entry: &TextEntry,
     text: &str,
     cover: Option<&str>,
-    config: &AozoraConfig,
 ) -> Result<(Vec<CollectedAsset>, Option<String>), Box<dyn Error>> {
     let base = input.path().parent().unwrap_or_else(|| Path::new("."));
     let mut assets: Vec<CollectedAsset> = Vec::new();
@@ -676,24 +716,23 @@ fn collect_assets(
     for reference in image_reference_occurrences(text) {
         image_index += 1;
         let original_available = if input.is_archive() {
-            input.resolve_image(entry, &reference).is_some()
+            input.resolve_image_path(entry, &reference).is_some()
         } else {
             base.join(reference.replace('\\', "/")).is_file()
         };
-        let resolved = if input.is_archive() {
-            input
-                .resolve_image(entry, &reference)
-                .map(|(path, data)| (path.to_owned(), data.clone()))
+        let source_path = if input.is_archive() {
+            input.resolve_image_path(entry, &reference)
         } else {
-            match resolve_fs_image(base, &reference) {
-                Ok(Some(resolved)) => Some(resolved),
-                Ok(None) => None,
-                Err(error) => return Err(error),
-            }
+            resolve_fs_image_path(base, &reference)?
         };
-        let Some((source_path, data)) = resolved else {
+        let Some(source_path) = source_path else {
             continue;
         };
+        if let Some(existing) = assets.iter_mut().find(|asset| asset.source == source_path) {
+            existing.references.push(reference);
+            existing.available.push(original_available);
+            continue;
+        }
         let extension = source_path
             .rsplit_once('.')
             .map(|(_, extension)| extension)
@@ -705,27 +744,34 @@ fn collect_assets(
                 format!("unsupported image type: {reference}"),
             )
         })?;
-        if let Some(existing) = assets.iter_mut().find(|asset| asset.source == source_path) {
-            existing.references.push(reference);
-            existing.available.push(original_available);
-            continue;
-        }
+        // 寸法と表紙判定のためだけに1枚だけ読み、バイトは保持しない
+        let data = if input.is_archive() {
+            input.read_image(&source_path)?.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("image entry not found: {source_path}"),
+                )
+            })?
+        } else {
+            fs::read(base.join(source_path.replace('\\', "/")))?
+        };
+        let dimensions = image_dimensions(&data, media_type);
         let output_name = format!("{:04}.{extension}", image_index);
         let epub_path = format!("image/{output_name}");
         let is_cover = is_auto_cover(cover)
             && cover_asset.is_none()
-            && image_dimensions(&data, media_type)
-                .is_some_and(|dimensions| dimensions.width > 64 && dimensions.height > 64);
+            && dimensions.is_some_and(|dimensions| dimensions.width > 64 && dimensions.height > 64);
         if is_cover {
             cover_asset = Some(epub_path.clone());
         }
-        let data = process_image(&data, media_type, &config.ini, is_cover)?;
         assets.push(CollectedAsset {
-            asset: EpubAsset::new(epub_path, media_type, data),
+            asset: EpubAsset::lazy(epub_path, media_type),
             references: vec![reference],
             available: vec![original_available],
             source: source_path,
             resolved: output_name,
+            dimensions,
+            is_cover,
         });
     }
 
@@ -739,7 +785,6 @@ fn collect_assets(
                 );
                 return Ok((assets, cover_asset));
             };
-            let data = fs::read(&source)?;
             let extension = extension.to_ascii_lowercase();
             let media_type = media_type_for_extension(&extension).ok_or_else(|| {
                 io::Error::new(
@@ -747,15 +792,18 @@ fn collect_assets(
                     format!("unsupported cover image type: {extension}"),
                 )
             })?;
-            let data = process_image(&data, media_type, &config.ini, true)?;
+            let data = fs::read(&source)?;
+            let dimensions = image_dimensions(&data, media_type);
             let output_name = format!("{:04}.{extension}", image_index + 1);
             let epub_path = format!("image/{output_name}");
             assets.push(CollectedAsset {
-                asset: EpubAsset::new(epub_path.clone(), media_type, data),
+                asset: EpubAsset::lazy(epub_path.clone(), media_type),
                 references: Vec::new(),
                 available: Vec::new(),
                 source: source.to_string_lossy().replace('\\', "/"),
                 resolved: output_name,
+                dimensions,
+                is_cover: true,
             });
             cover_asset = Some(epub_path);
         }
@@ -774,15 +822,18 @@ fn collect_assets(
                         format!("unsupported cover image type: {extension}"),
                     )
                 })?;
-                let data = process_image(&fs::read(&source)?, media_type, &config.ini, true)?;
+                let data = fs::read(&source)?;
+                let dimensions = image_dimensions(&data, media_type);
                 let output_name = format!("{:04}.{extension}", image_index + 1);
                 let epub_path = format!("image/{output_name}");
                 assets.push(CollectedAsset {
-                    asset: EpubAsset::new(epub_path.clone(), media_type, data),
+                    asset: EpubAsset::lazy(epub_path.clone(), media_type),
                     references: Vec::new(),
                     available: Vec::new(),
                     source: normalized,
                     resolved: output_name,
+                    dimensions,
+                    is_cover: true,
                 });
                 cover_asset = Some(epub_path);
             } else {
@@ -799,22 +850,21 @@ fn collect_assets(
 
 /// Resolves an image reference against the filesystem, mirroring the
 /// previous behavior: exact file, then same-stem candidates with a
-/// supported extension. Returns the input-relative path and bytes.
-type ResolvedImage = (String, Vec<u8>);
-
-fn resolve_fs_image(base: &Path, reference: &str) -> Result<Option<ResolvedImage>, Box<dyn Error>> {
+/// supported extension. Returns the input-relative path without reading
+/// any bytes.
+fn resolve_fs_image_path(base: &Path, reference: &str) -> Result<Option<String>, Box<dyn Error>> {
     let source = match resolve_image_source(base, reference) {
         Ok((source, _extension)) => source,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let data = fs::read(&source)?;
-    let relative = source
-        .strip_prefix(base)
-        .unwrap_or(source.as_path())
-        .to_string_lossy()
-        .replace('\\', "/");
-    Ok(Some((relative, data)))
+    Ok(Some(
+        source
+            .strip_prefix(base)
+            .unwrap_or(source.as_path())
+            .to_string_lossy()
+            .replace('\\', "/"),
+    ))
 }
 
 /// Replaces image-only paragraphs whose source could not be resolved with an
@@ -1235,11 +1285,14 @@ fn image_tag_in_line(line: &str) -> Option<&str> {
     Some(&line[start..end])
 }
 
-fn image_asset_for_line<'a>(line: &str, assets: &'a [EpubAsset]) -> Option<(&'a EpubAsset, bool)> {
+fn image_asset_for_line<'a>(
+    line: &str,
+    assets: &'a [CollectedAsset],
+) -> Option<(&'a CollectedAsset, bool)> {
     let tag = image_tag_in_line(line)?;
     let source = tag_attribute(tag, "src")?;
     let source = source.strip_prefix("../")?;
-    let asset = assets.iter().find(|asset| asset.path == source)?;
+    let asset = assets.iter().find(|asset| asset.asset.path == source)?;
     let has_caption = line.contains("キャプション") || line.contains("caption");
     Some((asset, has_caption))
 }
@@ -1311,7 +1364,7 @@ fn is_page_marker_only_fragment(fragment: &str) -> bool {
 
 fn split_image_page_sections(
     section: &str,
-    assets: &[EpubAsset],
+    assets: &[CollectedAsset],
     config: &AozoraConfig,
 ) -> Vec<String> {
     let mut output = Vec::new();
@@ -1322,7 +1375,7 @@ fn split_image_page_sections(
             && !has_open_block_container(&prefix)
             && let Some((asset, has_caption)) = image_asset_for_line(line, assets)
             && should_split_image_page(
-                image_dimensions(&asset.data, &asset.media_type).unwrap_or(ImageDimensions {
+                asset.dimensions.unwrap_or(ImageDimensions {
                     width: 0,
                     height: 0,
                 }),
@@ -1354,7 +1407,7 @@ fn split_image_page_sections(
 
 fn standalone_image_page_type(
     section: &str,
-    assets: &[EpubAsset],
+    assets: &[CollectedAsset],
     config: &AozoraConfig,
 ) -> Option<ImagePageType> {
     if section.contains("aozora-page-") {
@@ -1364,7 +1417,7 @@ fn standalone_image_page_type(
         return None;
     }
     let (asset, has_caption) = image_asset_for_line(section, assets)?;
-    let dimensions = image_dimensions(&asset.data, &asset.media_type)?;
+    let dimensions = asset.dimensions?;
     let page_type = image_page_type(dimensions, config, has_caption, 0);
     Some(
         if page_type.is_page() && image_setting_bool(config, "ImageFloatPage", false) {
@@ -1378,7 +1431,7 @@ fn standalone_image_page_type(
 fn reflow_image_sections(
     sections: &mut Vec<String>,
     chapters: &mut [ChapterRecord],
-    assets: &[EpubAsset],
+    assets: &[CollectedAsset],
     config: &AozoraConfig,
 ) {
     // 元セクション番号を添えて分割（後で章の section_index をリマップする）
@@ -1509,7 +1562,6 @@ fn decorate_image_tags(
                 cursor = end;
                 continue;
             };
-            let asset = &collected.asset;
             let reference_index = collected
                 .references
                 .iter()
@@ -1520,7 +1572,7 @@ fn decorate_image_tags(
                 .get(reference_index)
                 .copied()
                 .unwrap_or(false);
-            let Some(dimensions) = image_dimensions(&asset.data, &asset.media_type) else {
+            let Some(dimensions) = collected.dimensions else {
                 cursor = end;
                 continue;
             };
@@ -2059,12 +2111,18 @@ mod tests {
             .strip_prefix("image/")
             .unwrap_or(&asset.path)
             .to_owned();
+        let dimensions = asset
+            .data
+            .as_deref()
+            .and_then(|data| image_dimensions(data, &asset.media_type));
         CollectedAsset {
             asset,
             references: vec![reference.clone()],
             available: vec![true],
             source: reference.clone(),
             resolved: reference,
+            dimensions,
+            is_cover: false,
         }
     }
 
@@ -2429,6 +2487,11 @@ mod tests {
         png[20..24].copy_from_slice(&350u32.to_be_bytes());
         let asset = EpubAsset::new("image/fig.png", "image/png", png);
         let collected = CollectedAsset {
+            dimensions: asset
+                .data
+                .as_deref()
+                .and_then(|data| image_dimensions(data, &asset.media_type)),
+            is_cover: false,
             asset,
             references: vec!["img/fig.jpg".to_owned()],
             available: vec![false],
@@ -2565,7 +2628,7 @@ mod tests {
         png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
         png[16..20].copy_from_slice(&1836u32.to_be_bytes());
         png[20..24].copy_from_slice(&1400u32.to_be_bytes());
-        let asset = EpubAsset::new("image/large.png", "image/png", png);
+        let asset = collected(EpubAsset::new("image/large.png", "image/png", png));
         let config = AozoraConfig::from_ini(
             IniSettings::parse("DispW=584\nDispH=754\nSinglePageWidth=550\n").unwrap(),
         );
@@ -2588,7 +2651,7 @@ mod tests {
         png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
         png[16..20].copy_from_slice(&1836u32.to_be_bytes());
         png[20..24].copy_from_slice(&1400u32.to_be_bytes());
-        let asset = EpubAsset::new("image/large.png", "image/png", png);
+        let asset = collected(EpubAsset::new("image/large.png", "image/png", png));
         let config = AozoraConfig::from_ini(
             IniSettings::parse("DispW=584\nDispH=754\nSinglePageWidth=550\n").unwrap(),
         );

@@ -6,7 +6,9 @@
 //! * text entries are enumerated in archive order and read on demand,
 //! * each text entry keeps its parent directory so image references in the
 //!   text can be resolved against the archive,
-//! * all archive image bytes are exposed by normalized entry path,
+//! * archive image entries are enumerated lazily and read one image at a
+//!   time by normalized entry path, so images are never all resident in
+//!   memory at once,
 //! * CBZ / image-only archives are representable through [`Input::image_only`]
 //!   even when no text entry exists.
 //!
@@ -14,14 +16,31 @@
 //! UTF-8 decodes as UTF-8, anything else as Shift_JIS/MS932. An explicit
 //! encoding label always wins over auto-detection.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use encoding_rs::{Encoding, SHIFT_JIS, UTF_8};
 use zip::ZipArchive;
+
+/// Streaming file source for conversion: the full file list is known up
+/// front (via [`FileSource::list`]), and each file's raw data is opened as a
+/// stream on demand (via [`FileSource::open`]) so no archive is ever fully
+/// resident in memory.
+///
+/// This is the building block for object-storage inputs such as Cloudflare
+/// R2: list the object keys once, then stream each object (text or image)
+/// when the converter needs it. Archive inputs (ZIP/TXTZ/CBZ) still use
+/// [`Input::open`], which needs seeking.
+pub trait FileSource: fmt::Debug + Send + Sync {
+    /// Known file names (normalized paths, e.g. `"挿絵/i1186242.png"`).
+    fn list(&self) -> &[String];
+    /// Opens the raw data stream for one file. `Ok(None)` when the file is
+    /// not present.
+    fn open(&self, name: &str) -> Result<Option<Box<dyn Read + Send>>, InputError>;
+}
 
 /// Errors raised while opening or reading inputs.
 #[derive(Debug)]
@@ -90,14 +109,18 @@ impl TextEntry {
 
 /// An opened input: a plain text file or an archive (zip/txtz/cbz).
 ///
-/// Image data for archives is loaded eagerly and exposed by normalized entry
-/// path; text entry bytes are read on demand via [`Input::read_text`].
+/// Text entry bytes are read on demand via [`Input::read_text`]. Image
+/// entries are enumerated lazily (names only) and their bytes are read one
+/// image at a time via [`Input::read_image`], so a large archive never has
+/// all images resident in memory at once.
 #[derive(Clone, Debug)]
 pub struct Input {
     path: PathBuf,
     archive: bool,
     entries: Vec<TextEntry>,
-    images: BTreeMap<String, Vec<u8>>,
+    image_paths: Vec<String>,
+    image_indices: Vec<usize>,
+    source: Option<Arc<dyn FileSource>>,
 }
 
 impl Input {
@@ -127,6 +150,41 @@ impl Input {
         }
     }
 
+    /// Builds an input from a streaming [`FileSource`] (e.g. object storage):
+    /// text files are enumerated from [`FileSource::list`] and their bytes are
+    /// streamed on demand. The returned input has an empty [`Input::path`];
+    /// derive titles from the text itself or pass them explicitly.
+    pub fn from_source(source: Arc<dyn FileSource>) -> Result<Self, InputError> {
+        let mut entries = Vec::new();
+        let mut image_paths = Vec::new();
+        for (index, name) in source.list().iter().enumerate() {
+            let Some(normalized) = normalize_entry_path(name) else {
+                continue;
+            };
+            if normalized.to_ascii_lowercase().ends_with(".txt") {
+                let parent = normalized
+                    .rsplit_once('/')
+                    .map(|(parent, _)| parent.to_owned())
+                    .unwrap_or_default();
+                entries.push(TextEntry {
+                    name: normalized,
+                    parent,
+                    entry_index: index,
+                });
+            } else if image_media_type(&normalized).is_some() {
+                image_paths.push(normalized);
+            }
+        }
+        Ok(Self {
+            path: PathBuf::new(),
+            archive: false,
+            entries,
+            image_paths,
+            image_indices: Vec::new(),
+            source: Some(source),
+        })
+    }
+
     /// The input file path as given.
     pub fn path(&self) -> &Path {
         &self.path
@@ -153,14 +211,22 @@ impl Input {
         &self.entries
     }
 
-    /// All archive image bytes keyed by normalized entry path (empty for
-    /// plain TXT inputs). Iteration order is sorted by path.
-    pub fn images(&self) -> &BTreeMap<String, Vec<u8>> {
-        &self.images
+    /// Normalized image entry paths in archive order (empty for plain TXT
+    /// inputs).
+    pub fn image_paths(&self) -> &[String] {
+        &self.image_paths
     }
 
     /// Reads the raw bytes of a text entry.
     pub fn read_text(&self, entry: &TextEntry) -> Result<Vec<u8>, InputError> {
+        if let Some(source) = &self.source {
+            let mut reader = source
+                .open(&entry.name)?
+                .ok_or_else(|| InputError::UnsupportedInput(entry.name.clone()))?;
+            let mut data = Vec::new();
+            reader.read_to_end(&mut data)?;
+            return Ok(data);
+        }
         if !self.archive {
             return Ok(std::fs::read(&self.path)?);
         }
@@ -172,29 +238,77 @@ impl Input {
         Ok(data)
     }
 
-    /// Looks up an image by normalized entry path.
-    pub fn image(&self, path: &str) -> Option<&Vec<u8>> {
-        let normalized = normalize_entry_path(path)?;
-        self.images.get(&normalized)
+    /// Reads the bytes of one image by normalized entry path. The archive is
+    /// reopened per call, so images are never all resident in memory at once.
+    /// Returns `Ok(None)` for plain TXT inputs and unknown paths.
+    pub fn read_image(&self, path: &str) -> Result<Option<Vec<u8>>, InputError> {
+        if let Some(source) = &self.source {
+            let Some(normalized) = normalize_entry_path(path) else {
+                return Ok(None);
+            };
+            let Some(path_index) = self.find_image_path_index(&normalized) else {
+                return Ok(None);
+            };
+            let mut reader = match source.open(&self.image_paths[path_index])? {
+                Some(reader) => reader,
+                None => return Ok(None),
+            };
+            let mut data = Vec::new();
+            reader.read_to_end(&mut data)?;
+            return Ok(Some(data));
+        }
+        if !self.archive {
+            return Ok(None);
+        }
+        let Some(normalized) = normalize_entry_path(path) else {
+            return Ok(None);
+        };
+        let Some(path_index) = self.find_image_path_index(&normalized) else {
+            return Ok(None);
+        };
+        let entry_index = self.image_indices[path_index];
+        let file = File::open(&self.path)?;
+        let mut archive = ZipArchive::new(file)?;
+        let mut zip_entry = archive.by_index(entry_index)?;
+        let mut data = Vec::with_capacity(zip_entry.size() as usize);
+        zip_entry.read_to_end(&mut data)?;
+        Ok(Some(data))
     }
 
-    /// Resolves an image reference from a text entry against the archive,
-    /// mirroring `ImageInfoReader` behavior: the exact path first (as
-    /// written in the text), then the path joined to the text entry's parent
-    /// directory, each with extension correction (.png/.jpg/.jpeg/.gif/.webp,
-    /// case-insensitive). Returns the matched entry path and the bytes.
-    pub fn resolve_image(&self, entry: &TextEntry, image_path: &str) -> Option<(&str, &Vec<u8>)> {
+    /// Resolves an image reference to a normalized entry path without reading
+    /// any bytes, mirroring `ImageInfoReader` behavior: the exact path first
+    /// (as written in the text), then the path joined to the text entry's
+    /// parent directory, each with extension correction
+    /// (.png/.jpg/.jpeg/.gif/.webp, case-insensitive). Returns the matched
+    /// entry path.
+    pub fn resolve_image_path(&self, entry: &TextEntry, image_path: &str) -> Option<String> {
         let normalized = normalize_entry_path(image_path)?;
-        if let Some(found) = self.image_with_extension_fallback(&normalized) {
-            return Some(found);
+        if let Some(index) = self.find_image_path_index(&normalized) {
+            return Some(self.image_paths[index].clone());
         }
         if !entry.parent.is_empty() {
             let joined = format!("{}/{}", entry.parent, normalized);
-            if let Some(found) = self.image_with_extension_fallback(&joined) {
-                return Some(found);
+            if let Some(index) = self.find_image_path_index(&joined) {
+                return Some(self.image_paths[index].clone());
             }
         }
         None
+    }
+
+    /// Resolves an image reference from a text entry and reads its bytes
+    /// (see [`Input::resolve_image_path`] for the resolution rules).
+    pub fn resolve_image(
+        &self,
+        entry: &TextEntry,
+        image_path: &str,
+    ) -> Result<Option<(String, Vec<u8>)>, InputError> {
+        let Some(path) = self.resolve_image_path(entry, image_path) else {
+            return Ok(None);
+        };
+        let Some(data) = self.read_image(&path)? else {
+            return Ok(None);
+        };
+        Ok(Some((path, data)))
     }
 
     fn open_text(path: &Path) -> Result<Self, InputError> {
@@ -213,7 +327,9 @@ impl Input {
             path: path.to_owned(),
             archive: false,
             entries,
-            images: BTreeMap::new(),
+            image_paths: Vec::new(),
+            image_indices: Vec::new(),
+            source: None,
         })
     }
 
@@ -221,9 +337,10 @@ impl Input {
         let file = File::open(path)?;
         let mut archive = ZipArchive::new(file)?;
         let mut entries = Vec::new();
-        let mut images = BTreeMap::new();
+        let mut image_paths = Vec::new();
+        let mut image_indices = Vec::new();
         for index in 0..archive.len() {
-            let mut zip_entry = archive.by_index(index)?;
+            let zip_entry = archive.by_index(index)?;
             let Some(name) = decode_entry_name(zip_entry.name_raw()) else {
                 continue;
             };
@@ -241,32 +358,36 @@ impl Input {
                     entry_index: index,
                 });
             } else if image_media_type(&normalized).is_some() {
-                let mut data = Vec::new();
-                zip_entry.read_to_end(&mut data)?;
-                images.insert(normalized, data);
+                image_paths.push(normalized);
+                image_indices.push(index);
             }
         }
         Ok(Self {
             path: path.to_owned(),
             archive: true,
             entries,
-            images,
+            image_paths,
+            image_indices,
+            source: None,
         })
     }
 
-    fn image_with_extension_fallback(&self, base: &str) -> Option<(&str, &Vec<u8>)> {
-        if let Some((path, data)) = self.images.get_key_value(base) {
-            return Some((path.as_str(), data));
+    /// Locates an image entry by normalized path, with same-stem extension
+    /// correction (.png/.jpg/.jpeg/.gif/.webp, case-insensitive). Returns the
+    /// position inside [`Input::image_paths`].
+    fn find_image_path_index(&self, base: &str) -> Option<usize> {
+        if let Some(index) = self.image_paths.iter().position(|path| path == base) {
+            return Some(index);
         }
         let (stem, _) = base.rsplit_once('.').unwrap_or((base, ""));
         for extension in ["png", "jpg", "jpeg", "gif", "webp"] {
             let candidate = format!("{stem}.{extension}");
-            if let Some((path, data)) = self
-                .images
+            if let Some(index) = self
+                .image_paths
                 .iter()
-                .find(|(key, _)| key.eq_ignore_ascii_case(&candidate))
+                .position(|path| path.eq_ignore_ascii_case(&candidate))
             {
-                return Some((path.as_str(), data));
+                return Some(index);
             }
         }
         None
@@ -377,13 +498,15 @@ fn image_media_type(path: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Cursor, Write};
+    use std::io::{Cursor, Read, Write};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use encoding_rs::SHIFT_JIS;
     use zip::write::{SimpleFileOptions, ZipWriter};
 
-    use super::{Input, decode_text, detect_encoding, normalize_entry_path};
+    use super::{
+        FileSource, Input, InputError, decode_text, detect_encoding, normalize_entry_path,
+    };
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -446,14 +569,14 @@ mod tests {
 
         assert_eq!(input.read_text(&entries[0]).unwrap(), "一".as_bytes());
         assert_eq!(input.read_text(&entries[1]).unwrap(), "二".as_bytes());
-        assert!(input.images().contains_key("img/fig.png"));
-        assert!(input.images().contains_key("cover.jpg"));
-        assert_eq!(input.images().len(), 2);
+        assert!(input.image_paths().iter().any(|path| path == "img/fig.png"));
+        assert!(input.image_paths().iter().any(|path| path == "cover.jpg"));
+        assert_eq!(input.image_paths().len(), 2);
         drop(file);
     }
 
     #[test]
-    fn exposes_all_image_bytes_by_normalized_path() {
+    fn reads_image_bytes_by_normalized_path_lazily() {
         let (file, input) = open_zip(&[
             ("img/a.png", b"png-a"),
             ("sub/img\\b.jpg", b"jpg-b"),
@@ -461,18 +584,20 @@ mod tests {
         ]);
         assert!(input.is_image_only());
         assert_eq!(
-            input.images().get("img/a.png").map(Vec::as_slice),
+            input.read_image("img/a.png").unwrap().as_deref(),
             Some(&b"png-a"[..])
         );
         // backslashes are normalized to forward slashes
         assert_eq!(
-            input.images().get("sub/img/b.jpg").map(Vec::as_slice),
+            input.read_image("sub/img/b.jpg").unwrap().as_deref(),
             Some(&b"jpg-b"[..])
         );
         assert_eq!(
-            input.images().get("img/c.webp").map(Vec::as_slice),
+            input.read_image("img/c.webp").unwrap().as_deref(),
             Some(&b"webp-c"[..])
         );
+        // unknown and plain-TXT lookups yield None
+        assert!(input.read_image("img/missing.png").unwrap().is_none());
         drop(file);
     }
 
@@ -487,8 +612,8 @@ mod tests {
         assert_eq!(input.text_entries().len(), 1);
         assert_eq!(input.text_entries()[0].name, "novel/01.txt");
         // "../evil.txt" is dropped and "dir/" never becomes an image
-        assert_eq!(input.images().len(), 1);
-        assert!(input.images().contains_key("img/fig.png"));
+        assert_eq!(input.image_paths().len(), 1);
+        assert!(input.image_paths().iter().any(|path| path == "img/fig.png"));
         drop(file);
     }
 
@@ -501,19 +626,25 @@ mod tests {
         ]);
         let entry = &input.text_entries()[0];
         // exact root-relative path wins
-        let (path, data) = input.resolve_image(entry, "novel/fig.png").unwrap();
+        let (path, data) = input
+            .resolve_image(entry, "novel/fig.png")
+            .unwrap()
+            .unwrap();
         assert_eq!(path, "novel/fig.png");
         assert_eq!(data, b"png");
         // parent-joined resolution for a bare reference
-        let (path, data) = input.resolve_image(entry, "fig.png").unwrap();
+        let (path, data) = input.resolve_image(entry, "fig.png").unwrap().unwrap();
         assert_eq!(path, "novel/fig.png");
         assert_eq!(data, b"png");
         // extension fallback matches case-insensitively
-        let (path, data) = input.resolve_image(entry, "img/other.png").unwrap();
+        let (path, data) = input
+            .resolve_image(entry, "img/other.png")
+            .unwrap()
+            .unwrap();
         assert_eq!(path, "img/other.JPG");
         assert_eq!(data, b"jpg");
         // missing image yields None
-        assert!(input.resolve_image(entry, "missing.png").is_none());
+        assert!(input.resolve_image(entry, "missing.png").unwrap().is_none());
         drop(file);
     }
 
@@ -522,7 +653,7 @@ mod tests {
         let file = TempFile::new("book.txt", "こんにちは".as_bytes());
         let input = Input::open(&file.path).unwrap();
         assert!(!input.is_image_only());
-        assert!(input.images().is_empty());
+        assert!(input.image_paths().is_empty());
         assert_eq!(input.text_entries().len(), 1);
         assert_eq!(input.text_entries()[0].parent, "");
         assert_eq!(
@@ -584,5 +715,70 @@ mod tests {
         assert_eq!(normalize_entry_path("a/../b.txt"), None);
         assert_eq!(normalize_entry_path(""), None);
         assert_eq!(normalize_entry_path("."), None);
+    }
+
+    /// In-memory [`FileSource`] standing in for object storage (R2 etc.).
+    #[derive(Debug)]
+    struct MemorySource {
+        names: Vec<String>,
+        files: std::collections::BTreeMap<String, Vec<u8>>,
+    }
+
+    impl MemorySource {
+        fn new(files: &[(&str, &[u8])]) -> Self {
+            Self {
+                names: files.iter().map(|(name, _)| (*name).to_owned()).collect(),
+                files: files
+                    .iter()
+                    .map(|(name, data)| ((*name).to_owned(), data.to_vec()))
+                    .collect(),
+            }
+        }
+    }
+
+    impl FileSource for MemorySource {
+        fn list(&self) -> &[String] {
+            &self.names
+        }
+        fn open(&self, name: &str) -> Result<Option<Box<dyn Read + Send>>, InputError> {
+            Ok(self
+                .files
+                .get(name)
+                .map(|data| Box::new(Cursor::new(data.clone())) as Box<dyn Read + Send>))
+        }
+    }
+
+    #[test]
+    fn streams_text_and_images_from_a_file_source() {
+        let input = Input::from_source(std::sync::Arc::new(MemorySource::new(&[
+            ("novel/01.txt", "一".as_bytes()),
+            ("img/fig.png", b"png"),
+            ("img/other.JPG", b"jpg"),
+        ])))
+        .unwrap();
+        assert!(!input.is_archive());
+        assert_eq!(input.text_entries().len(), 1);
+        assert_eq!(input.text_entries()[0].name, "novel/01.txt");
+        assert_eq!(input.text_entries()[0].parent, "novel");
+        assert_eq!(
+            input.read_text(&input.text_entries()[0]).unwrap(),
+            "一".as_bytes()
+        );
+        assert_eq!(
+            input.image_paths(),
+            &["img/fig.png".to_owned(), "img/other.JPG".to_owned()]
+        );
+        assert_eq!(
+            input.read_image("img/fig.png").unwrap().as_deref(),
+            Some(&b"png"[..])
+        );
+        // extension fallback and parent joining follow the archive rules
+        let entry = &input.text_entries()[0];
+        let (path, data) = input.resolve_image(entry, "img/fig.jpg").unwrap().unwrap();
+        assert_eq!(path, "img/fig.png");
+        assert_eq!(data, b"png");
+        assert!(input.resolve_image(entry, "missing.png").unwrap().is_none());
+        // a missing stream yields Ok(None), not an error
+        assert!(input.read_image("img/absent.png").unwrap().is_none());
     }
 }

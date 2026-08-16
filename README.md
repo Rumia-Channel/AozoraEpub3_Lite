@@ -160,29 +160,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let text = decode_input(&input.read_text(entry)?, None)?;
         let sections = aozora_text_to_xhtml_sections_with_config(&text, &config)?;
 
-        // 4. 本文が参照する画像をアセット化
+        // 4. 本文が参照する画像を遅延アセット化（バイトは書き出し時に1枚ずつ読む）
         let assets = image_references(&text)
             .iter()
             .filter_map(|reference| {
-                input.resolve_image(entry, reference).map(|(path, bytes)| {
-                    let media_type = if path.ends_with(".png") {
-                        "image/png"
-                    } else if path.ends_with(".gif") {
-                        "image/gif"
-                    } else {
-                        "image/jpeg"
-                    };
-                    EpubAsset::new(format!("image/{path}"), media_type, bytes.clone())
-                })
+                let source = input.resolve_image_path(entry, reference)?;
+                let media_type = if source.ends_with(".png") {
+                    "image/png"
+                } else if source.ends_with(".gif") {
+                    "image/gif"
+                } else {
+                    "image/jpeg"
+                };
+                Some(EpubAsset::lazy(format!("image/{source}"), media_type))
             })
             .collect::<Vec<_>>();
 
-        // 5. EPUB を組み立てて書き出す
+        // 5. EPUB を組み立てて書き出す（画像は provider から1枚ずつ解決）
         let metadata = EpubMetadata::new("作品タイトル", "urn:uuid:example");
         let book = EpubBook::from_sections(metadata, sections)
             .with_vertical(true)
             .with_assets(assets);
-        book.write_to(File::create("作品.epub")?)?;
+        let file = File::create("作品.epub")?;
+        book.write_to_with(file, |epub_path| {
+            let name = epub_path.strip_prefix("image/")?;
+            input.read_image(name).ok().flatten()
+        })?;
     }
     Ok(())
 }
@@ -192,9 +195,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - `aozora_text_to_xhtml_sections*`: 青空文庫テキストを XHTML セクションに変換
 - `AozoraConfig`: INI・注記資産・外字資産の設定
-- `EpubBook` / `EpubAsset`: EPUB の組み立て
-- `Input` / `decode_text`: 入力の読込とエンコーディング判定
+- `EpubBook` / `EpubAsset`: EPUB の組み立て。`write_to`（シーク可能）と `write_to_stream`（シーク不要）
+- `Input` / `FileSource` / `decode_text`: 入力の読込とエンコーディング判定
 - `BookMeta` / `TitleType`: タイトル・著者などのメタデータ推定
+
+### ストリーミング（省メモリ環境・Cloudflare Workers 向け）
+
+画像が多い入力でも、変換中は画像バイトを保持せず、書き出し時に1枚ずつ
+読み込みます。書き出しには `write_to_stream_with` を使うと、`Write`
+トレイトだけに EPUB をストリーミングできます（ZIP は data descriptor 方式で
+書き、シーク不要）。HTTP レスポンスや Workers のレスポンスボディに直接
+書き出せます。
+
+入力も ZIP ではなくオブジェクトストレージ（R2 など）から読む場合は、
+`FileSource` を実装して `Input::from_source` で渡します。ファイル一覧を
+先に把握し、個別ファイルの生データをストリームで開くトレイトです。
+
+```rust
+use std::io::Read;
+use std::sync::Arc;
+
+use aozora_epub3_lite::{FileSource, Input, InputError};
+
+struct R2Source {
+    keys: Vec<String>,
+    // bucket / prefix など
+}
+
+impl FileSource for R2Source {
+    fn list(&self) -> &[String] {
+        &self.keys
+    }
+    fn open(&self, name: &str) -> Result<Option<Box<dyn Read + Send>>, InputError> {
+        // bucket.get(name) のボディを Box<dyn Read + Send> にして返す
+        Ok(None)
+    }
+}
+
+let input = Input::from_source(Arc::new(R2Source { keys, /* ... */ }))?;
+```
+
+書き出しは `Write` トレイトのみを要求します。
+
+```rust
+book.write_to_stream_with(response_body, |epub_path| {
+    let name = epub_path.strip_prefix("image/")?;
+    input.read_image(name).ok().flatten()
+})?;
+```
+
+ピークメモリは「テキスト + 処理中の画像1枚」程度に収まります。
 
 ## Java 版との関係
 

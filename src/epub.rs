@@ -116,6 +116,7 @@ pub enum EpubError {
     Io(io::Error),
     Zip(ZipError),
     InvalidMetadata(&'static str),
+    MissingAsset(String),
 }
 
 impl fmt::Display for EpubError {
@@ -124,6 +125,7 @@ impl fmt::Display for EpubError {
             Self::Io(error) => write!(f, "I/O error: {error}"),
             Self::Zip(error) => write!(f, "ZIP error: {error}"),
             Self::InvalidMetadata(field) => write!(f, "metadata field is empty: {field}"),
+            Self::MissingAsset(path) => write!(f, "asset data missing: {path}"),
         }
     }
 }
@@ -202,7 +204,9 @@ impl EpubSection {
 pub struct EpubAsset {
     pub path: String,
     pub media_type: String,
-    pub data: Vec<u8>,
+    /// Processed image bytes; `None` defers the bytes to the provider passed
+    /// to [`EpubBook::write_to_with`] so large images never stay resident.
+    pub data: Option<Vec<u8>>,
 }
 
 impl EpubAsset {
@@ -214,7 +218,17 @@ impl EpubAsset {
         Self {
             path: path.into(),
             media_type: media_type.into(),
-            data: data.into(),
+            data: Some(data.into()),
+        }
+    }
+
+    /// Creates an asset whose bytes are supplied lazily at write time via
+    /// [`EpubBook::write_to_with`]. Keeps large images out of memory.
+    pub fn lazy(path: impl Into<String>, media_type: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            media_type: media_type.into(),
+            data: None,
         }
     }
 }
@@ -354,6 +368,46 @@ impl EpubBook {
     }
 
     pub fn write_to<W: Write + Seek>(&self, output: W) -> Result<W, EpubError> {
+        self.write_to_with(output, |_| None)
+    }
+
+    /// Writes the EPUB, resolving `EpubAsset`s whose `data` is `None` through
+    /// `provider` (keyed by the asset's EPUB path, e.g. `"image/0001.jpg"`)
+    /// one asset at a time. Keeps large image sets out of memory.
+    pub fn write_to_with<W: Write + Seek>(
+        &self,
+        output: W,
+        provider: impl Fn(&str) -> Option<Vec<u8>>,
+    ) -> Result<W, EpubError> {
+        self.validate()?;
+        let mut archive = ZipWriter::new(output);
+        write_epub_body(&mut archive, self, &provider)?;
+        Ok(archive.finish()?)
+    }
+
+    /// Writes the EPUB to a `Write`-only sink without ever seeking: every
+    /// entry is streamed with a ZIP data descriptor, so the whole book can be
+    /// produced end-to-end without buffering it in memory. Suitable for
+    /// response bodies (Cloudflare Workers, HTTP servers, ...) where the
+    /// output cannot be seeked.
+    pub fn write_to_stream<W: Write>(&self, output: W) -> Result<W, EpubError> {
+        self.write_to_stream_with(output, |_| None)
+    }
+
+    /// Like [`EpubBook::write_to_stream`], resolving deferred assets
+    /// (`data: None`) through `provider` one at a time.
+    pub fn write_to_stream_with<W: Write>(
+        &self,
+        output: W,
+        provider: impl Fn(&str) -> Option<Vec<u8>>,
+    ) -> Result<W, EpubError> {
+        self.validate()?;
+        let mut archive = ZipWriter::new_stream(output);
+        write_epub_body(&mut archive, self, &provider)?;
+        Ok(archive.finish()?.into_inner())
+    }
+
+    fn validate(&self) -> Result<(), EpubError> {
         validate_metadata(&self.metadata)?;
         for asset in &self.assets {
             validate_asset(asset)?;
@@ -363,177 +417,189 @@ impl EpubBook {
         {
             return Err(EpubError::InvalidMetadata("cover asset"));
         }
-
-        let image_only = is_image_only(&self.sections);
-        let mut archive = ZipWriter::new(output);
-        write_entry(
-            &mut archive,
-            "mimetype",
-            MIMETYPE.as_bytes(),
-            CompressionMethod::Stored,
-        )?;
-        write_entry(
-            &mut archive,
-            "META-INF/container.xml",
-            CONTAINER_XML.as_bytes(),
-            CompressionMethod::Deflated,
-        )?;
-
-        if image_only {
-            write_entry(
-                &mut archive,
-                "item/style/fixed-layout-jp.css",
-                include_str!("../assets/aozora/template/item/style/fixed-layout-jp.css").as_bytes(),
-                CompressionMethod::Deflated,
-            )?;
-        } else {
-            for (name, content) in [
-                (
-                    "item/style/font.css",
-                    include_str!("../assets/aozora/template/item/style/font.css"),
-                ),
-                (
-                    "item/style/aozora.css",
-                    include_str!("../assets/aozora/template/item/style/aozora.css"),
-                ),
-                (
-                    "item/style/fixed-layout-jp.css",
-                    include_str!("../assets/aozora/template/item/style/fixed-layout-jp.css"),
-                ),
-                ("item/style/book-style.css", BOOK_STYLE_CSS),
-                (
-                    "item/style/style-reset.css",
-                    include_str!("../assets/aozora/template/item/style/style-reset.css"),
-                ),
-                (
-                    "item/style/style-standard.css",
-                    include_str!("../assets/aozora/template/item/style/style-standard.css"),
-                ),
-                (
-                    "item/style/style-advance.css",
-                    include_str!("../assets/aozora/template/item/style/style-advance.css"),
-                ),
-            ] {
-                write_entry(
-                    &mut archive,
-                    name,
-                    content.as_bytes(),
-                    CompressionMethod::Deflated,
-                )?;
-            }
-        }
-        if image_only {
-            for asset in &self.assets {
-                let path = format!("item/{}", asset.path);
-                write_entry(
-                    &mut archive,
-                    &path,
-                    &asset.data,
-                    CompressionMethod::Deflated,
-                )?;
-            }
-        }
-
-        if let Some(cover_asset) = &self.cover_asset
-            && !image_only
-        {
-            write_entry(
-                &mut archive,
-                "item/cover.xhtml",
-                render_cover(&self.metadata, cover_asset, self.kindle).as_bytes(),
-                CompressionMethod::Deflated,
-            )?;
-        }
-        for (index, section) in self.sections.iter().enumerate() {
-            let path = if is_title_page(section) {
-                "item/xhtml/title.xhtml".to_owned()
-            } else {
-                format!(
-                    "item/xhtml/{:04}.xhtml",
-                    self.sections[..=index]
-                        .iter()
-                        .filter(|section| !is_title_page(section))
-                        .count()
-                )
-            };
-            write_entry(
-                &mut archive,
-                &path,
-                render_section(
-                    &self.metadata,
-                    &section.body_fragment,
-                    self.vertical,
-                    self.kindle,
-                    self.title_markup.as_deref(),
-                    self.creator_markup.as_deref(),
-                    self.title_page_markup.as_deref(),
-                )
-                .as_bytes(),
-                CompressionMethod::Deflated,
-            )?;
-        }
-        if !image_only {
-            let text_css = render_text_css(&self.assets);
-            write_entry(
-                &mut archive,
-                "item/style/text.css",
-                text_css.as_bytes(),
-                CompressionMethod::Deflated,
-            )?;
-        }
-        write_entry(
-            &mut archive,
-            "item/standard.opf",
-            render_package(
-                &self.metadata,
-                &self.sections,
-                &self.assets,
-                self.cover_asset.as_deref(),
-                self.vertical,
-            )
-            .as_bytes(),
-            CompressionMethod::Deflated,
-        )?;
-        write_entry(
-            &mut archive,
-            "item/nav.xhtml",
-            render_nav(
-                &self.metadata,
-                &self.sections,
-                self.vertical,
-                self.title_markup.as_deref(),
-                &self.chapters,
-                self.toc_vertical,
-            )
-            .as_bytes(),
-            CompressionMethod::Deflated,
-        )?;
-        write_entry(
-            &mut archive,
-            "item/toc.ncx",
-            render_ncx(
-                &self.metadata,
-                &self.sections,
-                self.title_markup.as_deref(),
-                &self.chapters,
-            )
-            .as_bytes(),
-            CompressionMethod::Deflated,
-        )?;
-        if !image_only {
-            for asset in &self.assets {
-                let path = format!("item/{}", asset.path);
-                write_entry(
-                    &mut archive,
-                    &path,
-                    &asset.data,
-                    CompressionMethod::Deflated,
-                )?;
-            }
-        }
-
-        Ok(archive.finish()?)
+        Ok(())
     }
+}
+
+/// Writes every EPUB entry into `archive`. Shared by the seekable and
+/// streaming writers.
+fn write_epub_body<W: Write + Seek>(
+    archive: &mut ZipWriter<W>,
+    book: &EpubBook,
+    provider: &impl Fn(&str) -> Option<Vec<u8>>,
+) -> Result<(), EpubError> {
+    let image_only = is_image_only(&book.sections);
+    write_entry(
+        archive,
+        "mimetype",
+        MIMETYPE.as_bytes(),
+        CompressionMethod::Stored,
+    )?;
+    write_entry(
+        archive,
+        "META-INF/container.xml",
+        CONTAINER_XML.as_bytes(),
+        CompressionMethod::Deflated,
+    )?;
+
+    if image_only {
+        write_entry(
+            archive,
+            "item/style/fixed-layout-jp.css",
+            include_str!("../assets/aozora/template/item/style/fixed-layout-jp.css").as_bytes(),
+            CompressionMethod::Deflated,
+        )?;
+    } else {
+        for (name, content) in [
+            (
+                "item/style/font.css",
+                include_str!("../assets/aozora/template/item/style/font.css"),
+            ),
+            (
+                "item/style/aozora.css",
+                include_str!("../assets/aozora/template/item/style/aozora.css"),
+            ),
+            (
+                "item/style/fixed-layout-jp.css",
+                include_str!("../assets/aozora/template/item/style/fixed-layout-jp.css"),
+            ),
+            ("item/style/book-style.css", BOOK_STYLE_CSS),
+            (
+                "item/style/style-reset.css",
+                include_str!("../assets/aozora/template/item/style/style-reset.css"),
+            ),
+            (
+                "item/style/style-standard.css",
+                include_str!("../assets/aozora/template/item/style/style-standard.css"),
+            ),
+            (
+                "item/style/style-advance.css",
+                include_str!("../assets/aozora/template/item/style/style-advance.css"),
+            ),
+        ] {
+            write_entry(
+                archive,
+                name,
+                content.as_bytes(),
+                CompressionMethod::Deflated,
+            )?;
+        }
+    }
+    if image_only {
+        for asset in &book.assets {
+            write_asset(archive, asset, provider)?;
+        }
+    }
+
+    if let Some(cover_asset) = &book.cover_asset
+        && !image_only
+    {
+        write_entry(
+            archive,
+            "item/cover.xhtml",
+            render_cover(&book.metadata, cover_asset, book.kindle).as_bytes(),
+            CompressionMethod::Deflated,
+        )?;
+    }
+    for (index, section) in book.sections.iter().enumerate() {
+        let path = if is_title_page(section) {
+            "item/xhtml/title.xhtml".to_owned()
+        } else {
+            format!(
+                "item/xhtml/{:04}.xhtml",
+                book.sections[..=index]
+                    .iter()
+                    .filter(|section| !is_title_page(section))
+                    .count()
+            )
+        };
+        write_entry(
+            archive,
+            &path,
+            render_section(
+                &book.metadata,
+                &section.body_fragment,
+                book.vertical,
+                book.kindle,
+                book.title_markup.as_deref(),
+                book.creator_markup.as_deref(),
+                book.title_page_markup.as_deref(),
+            )
+            .as_bytes(),
+            CompressionMethod::Deflated,
+        )?;
+    }
+    if !image_only {
+        let text_css = render_text_css(&book.assets);
+        write_entry(
+            archive,
+            "item/style/text.css",
+            text_css.as_bytes(),
+            CompressionMethod::Deflated,
+        )?;
+    }
+    write_entry(
+        archive,
+        "item/standard.opf",
+        render_package(
+            &book.metadata,
+            &book.sections,
+            &book.assets,
+            book.cover_asset.as_deref(),
+            book.vertical,
+        )
+        .as_bytes(),
+        CompressionMethod::Deflated,
+    )?;
+    write_entry(
+        archive,
+        "item/nav.xhtml",
+        render_nav(
+            &book.metadata,
+            &book.sections,
+            book.vertical,
+            book.title_markup.as_deref(),
+            &book.chapters,
+            book.toc_vertical,
+        )
+        .as_bytes(),
+        CompressionMethod::Deflated,
+    )?;
+    write_entry(
+        archive,
+        "item/toc.ncx",
+        render_ncx(
+            &book.metadata,
+            &book.sections,
+            book.title_markup.as_deref(),
+            &book.chapters,
+        )
+        .as_bytes(),
+        CompressionMethod::Deflated,
+    )?;
+    if !image_only {
+        for asset in &book.assets {
+            write_asset(archive, asset, provider)?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes one asset entry, loading deferred (`data: None`) bytes from
+/// `provider` just before writing.
+fn write_asset<W: Write + Seek>(
+    archive: &mut ZipWriter<W>,
+    asset: &EpubAsset,
+    provider: &impl Fn(&str) -> Option<Vec<u8>>,
+) -> Result<(), EpubError> {
+    let path = format!("item/{}", asset.path);
+    let data = match &asset.data {
+        Some(data) => std::borrow::Cow::Borrowed(data.as_slice()),
+        None => std::borrow::Cow::Owned(
+            provider(&asset.path).ok_or_else(|| EpubError::MissingAsset(asset.path.clone()))?,
+        ),
+    };
+    write_entry(archive, &path, &data, CompressionMethod::Deflated)
 }
 
 fn validate_asset(asset: &EpubAsset) -> Result<(), EpubError> {
@@ -591,7 +657,7 @@ mod tests {
 
     use zip::ZipArchive;
 
-    use super::{EpubBook, EpubError, EpubMetadata};
+    use super::{EpubAsset, EpubBook, EpubError, EpubMetadata};
 
     #[test]
     fn rejects_empty_title() {
@@ -751,5 +817,58 @@ mod tests {
             .unwrap();
         assert!(nav.contains("xhtml/0001.xhtml"));
         assert!(!nav.contains("xhtml/0002.xhtml"));
+    }
+
+    #[test]
+    fn streams_the_same_entries_as_seekable_write() {
+        let book = EpubBook::new(
+            EpubMetadata::new("題名", "urn:uuid:test").with_creator("著者"),
+            "<p>本文</p>",
+        )
+        .with_vertical(true);
+        let mut seekable = Cursor::new(Vec::new());
+        book.write_to(&mut seekable).unwrap();
+        let mut streamed = Cursor::new(Vec::new());
+        book.write_to_stream(&mut streamed).unwrap();
+
+        let mut z1 = ZipArchive::new(Cursor::new(seekable.into_inner())).unwrap();
+        let mut z2 = ZipArchive::new(Cursor::new(streamed.into_inner())).unwrap();
+        assert_eq!(z1.len(), z2.len());
+        let names = (0..z1.len())
+            .map(|index| z1.by_index(index).unwrap().name().to_owned())
+            .collect::<Vec<_>>();
+        let stream_names = (0..z2.len())
+            .map(|index| z2.by_index(index).unwrap().name().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, stream_names);
+        for name in names {
+            let mut expected = Vec::new();
+            z1.by_name(&name)
+                .unwrap()
+                .read_to_end(&mut expected)
+                .unwrap();
+            let mut actual = Vec::new();
+            z2.by_name(&name).unwrap().read_to_end(&mut actual).unwrap();
+            assert_eq!(expected, actual, "entry {name} differs");
+        }
+    }
+
+    #[test]
+    fn streams_deferred_assets_through_the_provider() {
+        let book = EpubBook::new(EpubMetadata::new("題名", "urn:uuid:test"), "<p>本文</p>")
+            .with_assets([EpubAsset::lazy("image/0001.png", "image/png")]);
+        let mut streamed = Cursor::new(Vec::new());
+        book.write_to_stream_with(&mut streamed, |path| {
+            (path == "image/0001.png").then(|| b"png-data".to_vec())
+        })
+        .unwrap();
+        let mut archive = ZipArchive::new(Cursor::new(streamed.into_inner())).unwrap();
+        let mut data = Vec::new();
+        archive
+            .by_name("item/image/0001.png")
+            .unwrap()
+            .read_to_end(&mut data)
+            .unwrap();
+        assert_eq!(data, b"png-data");
     }
 }
