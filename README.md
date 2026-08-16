@@ -126,9 +126,66 @@ EPUB 3 準拠のファイルが生成されます。
 
 `aozora_epub3_lite` クレートとして、Rust プログラムから変換機能を呼び出せます。
 
+```sh
+cargo add aozora_epub3_lite --git https://github.com/Rumia-Channel/AozoraEpub3_Lite
+```
+
+または Cargo.toml に直接:
+
 ```toml
 [dependencies]
-aozora_epub3_lite = { path = "…" }
+aozora_epub3_lite = { git = "https://github.com/Rumia-Channel/AozoraEpub3_Lite" }
+```
+
+使用例（設定のロード → テキスト変換 → 画像収集 → EPUB 書き出し）:
+
+```rust
+use std::fs::File;
+use std::path::Path;
+
+use aozora_epub3_lite::{
+    AozoraConfig, EpubAsset, EpubBook, EpubMetadata, Input,
+    aozora_text_to_xhtml_sections_with_config, decode_input, image_references,
+};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. 設定（INI・注記資産・外字資産）を読み込む
+    let config = AozoraConfig::load_from_dirs(&[Path::new("assets/aozora")], None)?;
+
+    // 2. 入力（TXT / ZIP / TXTZ / CBZ）を開く
+    let input = Input::open("作品.txt")?;
+
+    for entry in input.text_entries() {
+        // 3. テキストをデコードして XHTML セクションへ変換
+        let text = decode_input(&input.read_text(entry)?, None)?;
+        let sections = aozora_text_to_xhtml_sections_with_config(&text, &config)?;
+
+        // 4. 本文が参照する画像をアセット化
+        let assets = image_references(&text)
+            .iter()
+            .filter_map(|reference| {
+                input.resolve_image(entry, reference).map(|(path, bytes)| {
+                    let media_type = if path.ends_with(".png") {
+                        "image/png"
+                    } else if path.ends_with(".gif") {
+                        "image/gif"
+                    } else {
+                        "image/jpeg"
+                    };
+                    EpubAsset::new(format!("image/{path}"), media_type, bytes.clone())
+                })
+            })
+            .collect::<Vec<_>>();
+
+        // 5. EPUB を組み立てて書き出す
+        let metadata = EpubMetadata::new("作品タイトル", "urn:uuid:example");
+        let book = EpubBook::from_sections(metadata, sections)
+            .with_vertical(true)
+            .with_assets(assets);
+        book.write_to(File::create("作品.epub")?)?;
+    }
+    Ok(())
+}
 ```
 
 主な公開 API:
