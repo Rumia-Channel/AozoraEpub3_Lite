@@ -1,6 +1,6 @@
 # AozoraEpub3_Lite 引継ぎメモ
 
-更新日: 2026-08-13
+更新日: 2026-08-16
 作業ディレクトリ: `C:/Users/rumia/Desktop/APP/Rust/AozoraEpub3_Lite`
 作業ブランチ: `develop`
 
@@ -98,9 +98,25 @@ cargo run -- --help
 text::tests::keeps_suffix_tcy_notes_outside_following_ruby
 ```
 
+### 2026-08-16: パリティ差分を 64行 → 8行 に縮小（19/21 完全一致）
+
+Java 参照との XHTML 差分をカテゴリ単位で解析し、以下を修正した（11カテゴリ・45行分）。
+
+- 単ページ画像のレンダリング: `split_image_page_sections` で `<p>` を除去し `<span><img class="fit">` を `<html class="hltr">` + `<body class="p-image">` セクションに（画像回り込み0002解消）
+- 画像幅の拡張子フォールバック: `CollectedAsset` に参照単位の `available` を導入し、元の参照名で解決できない画像は ratio=0 → fit。装飾を書き換え前に実行（画像回り込み0010解消）
+- 画像 alt の入力間共有: 入力ごとに `image_alt_map` をクリア（出版社0002解消）
+- 横組み内の `“→〝` 変換抑止: `convert_inline_with_yoko` + `in_yoko` 状態を `convert_inline` / `normalize_vertical_character` に導入（横書き横組み・0043解消）
+- ブロック内インライン注記の行頭空白保持（pb1 btm 解消）
+- 窓中見出し2個目の抑止: 行単位 `in_mado` + 行頭プレフィクス判定（0028・窓見出し解消）
+- 画像 alt 内の正立タグ: `apply_alt_upright` を `decorate_image_tags` に適用（0030解消）
+- 「ここから中見出し」+同Line内容+閉注記の1行化: `merge_same_line_block_pieces`（0049解消）
+- 章名のタグ保持: `parse_raw_anchor` を `<a `（属性必須）に限定、生タグ素通しを tcy タグのみに（目次0002解消）
+- SVG ページ末尾改行の除去（test_png解消）
+- タイトル後の空行保持: `remove_metadata_lines` の先頭空行削除を除去（横書き横組み・目次0001解消）
+
 ## 検証済みコマンド
 
-以下は 2026-08-13 時点で成功済み。
+以下は 2026-08-16 時点で成功済み。
 
 ```text
 cargo fmt --all -- --check
@@ -114,7 +130,7 @@ ccc index
 
 結果:
 
-- `cargo test --all`: 156 passed、1 ignored
+- `cargo test --all`: 163 passed、1 ignored
 - `cargo test --test epub_structure`: 11 passed
 - `cargo test --test cli_config`: 3 passed
 - clippy: 警告なし
@@ -135,29 +151,17 @@ cargo run --quiet -- -d target/progress-check \
 
 ## 既知の残存事項
 
-### 1. Java 版との完全一致は未達（2026-08-14 時点: 21件中13件がXHTML完全一致）
+### 1. Java 版との完全一致は未達（2026-08-16 時点: 21件中19件がXHTML完全一致、残差分8行）
 
-Java 参照（`target/java-run/out-all`、1ファイル1プロセス生成）と Rust 最新（`target/parity-rust-fresh`）を `\r\n→\n` 正規化して1行単位で比較。**13/21 完全一致**。
+Java 参照（`target/java-run/out-all`、1ファイル1プロセス生成）と Rust 最新（`target/parity-rust-head`）を `\r\n→\n` 正規化して1行単位で比較。**19/21 完全一致**。
 
-一致済み13件: IVS、ラテン文字、ルビ※※《》、傍点・傍線、割り注、外字⚽、正立☆∀、禁則処理、濁点、縦中横AAA、行内地付き、BOM付きUTF-8、電書協EPUBサンプル。
+一致済み19件: IVS、ラテン文字、ルビ※※《》、傍点・傍線、割り注、外字⚽、外字画像、横書き横組み、正立☆∀、注記、濁点、画像回り込み、禁則処理、窓見出し、縦中横AAA、行内地付き、BOM付きUTF-8、電書協EPUBサンプル、test_png。
 
-残差分（約64行）:
-- 0049同Line化はsplit_block_notesのmerge+887-branchで実装試行したが、1045/10の行頭空白が消えるためrevert。Jは中見出し内rawタグ（<IMG>/<A>）を保持しつつsrc空img・href付きaのみ除去（attr欠落は保持、attr空は除去の傾向）
-- 目次0002の章名タグ: Jは中見出し内で src空img・href付きaのみ除去し<IMG>/<A>等は生タグ保持。href無しaの生タグ保持を試したがname属性aまで保持して0007/0049を壊すためrevert。Jのa分岐（linkStartedフラグ）の正確な再現が必要
-- 0048破損注記はJのchukiSufPattern非マッチ（対象に］）だが、同条件はルビ※※・目次の注記付き/は中見出しを壊すため未適用。suffix_note_atに特殊注記（の注記付き終わり等）を除外して限定適用するのが次の一手
-- **画像 float/単ページ分類（約39行）**: 注記0002/0005/0008（`fit` vs `width:%`、alt）、画像回り込み24（`fit`+height-fix、alt取り違え）、出版社5
-- **0030 注記内注記（6行）**: DDF行の画像注記（Jはimg除去・Rはimg表示）
-- **目次 14行**: `<IMG>`等タグ章名、`○○○○○※《中見出し》`章名の注記除去
-- **test_png 7行**: nav章（画像ページ番号）
-- **横書き横組み 5行**: `“→〝`の横組み（inYoko）ゲート、pb1 btmの行頭空白
-- **0025 魔境/第一章（4行）**: 入れ子「」を含む後置見出し注記
-- **窓見出し4行（0028含む）**: 2個目の窓中見出し注記をJavaが無視
-- **0048 2行**: 破損注記（`［＃「＃…］`）のliteral出力
-- **0049 4行**: `ここから中見出し`＋同Line内容のインライン化
-- **画像alt**: imageAltMap実装済み（0002/0004/0007解消）
-- **外字画像 2行**: ルビ基底の画像注記
+残差分（8行）:
+- **出版社0001（3行）**: タイトル前の表紙画像（`［＃（img/表紙.jpg）］` + 直後改ページ）。Java は `isImageSectionLine`（画像単独行+直後改ページ→pなし）とタイトル前バッファ処理（preTitleBuf）で `<p><br/></p>` + pなし `<span>` を出力し、Rust は `<p><span>` で出力する。解消には Java のタイトル前バッファ処理の再現が必要。
+- **目次0005（5行）**: 章名内の `※※［＃米印］※［＃始め二重山括弧］`（《の直前の※が偶数）で Java が《をルビ開始と誤認し、未閉じルビの行末破棄で章名と `</h2>` を欠落させるデータ欠落バグ。**再現しない方針**。Java 版へ issue 報告済み（`kyukyunyorituryo/AozoraEpub3#34`。公式バイナリ 1.1.1b33Q でも再現確認済み）。Java 側の修正が反映されれば自動的に解消する。
 
-対応済み: 字下げ省略（ブロック継続のclose+open同Line）、ブロック注記の行頭空白、ネスト、p-bottomのvrtl、`《直前の外字注記をルビ基底に含める（山礀等）`。
+EPUBCheck（21件）: 19件 0 エラー。注記（4件）・外字画像（1件）は J 参照と同一のエラー（alt 内 `<span class="upr">` と `&times;` 未宣言）。
 
 ### 2. CLI と外部設定の残存事項
 
@@ -168,10 +172,11 @@ CLI の主要オプションと外部設定の基本経路は実装・テスト�
 
 ### 3. 検証環境
 
-- 差分計測: `target/xhtml-diff-report*.txt`（旧）、最新は `target/parity-rust-fresh` と `target/java-run/out-all` の直接比較（Python + difflib）。
+- 差分計測: `target/xhtml-diff-report*.txt`（旧）、最新は `target/parity-rust-head` と `target/java-run/out-all` の直接比較（Python + difflib）。
 - `tests/epub_parity.rs` は比較用のJava/Rust生成ディレクトリが必要なため通常は ignored。新参照（out-all）に合わせて更新が必要。
-- `target/parity-rust-fresh` に現行実装で生成した21件を EPUBCheck で検証し、20/21 が 0 エラー。注記のみ J 参照と同一の playOrder 重複 2 件 + 未定義フラグメント 1 件（J も同一エラーを出力）。
-- テスト: `cargo test --all` 157 passed / 1 ignored、`cargo clippy --all-targets --all-features -D warnings` 通過。
+- `target/parity-rust-head` に現行実装で生成した21件を EPUBCheck で検証し、19件 0 エラー。注記（4件）・外字画像（1件）は J 参照と同一のエラー（alt 内 `<span class="upr">`、`&times;` 未宣言、playOrder 重複、未定義フラグメント）。
+- Java 参照の再生成・デバッグには、`target/java-build`（sample ソースの javac ビルド）または公式バイナリ（`C:/Users/rumia/Documents/AozoraEpub3/AozoraEpub3.jar`、CLI は `java -cp AozoraEpub3.jar AozoraEpub3` で起動）が使える。
+- テスト: `cargo test --all` 163 passed / 1 ignored、`cargo clippy --all-targets --all-features -D warnings` 通過。
 
 ### 4. 対象外
 
@@ -223,8 +228,9 @@ Web小説取得、HTTP / HTTPS リソース取得、RAR入力、GUIは、未実�
 - `d437e80`: Kobo 栞用 paragraph ID
 - `6840d56`: `底本：` 奥付分離と目次除外
 - `325c0a8`: コメントブロックの字下げ抑止
+- `f740859`: Parity 残差分 64行→8行（19/21完全一致、画像・横組み・窓見出し・0049・目次章名・空行処理）
 
-`develop` の HEAD は `origin/develop` と同期済みだが、作業ツリーには CLI / 外部設定 / 回帰テスト / 本文変換の未コミット差分がある。`master` は変更していない。
+`develop` の HEAD は `origin/develop` より先行しており、今回のパリティ修正と本 HANDOFF 更新は未 push。`master` は変更していない。
 
 再開時は既存差分を破棄せず、まず `git status --short --branch` で状態を確認すること。
 
