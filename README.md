@@ -29,6 +29,23 @@ cargo build --release
 
 生成物は `target/release/AozoraEpub3_Lite`（Windows では `AozoraEpub3_Lite.exe`）です。
 
+## 配置（本家 AozoraEpub3 と同じ構成）
+
+リリースパッケージは、本家 AozoraEpub3 と同じ配置で展開できます。
+
+```text
+AozoraEpub3_Lite(.exe)
+chuki_*.txt        # 注記資産
+replace.txt        # 文字置換
+gaiji/             # 外字フォント
+presets/*.ini      # 端末プリセット
+template/          # EPUB テンプレート
+```
+
+実行時にバイナリは**実行ファイルと同じディレクトリ**の資産を読み込みます
+（見つからない場合はリポジトリ内の `assets/aozora` にフォールバック）。
+`--config-dir` で別ディレクトリを明示指定することもできます。
+
 ## 使い方
 
 ```text

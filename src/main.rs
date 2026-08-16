@@ -69,7 +69,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let preset = external_settings_path(&options)?;
     let uses_builtin_config = options.config_dirs.is_empty();
     let config_dirs = if uses_builtin_config {
-        vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/aozora")]
+        vec![default_config_dir()]
     } else {
         options.config_dirs.iter().map(PathBuf::from).collect()
     };
@@ -111,6 +111,23 @@ fn run() -> Result<(), Box<dyn Error>> {
         )?;
     }
     Ok(())
+}
+
+/// 既定の設定ディレクトリ。実行ファイルの隣（本家 AozoraEpub3 と同じ配置:
+/// `chuki_*.txt` や `gaiji/` が実行ファイルと同じディレクトリにある）を
+/// 優先し、無ければ開発用の `assets/aozora` にフォールバックする。
+/// 配布バイナリは実行ファイル隣の資産で動く。
+fn default_config_dir() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(directory) = exe.parent()
+    {
+        let has_aozora_assets =
+            directory.join("chuki_tag.txt").is_file() || directory.join("gaiji").is_dir();
+        if has_aozora_assets {
+            return directory.to_path_buf();
+        }
+    }
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/aozora")
 }
 
 fn apply_ini_defaults(options: &mut CliOptions, config: &AozoraConfig) {
