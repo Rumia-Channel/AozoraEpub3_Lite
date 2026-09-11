@@ -1,6 +1,6 @@
 [package]
 name = "aozora_epub3_lite"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "Aozora Bunko text to EPUB 3 converter (Rust lightweight port of AozoraEpub3)"
