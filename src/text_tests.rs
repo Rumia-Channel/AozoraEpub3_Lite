@@ -657,13 +657,15 @@ fn converts_external_latin_decomposition_inside_brackets() {
 }
 
 #[test]
-fn ini_page_break_setting_controls_section_split() {
+fn ini_page_break_setting_controls_size_split_only() {
+    // Java: `PageBreak` gates size-based splitting only; `［＃改ページ］`
+    // notes always start a new section.
     let ini = crate::config::IniSettings::parse("PageBreak=0").unwrap();
     let config = AozoraConfig::from_ini(ini);
     let sections =
         super::aozora_text_to_xhtml_sections_with_config("前\n［＃改ページ］\n後", &config)
             .unwrap();
-    assert_eq!(sections.len(), 1);
+    assert_eq!(sections.len(), 2);
     assert!(!sections[0].contains("改ページ"));
 }
 #[test]

@@ -239,6 +239,11 @@ pub struct NavChapter {
     pub label: String,
     pub path: String,
     pub anchor: Option<String>,
+    /// Raw heading level before TOC nesting: 1 for page-break chapters and
+    /// 大見出し, 2 for 中見出し, 3 for 小見出し (mirrors
+    /// `ChapterLineInfo.getLevel`). The nav/NCX renderers convert this into
+    /// the actual nesting depth.
+    pub level: u8,
 }
 
 impl NavChapter {
@@ -247,11 +252,17 @@ impl NavChapter {
             label: label.into(),
             path: path.into(),
             anchor: None,
+            level: 1,
         }
     }
 
     pub fn with_anchor(mut self, anchor: impl Into<String>) -> Self {
         self.anchor = Some(anchor.into());
+        self
+    }
+
+    pub fn with_level(mut self, level: u8) -> Self {
+        self.level = level;
         self
     }
 }
@@ -266,6 +277,15 @@ pub struct EpubBook {
     vertical: bool,
     toc_vertical: bool,
     kindle: bool,
+    /// `TocPage` INI key: insert `nav.xhtml` into the spine after the title
+    /// page so the TOC is a visible page (Java `bookInfo.insertTocPage`).
+    toc_page: bool,
+    /// `NavNest` INI key: nest the nav.xhtml `<ol>` by chapter level.
+    nav_nest: bool,
+    /// `NcxNest` INI key: nest toc.ncx navPoints by chapter level.
+    ncx_nest: bool,
+    /// `TitleToc` INI key (Java default true): include the title in the TOC.
+    title_toc: bool,
     title_markup: Option<String>,
     creator_markup: Option<String>,
     title_page_markup: Option<String>,
@@ -298,6 +318,10 @@ impl EpubBook {
             vertical: true,
             toc_vertical: false,
             kindle: false,
+            toc_page: false,
+            nav_nest: false,
+            ncx_nest: false,
+            title_toc: true,
             title_markup: None,
             creator_markup: None,
             title_page_markup: None,
@@ -324,6 +348,26 @@ impl EpubBook {
 
     pub fn with_toc_vertical(mut self, toc_vertical: bool) -> Self {
         self.toc_vertical = toc_vertical;
+        self
+    }
+
+    /// `TocPage` INI key: add `nav.xhtml` to the spine after the title page.
+    pub fn with_toc_page(mut self, toc_page: bool) -> Self {
+        self.toc_page = toc_page;
+        self
+    }
+
+    /// `NavNest`/`NcxNest` INI keys: nest nav.xhtml `<ol>` and toc.ncx
+    /// navPoints by chapter level.
+    pub fn with_toc_nest(mut self, nav_nest: bool, ncx_nest: bool) -> Self {
+        self.nav_nest = nav_nest;
+        self.ncx_nest = ncx_nest;
+        self
+    }
+
+    /// `TitleToc` INI key (Java default true): include the title in the TOC.
+    pub fn with_title_toc(mut self, title_toc: bool) -> Self {
+        self.title_toc = title_toc;
         self
     }
 
@@ -547,6 +591,7 @@ fn write_epub_body<W: Write + Seek>(
             &book.assets,
             book.cover_asset.as_deref(),
             book.vertical,
+            book.toc_page,
         )
         .as_bytes(),
         CompressionMethod::Deflated,
@@ -561,6 +606,9 @@ fn write_epub_body<W: Write + Seek>(
             book.title_markup.as_deref(),
             &book.chapters,
             book.toc_vertical,
+            book.toc_page,
+            book.nav_nest,
+            book.title_toc,
         )
         .as_bytes(),
         CompressionMethod::Deflated,
@@ -573,6 +621,8 @@ fn write_epub_body<W: Write + Seek>(
             &book.sections,
             book.title_markup.as_deref(),
             &book.chapters,
+            book.ncx_nest,
+            book.title_toc,
         )
         .as_bytes(),
         CompressionMethod::Deflated,

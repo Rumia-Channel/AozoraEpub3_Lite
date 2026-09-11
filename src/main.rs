@@ -3,7 +3,7 @@ use aozora_epub3_lite::{
     TextEntry, TitleType, aozora_text_to_xhtml_sections_with_chapters, apply_alt_upright,
     collect_image_alts, decode_text, detect_meta_with_gaiji, escape_html, file_title_creator,
     image::process as process_image, image_reference_occurrences, image_references,
-    inline_to_xhtml,
+    inline_to_xhtml, remove_metadata_lines,
 };
 use std::env;
 use std::error::Error;
@@ -252,10 +252,15 @@ fn convert_input(
         let nav_chapters = chapter_records
             .into_iter()
             .map(|record| {
-                NavChapter::new(
+                let mut chapter = NavChapter::new(
                     record.label,
                     format!("xhtml/{:04}.xhtml", record.section_index + 1),
                 )
+                .with_level(record.level);
+                if let Some(anchor) = record.anchor {
+                    chapter = chapter.with_anchor(anchor);
+                }
+                chapter
             })
             .collect::<Vec<_>>();
         let title_markup_input = if options.use_file_name {
@@ -315,6 +320,9 @@ fn convert_input(
             .with_title_page_if(title_page_selected)
             .with_vertical(vertical)
             .with_kindle(is_kindle(options))
+            .with_toc_page(config.toc_page)
+            .with_toc_nest(config.nav_nest, config.ncx_nest)
+            .with_title_toc(config.title_toc)
             .with_assets(
                 assets
                     .iter()
@@ -402,41 +410,6 @@ fn append_gaiji_assets(
         ));
     }
     Ok(())
-}
-fn remove_metadata_lines(input: &str, metadata: &BookMeta) -> String {
-    let Some(start) = metadata.meta_line_start else {
-        return input.to_owned();
-    };
-    let Some(end) = metadata.title_end_line else {
-        return input.to_owned();
-    };
-    let lines = input.lines().collect::<Vec<_>>();
-    if start >= lines.len() || end >= lines.len() || start > end {
-        return input.to_owned();
-    }
-
-    let mut remove_start = start;
-    while remove_start > 0 && is_metadata_wrapper(lines[remove_start - 1]) {
-        remove_start -= 1;
-    }
-    let mut remove_end = end;
-    while remove_end + 1 < lines.len() && is_metadata_wrapper(lines[remove_end + 1]) {
-        remove_end += 1;
-    }
-
-    let retained = lines
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, line)| (index < remove_start || index > remove_end).then_some(line))
-        .collect::<Vec<_>>();
-    // Java はタイトル行後の空行を `<p><br/></p>` として本文に出力するため、
-    // タイトル行の除去に伴う先頭空行の削除は行わない。
-    retained.join("\n")
-}
-
-fn is_metadata_wrapper(line: &str) -> bool {
-    let line = line.trim();
-    line.starts_with("［＃ここから") || line.starts_with("［＃ここで")
 }
 
 /// Builds a disambiguating output-name suffix for archives with several

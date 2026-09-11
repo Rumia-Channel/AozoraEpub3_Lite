@@ -882,6 +882,44 @@ fn remove_image_anchor_tags(line: &str) -> String {
     }
     out
 }
+/// Removes the detected metadata block (title/author lines plus surrounding
+/// `ここから/ここで` wrapper notes) from the input, returning the body text
+/// the reference converter feeds to section splitting.
+pub fn remove_metadata_lines(input: &str, metadata: &BookMeta) -> String {
+    let Some(start) = metadata.meta_line_start else {
+        return input.to_owned();
+    };
+    let Some(end) = metadata.title_end_line else {
+        return input.to_owned();
+    };
+    let lines = input.lines().collect::<Vec<_>>();
+    if start >= lines.len() || end >= lines.len() || start > end {
+        return input.to_owned();
+    }
+
+    let mut remove_start = start;
+    while remove_start > 0 && is_metadata_wrapper(lines[remove_start - 1]) {
+        remove_start -= 1;
+    }
+    let mut remove_end = end;
+    while remove_end + 1 < lines.len() && is_metadata_wrapper(lines[remove_end + 1]) {
+        remove_end += 1;
+    }
+
+    let retained = lines
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, line)| (index < remove_start || index > remove_end).then_some(line))
+        .collect::<Vec<_>>();
+    // Java はタイトル行後の空行を `<p><br/></p>` として本文に出力するため、
+    // タイトル行の除去に伴う先頭空行の削除は行わない。
+    retained.join("\n")
+}
+
+fn is_metadata_wrapper(line: &str) -> bool {
+    let line = line.trim();
+    line.starts_with("［＃ここから") || line.starts_with("［＃ここで")
+}
 
 #[cfg(test)]
 mod tests {
