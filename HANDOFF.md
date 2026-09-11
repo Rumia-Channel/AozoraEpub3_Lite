@@ -1,6 +1,6 @@
 # AozoraEpub3_Lite 引継ぎメモ
 
-更新日: 2026-08-16
+更新日: 2026-09-12
 作業ディレクトリ: `C:/Users/rumia/Desktop/APP/Rust/AozoraEpub3_Lite`
 作業ブランチ: `develop`
 
@@ -78,6 +78,53 @@ cargo run -- --help
 
 ## 重要な直近修正
 
+### 2026-09-12: `docs/xhtml-diff-investigation.md` の4パターンを解消、長編2本が完全一致
+
+`origin/investigate/xhtml-diff` の調査メモにあった4パターンと、実データ比較で追加判明した
+差分を修正した。**縦書き長編87ファイル・49ファイル、横書き49ファイルが Java 出力と
+byte 一致**（`dcterms:modified` は変換時刻のため実行ごとに異なる）。
+
+修正内容:
+
+- **パターンD (text.css)**: `@page` margin を `0 0 0 0`、`html.vrtl`/`html.hltr` も `0 0 0 0` に。
+  外字フォント挿入時の空行位置も Java と同じ1行に。
+- **パターンB (replace.txt)**: 実行ファイル隣に `replace.txt` が無い場合は置換を適用しない
+  （Java `jarPath/replace.txt` と同じ条件）。`AozoraConfig::load_from_dirs` は
+  manifest フォールバック時のみ `character_replacements` をクリアする。
+- **パターンC (merge_same_line_block_pieces)**: ブロック注記を含む行は分割せず1行で出力する
+  （`contains_block_note` + `bare` フラグ）。Java `printLineBuffer` の `noBr`
+  （`chuki_tag.txt` 4列目=1）と `isBlockTag` 相当。行内のブロック開閉・横組み状態は
+  `render_lines` の no_br 分岐で追跡する。
+- **パターンA (空行)**: `noBr` 行では空行カウントを行わない Java 挙動に追従（上記修正に含む）。
+- **SpaceHyphenation**: `SpaceHyphenation` INI を実装。20文字目以降の「文字に挟まれた」
+  全角スペースのみ `<span class="fullsp">`/U+2000×2 に変換（`java_pos` で Java の
+  phase-1 文字位置を追跡）。
+- **連続ルビ**: `｜A《x》｜B《y》` を1つの `<ruby>` にまとめる。`｜` 分岐に `continue` が
+  無く次文字を literal 化していたバグと、`has_following_implicit_ruby` の基底判定を修正。
+- **対応する `《》` が無い `｜`**: マーカーだけ消費する（`〝｜♡〟` → `〝♡〟`）。
+- **正立 (`upr`)**: Java は `converter.vertical && !inYoko` の時だけ付与する。Lite は無条件に
+  付けていたため、`-hor` でも `upr` が付いていた。`allow_upright && config.vertical` に修正し、
+  `-hor` を `config.vertical` に反映させる。
+- **水平表題ページ (`TitlePage=2`)**: `title_horizontal.vm` 相当のレイアウトを実装。
+  表題行は `converter.vertical=false` で変換する（`upr` が付かない）。
+- **目次/NCX の表題項目**: 生の表題文字列（`bookInfo.title`）を使う。変換済みマークアップを使うと
+  `upr` などが混入する。
+- **manifest**: 外字フォントの item を xhtml セクション群の後・ncx の前へ（Java と同じ順）。
+- **`dcterms:modified`**: 変換時刻を ISO 8601 UTC で出力（自前の civil-from-days 計算）。
+- **画像取得失敗時の空 span 除去**: class 付きの空 span（二分アキ等）は残し、画像ラッパー
+  （class なし）だけを除去する。
+
+回帰テスト:
+
+```text
+text::tests::keeps_block_note_lines_out_of_paragraph_wrappers
+text::tests::merges_consecutive_explicit_ruby_groups
+text::tests::applies_space_hyphenation_for_late_full_width_spaces
+tests::keeps_class_carrying_empty_spans_when_images_are_missing
+```
+
+### 2026-08-16: 縦中横の後置注記
+
 後置注記による縦中横がルビの途中に入り、不正な XHTML を生成していた問題を修正した。
 
 入力例:
@@ -151,14 +198,20 @@ cargo run --quiet -- -d target/progress-check \
 
 ## 既知の残存事項
 
-### 1. Java 版との完全一致は未達（2026-08-16 時点: 21件中19件がXHTML完全一致、残差分8行）
+### 1. Java 版との一致状況（2026-09-12: 長編2本が完全一致）
 
-Java 参照（`target/java-run/out-all`、1ファイル1プロセス生成）と Rust 最新（`target/parity-rust-head`）を `\r\n→\n` 正規化して1行単位で比較。**19/21 完全一致**。
+`sample/AozoraEpub3/test_data` の21件について、2026-08-16 時点で 19/21 が XHTML 完全一致。
+2026-09-12 に実データ（Web小説長編）で追加の差分を解消し、**以下が byte 一致**した。
 
-一致済み19件: IVS、ラテン文字、ルビ※※《》、傍点・傍線、割り注、外字⚽、外字画像、横書き横組み、正立☆∀、注記、濁点、画像回り込み、禁則処理、窓見出し、縦中横AAA、行内地付き、BOM付きUTF-8、電書協EPUBサンプル、test_png。
+- `n7783eg いろはにサキュバス～サキュバスの倒し方教えます～`（縦書き・87ファイル）
+- `n2878hd いろはにサキュバスⅡ～今度こそ、サキュバスの倒し方教えます～`（縦書き・49ファイル、横書き49ファイル）
 
-残差分（8行）:
-- **出版社0001（3行）**: タイトル前の表紙画像（`［＃（img/表紙.jpg）］` + 直後改ページ）。Java は `isImageSectionLine`（画像単独行+直後改ページ→pなし）とタイトル前バッファ処理（preTitleBuf）で `<p><br/></p>` + pなし `<span>` を出力し、Rust は `<p><span>` で出力する。解消には Java のタイトル前バッファ処理の再現が必要。
+比較方法: `java -cp AozoraEpub3.jar AozoraEpub3 -i AozoraEpub3.ini -enc UTF-8 -ext .epub -of` と
+Lite CLI を同じ INI / config-dir で実行し、EPUB 内の xhtml / css / opf / ncx / nav を
+CR 除去して byte 比較（`dcterms:modified` は変換時刻のため比較から除外）。
+
+残差分（21件フィクスチャの旧記録）:
+- **出版社0001（3行）**: タイトル前の表紙画像（`［＃（img/表紙.jpg）］` + 直後改ページ）。Java は `isImageSectionLine`（画像単独行+直後改ページ→pなし）とタイトル前バッファ処理（preTitleBuf）で `<p><br/></p>` + pなし `<span>` を出力し、Rust は `<p><span>` で出力する。解消には Java のタイトル前バッファ処理の再現が必要（2026-09-12 時点で未検証・未解消）。
 - **目次0005（5行）**: 章名内の `※※［＃米印］※［＃始め二重山括弧］`（《の直前の※が偶数）で Java が《をルビ開始と誤認し、未閉じルビの行末破棄で章名と `</h2>` を欠落させるデータ欠落バグ。**再現しない方針**。Java 版へ issue 報告済み（`kyukyunyorituryo/AozoraEpub3#34`。公式バイナリ 1.1.1b33Q でも再現確認済み）。Java 側の修正が反映されれば自動的に解消する。
 
 EPUBCheck（21件）: 19件 0 エラー。注記（4件）・外字画像（1件）は J 参照と同一のエラー（alt 内 `<span class="upr">` と `&times;` 未宣言）。
@@ -172,11 +225,11 @@ CLI の主要オプションと外部設定の基本経路は実装・テスト�
 
 ### 3. 検証環境
 
-- 差分計測: `target/xhtml-diff-report*.txt`（旧）、最新は `target/parity-rust-head` と `target/java-run/out-all` の直接比較（Python + difflib）。
-- `tests/epub_parity.rs` は比較用のJava/Rust生成ディレクトリが必要なため通常は ignored。新参照（out-all）に合わせて更新が必要。
+- 差分計測: `target/parity-check/{java,rust,java2,rust2,java-hor,rust-hor}` に Java / Lite の出力を置き、EPUB 内エントリを CR 除去して byte 比較（Python + zipfile/difflib）。`dcterms:modified` は変換時刻のため比較前に除去する。
+- `tests/epub_parity.rs` は比較用のJava/Rust生成ディレクトリが必要なため通常は ignored（`AOZORA_JAVA_DIR` / `AOZORA_RUST_DIR` を設定して `cargo test -- --ignored`）。
 - `target/parity-rust-head` に現行実装で生成した21件を EPUBCheck で検証し、19件 0 エラー。注記（4件）・外字画像（1件）は J 参照と同一のエラー（alt 内 `<span class="upr">`、`&times;` 未宣言、playOrder 重複、未定義フラグメント）。
 - Java 参照の再生成・デバッグには、`target/java-build`（sample ソースの javac ビルド）または公式バイナリ（`C:/Users/rumia/Documents/AozoraEpub3/AozoraEpub3.jar`、CLI は `java -cp AozoraEpub3.jar AozoraEpub3` で起動）が使える。
-- テスト: `cargo test --all` 163 passed / 1 ignored、`cargo clippy --all-targets --all-features -D warnings` 通過。
+- テスト: `cargo test --all` 170 passed / 1 ignored、`cargo clippy --all-targets --all-features -D warnings` 通過。
 
 ### 4. 対象外
 

@@ -99,6 +99,79 @@ jobs:
         shell: pwsh
         run: cargo build --locked --release --target "${{ matrix.target }}" --bin AozoraEpub3_Lite
 
+      - name: Upload unsigned Windows binary
+        if: matrix.platform == 'win'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
+          if-no-files-found: error
+
+      - name: Package release asset
+        if: matrix.platform != 'win'
+        id: package
+        shell: pwsh
+        run: |
+          $archivePath = & .\scripts\package-release.ps1 `
+            -BinaryPath "target/${{ matrix.target }}/release/${{ matrix.binary }}" `
+            -Platform "${{ matrix.platform }}" `
+            -Arch "${{ matrix.arch }}" `
+            -Version "${{ needs.validate.outputs.version }}" `
+            -OutputDir "dist"
+
+          "archive_path=$archivePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "archive_name=$([System.IO.Path]::GetFileName($archivePath))" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload release asset
+        if: matrix.platform != 'win'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.archive_name }}
+          path: ${{ steps.package.outputs.archive_path }}
+          if-no-files-found: error
+
+  sign-windows:
+    name: Sign ${{ matrix.name }}
+    needs:
+      - validate
+      - build
+    runs-on: ${{ matrix.os }}
+    environment: CodeSining
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-2025
+            platform: win
+            arch: x64
+            binary: AozoraEpub3_Lite.exe
+            target: x86_64-pc-windows-msvc
+          - name: Windows ARM64
+            os: windows-11-arm
+            platform: win
+            arch: arm64
+            binary: AozoraEpub3_Lite.exe
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download unsigned binary
+        uses: actions/download-artifact@v4
+        with:
+          name: unsigned-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release
+
+      - name: Sign Windows binary (Certum SimplySign)
+        uses: Rumia-Channel/windows-certum-signin@main
+        with:
+          certum-username: ${{ secrets.CERTUM_USERNAME }}
+          certum-otp-uri: ${{ secrets.CERTUM_OTP_URI }}
+          certum-key-id: ${{ vars.CERTUM_KEY_ID }}
+          signer: authenticode
+          files: |
+            target/${{ matrix.target }}/release/${{ matrix.binary }}
+
       - name: Package release asset
         id: package
         shell: pwsh
@@ -124,6 +197,7 @@ jobs:
     needs:
       - validate
       - build
+      - sign-windows
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

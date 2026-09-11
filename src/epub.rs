@@ -17,7 +17,7 @@ const TEXT_CSS: &str = r#"@charset "utf-8";
 
 /** 共通 テキスト用スタイル */
 @page {
-margin: 0.5em 0.5em 0.5em 0.5em;
+margin: 0 0 0 0;
 }
 body {
 margin: 0;
@@ -30,7 +30,7 @@ vertical-align: baseline;
 }
 /** 縦書き テキスト用スタイル */
 html.vrtl {
-margin: 0em 0em 0em 0em;
+margin: 0 0 0 0;
 padding: 0;
 writing-mode: vertical-rl;
 -webkit-writing-mode: vertical-rl;
@@ -54,7 +54,7 @@ font-family: '@ＭＳ ゴシック','@MS Gothic',sans-serif;
 /** 横書き テキスト用スタイル */
 
 html.hltr {
-margin: 0em 0em 0em 0em;
+margin: 0 0 0 0;
 padding: 0;
 writing-mode: horizontal-tb;
 -webkit-writing-mode: horizontal-tb;
@@ -105,7 +105,13 @@ fn render_text_css(assets: &[EpubAsset]) -> String {
     css.push_str(&TEXT_CSS[..marker_end]);
     css.push('\n');
     css.push_str(&font_css);
-    css.push_str(&TEXT_CSS[marker_end..]);
+    // font_css は \n 終端。後続テンプレートの先頭 \n を1つ落として Java と同じ
+    // 空行1つにする。
+    css.push_str(
+        TEXT_CSS[marker_end..]
+            .strip_prefix('\n')
+            .unwrap_or(&TEXT_CSS[marker_end..]),
+    );
     css
 }
 
@@ -162,7 +168,7 @@ impl EpubMetadata {
             publisher: None,
             language: "ja".to_owned(),
             identifier: identifier.into(),
-            modified: "1970-01-01T00:00:00Z".to_owned(),
+            modified: current_utc_timestamp(),
         }
     }
 
@@ -185,6 +191,30 @@ impl EpubMetadata {
         self.modified = modified.into();
         self
     }
+}
+
+/// Java: dcterms:modified は変換時刻 (new Date()) を ISO 8601 UTC で出力する。
+/// chrono 等を持たないため UNIX epoch から civil 日付を自前計算する。
+fn current_utc_timestamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let days = (secs / 86400) as i64;
+    let rem = secs % 86400;
+    let (hour, minute, second) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    // Howard Hinnant's civil-from-days algorithm
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -239,6 +269,11 @@ pub struct NavChapter {
     pub label: String,
     pub path: String,
     pub anchor: Option<String>,
+    /// Raw heading level before TOC nesting: 1 for page-break chapters and
+    /// 大見出し, 2 for 中見出し, 3 for 小見出し (mirrors
+    /// `ChapterLineInfo.getLevel`). The nav/NCX renderers convert this into
+    /// the actual nesting depth.
+    pub level: u8,
 }
 
 impl NavChapter {
@@ -247,11 +282,17 @@ impl NavChapter {
             label: label.into(),
             path: path.into(),
             anchor: None,
+            level: 1,
         }
     }
 
     pub fn with_anchor(mut self, anchor: impl Into<String>) -> Self {
         self.anchor = Some(anchor.into());
+        self
+    }
+
+    pub fn with_level(mut self, level: u8) -> Self {
+        self.level = level;
         self
     }
 }
@@ -266,9 +307,21 @@ pub struct EpubBook {
     vertical: bool,
     toc_vertical: bool,
     kindle: bool,
+    /// `TocPage` INI key: insert `nav.xhtml` into the spine after the title
+    /// page so the TOC is a visible page (Java `bookInfo.insertTocPage`).
+    toc_page: bool,
+    /// `NavNest` INI key: nest the nav.xhtml `<ol>` by chapter level.
+    nav_nest: bool,
+    /// `NcxNest` INI key: nest toc.ncx navPoints by chapter level.
+    ncx_nest: bool,
+    /// `TitleToc` INI key (Java default true): include the title in the TOC.
+    title_toc: bool,
     title_markup: Option<String>,
     creator_markup: Option<String>,
     title_page_markup: Option<String>,
+    /// `TitlePage` INI key: 1=TITLE_MIDDLE (title_middle.vm), 2=TITLE_HORIZONTAL
+    /// (title_horizontal.vm)。Java `bookInfo.titlePageType` 相当。
+    title_page_type: usize,
 }
 impl EpubBook {
     pub fn new(metadata: EpubMetadata, body_fragment: impl Into<String>) -> Self {
@@ -298,9 +351,14 @@ impl EpubBook {
             vertical: true,
             toc_vertical: false,
             kindle: false,
+            toc_page: false,
+            nav_nest: false,
+            ncx_nest: false,
+            title_toc: true,
             title_markup: None,
             creator_markup: None,
             title_page_markup: None,
+            title_page_type: 0,
         }
     }
 
@@ -327,6 +385,26 @@ impl EpubBook {
         self
     }
 
+    /// `TocPage` INI key: add `nav.xhtml` to the spine after the title page.
+    pub fn with_toc_page(mut self, toc_page: bool) -> Self {
+        self.toc_page = toc_page;
+        self
+    }
+
+    /// `NavNest`/`NcxNest` INI keys: nest nav.xhtml `<ol>` and toc.ncx
+    /// navPoints by chapter level.
+    pub fn with_toc_nest(mut self, nav_nest: bool, ncx_nest: bool) -> Self {
+        self.nav_nest = nav_nest;
+        self.ncx_nest = ncx_nest;
+        self
+    }
+
+    /// `TitleToc` INI key (Java default true): include the title in the TOC.
+    pub fn with_title_toc(mut self, title_toc: bool) -> Self {
+        self.title_toc = title_toc;
+        self
+    }
+
     pub fn with_chapters<I>(mut self, chapters: I) -> Self
     where
         I: IntoIterator<Item = NavChapter>,
@@ -350,6 +428,10 @@ impl EpubBook {
     }
     pub fn with_title_page_markup(mut self, markup: impl Into<String>) -> Self {
         self.title_page_markup = Some(markup.into());
+        self
+    }
+    pub fn with_title_page_type(mut self, title_page_type: usize) -> Self {
+        self.title_page_type = title_page_type;
         self
     }
 
@@ -524,6 +606,7 @@ fn write_epub_body<W: Write + Seek>(
                 book.title_markup.as_deref(),
                 book.creator_markup.as_deref(),
                 book.title_page_markup.as_deref(),
+                book.title_page_type,
             )
             .as_bytes(),
             CompressionMethod::Deflated,
@@ -547,6 +630,7 @@ fn write_epub_body<W: Write + Seek>(
             &book.assets,
             book.cover_asset.as_deref(),
             book.vertical,
+            book.toc_page,
         )
         .as_bytes(),
         CompressionMethod::Deflated,
@@ -558,9 +642,12 @@ fn write_epub_body<W: Write + Seek>(
             &book.metadata,
             &book.sections,
             book.vertical,
-            book.title_markup.as_deref(),
+            &book.metadata.title,
             &book.chapters,
             book.toc_vertical,
+            book.toc_page,
+            book.nav_nest,
+            book.title_toc,
         )
         .as_bytes(),
         CompressionMethod::Deflated,
@@ -571,8 +658,10 @@ fn write_epub_body<W: Write + Seek>(
         render_ncx(
             &book.metadata,
             &book.sections,
-            book.title_markup.as_deref(),
+            &book.metadata.title,
             &book.chapters,
+            book.ncx_nest,
+            book.title_toc,
         )
         .as_bytes(),
         CompressionMethod::Deflated,

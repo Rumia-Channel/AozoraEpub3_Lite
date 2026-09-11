@@ -10,7 +10,10 @@ pub use epub::{EpubAsset, EpubBook, EpubError, EpubMetadata, EpubSection, NavCha
 pub use input::{
     FileSource, Input, InputError, TextEntry, decode_text, detect_encoding, normalize_entry_path,
 };
-pub use metadata::{BookMeta, TitleType, detect_meta, detect_meta_with_gaiji, file_title_creator};
+pub use metadata::{
+    BookMeta, TitleType, detect_meta, detect_meta_with_gaiji, file_title_creator,
+    remove_metadata_lines,
+};
 pub use text::{
     ChapterRecord, TextError, aozora_text_to_xhtml_sections,
     aozora_text_to_xhtml_sections_with_chapters, aozora_text_to_xhtml_sections_with_config,

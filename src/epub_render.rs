@@ -18,6 +18,71 @@ struct NavEntry {
     path: String,
     level: usize,
 }
+
+/// One TOC row with the nesting fields Java's `ChapterInfo.setTocNestLevel`
+/// computes: `level` is the raw heading level going in and the nesting depth
+/// coming out; `level_start`/`level_end` count `<ol>` opens and
+/// `</li></ol>` closes for nav.xhtml; `nav_close` counts `</navPoint>`
+/// closes for toc.ncx.
+#[derive(Clone, Debug)]
+struct TocEntry {
+    label: String,
+    markup: bool,
+    path: String,
+    level: usize,
+    level_start: usize,
+    level_end: usize,
+    nav_close: usize,
+}
+
+/// Port of `ChapterInfo.setTocNestLevel`: converts raw heading levels into
+/// nesting depths by counting preceding entries with a strictly smaller
+/// level, then derives the Velocity counters. `title_toc` mirrors
+/// `insertTitleToc`: the first entry (the title) adopts the second entry's
+/// level so it nests as a sibling instead of a root.
+fn set_toc_nest_level(entries: &mut [TocEntry], ncx_nest: bool, title_toc: bool) {
+    if entries.is_empty() {
+        return;
+    }
+    if title_toc && entries.len() >= 2 {
+        entries[0].level = entries[1].level;
+    }
+    let levels: Vec<usize> = entries.iter().map(|entry| entry.level).collect();
+    for (index, entry) in entries.iter_mut().enumerate() {
+        let mut count = 0usize;
+        let mut current = levels[index];
+        for &level in levels[..index].iter().rev() {
+            if level < current {
+                count += 1;
+                current = level;
+            }
+        }
+        entry.level = count;
+    }
+    entries[0].level_start = 0;
+    for index in 1..entries.len() {
+        let (before, after) = entries.split_at_mut(index);
+        let prev = &mut before[index - 1];
+        let curr = &mut after[0];
+        if curr.level > prev.level {
+            curr.level_start = curr.level - prev.level;
+            prev.level_end = 0;
+        } else {
+            curr.level_start = 0;
+            prev.level_end = prev.level - curr.level;
+        }
+    }
+    let last = entries.len() - 1;
+    entries[last].level_end = entries[last].level;
+    if ncx_nest {
+        for index in 0..entries.len() {
+            entries[index].nav_close = entries[index].level_end + 1;
+            if entries[index].level_start > 0 && index > 0 {
+                entries[index - 1].nav_close = 0;
+            }
+        }
+    }
+}
 fn is_no_chapter(section: &EpubSection) -> bool {
     section
         .body_fragment
@@ -65,7 +130,7 @@ fn normalize_chapter_label(label: String) -> String {
         trimmed.to_owned()
     }
 }
-fn nav_entries(sections: &[EpubSection], title_markup: Option<&str>) -> Vec<NavEntry> {
+fn nav_entries(sections: &[EpubSection], title: &str, title_toc: bool) -> Vec<NavEntry> {
     let body_count = sections
         .iter()
         .filter(|section| {
@@ -80,6 +145,10 @@ fn nav_entries(sections: &[EpubSection], title_markup: Option<&str>) -> Vec<NavE
             body_number += 1;
         }
         let is_title = is_title_page(section);
+        // Java insertTitleToc=false drops the title from the TOC entirely.
+        if is_title && !title_toc {
+            continue;
+        }
         if is_no_chapter(section) || (!is_title && is_image_only_section(section)) {
             continue;
         }
@@ -91,11 +160,12 @@ fn nav_entries(sections: &[EpubSection], title_markup: Option<&str>) -> Vec<NavE
             first_body_entry = false;
         }
         let label = if is_title {
-            title_markup.unwrap_or("タイトル").to_owned()
+            // Java: 目次の表題項目は bookInfo.title（生の表題文字列）を使う。
+            title.to_owned()
         } else {
             section_label(section, body_number, body_count)
         };
-        let markup = title_markup.is_some() && is_title;
+        let markup = false;
         let level = if is_title {
             1
         } else {
@@ -235,6 +305,7 @@ pub(super) fn render_package(
     assets: &[EpubAsset],
     cover_asset: Option<&str>,
     vertical: bool,
+    toc_page: bool,
 ) -> String {
     let identifier = metadata
         .identifier
@@ -295,6 +366,7 @@ pub(super) fn render_package(
     let mut manifest_sections = String::new();
     let mut spine_sections = String::new();
     let mut title_page_seen = false;
+    let mut nav_spine_inserted = false;
     for (index, section) in sections.iter().enumerate() {
         if is_title_page(section) {
             title_page_seen = true;
@@ -302,6 +374,12 @@ pub(super) fn render_package(
                 "\t\t<item id=\"title-page\" href=\"xhtml/title.xhtml\" media-type=\"application/xhtml+xml\"/>\n",
             );
             spine_sections.push_str("\t\t<itemref idref=\"title-page\" linear=\"yes\"/>\n");
+            // Java package.vm: InsertTocPage places the nav itemref right
+            // after the title page, before the body sections.
+            if toc_page {
+                spine_sections.push_str("\t\t<itemref idref=\"nav\" linear=\"yes\"/>\n");
+                nav_spine_inserted = true;
+            }
             continue;
         }
         if title_page_seen && body_number == 0 {
@@ -336,7 +414,13 @@ pub(super) fn render_package(
             "\t\t<itemref linear=\"yes\" idref=\"sec{body_number:04}\"{spread}/>\n"
         ));
     }
+    if toc_page && !nav_spine_inserted {
+        // No title page: the nav itemref still precedes the body sections.
+        spine_sections.insert_str(0, "\t\t<itemref idref=\"nav\" linear=\"yes\"/>\n");
+    }
     let mut manifest_assets = String::new();
+    // Java: 外字フォントの item は xhtml セクション群の後、ncx の前に出力される
+    let mut manifest_gaiji = String::new();
     let mut gaiji_number = 0;
     for (index, asset) in assets.iter().enumerate() {
         let properties = if !image_only && cover_asset == Some(asset.path.as_str()) {
@@ -344,12 +428,16 @@ pub(super) fn render_package(
         } else {
             ""
         };
-        let id = if asset.path.starts_with("gaiji/") {
+        if asset.path.starts_with("gaiji/") {
             gaiji_number += 1;
-            format!("gaiji_{gaiji_number}")
-        } else {
-            asset_manifest_id(&asset.path, index + 1)
-        };
+            manifest_gaiji.push_str(&format!(
+                "\t\t<item id=\"gaiji_{gaiji_number}\" href=\"{}\" media-type=\"{}\"{properties}/>\n",
+                xml_escape(&asset.path),
+                xml_escape(&asset.media_type),
+            ));
+            continue;
+        }
+        let id = asset_manifest_id(&asset.path, index + 1);
         manifest_assets.push_str(&format!(
             "\t\t<item id=\"{id}\" href=\"{}\" media-type=\"{}\"{properties}/>\n",
             xml_escape(&asset.path),
@@ -401,7 +489,7 @@ pub(super) fn render_package(
 {styles}<!-- image -->
 {assets}<!-- xhtml -->
 {cover}{sections}
-		<item href="toc.ncx" id="ncx" media-type="application/x-dtbncx+xml"/>
+{gaiji}		<item href="toc.ncx" id="ncx" media-type="application/x-dtbncx+xml"/>
 	</manifest>
 
 	<spine page-progression-direction="{progression}" toc="ncx">
@@ -419,22 +507,27 @@ pub(super) fn render_package(
         assets = manifest_assets,
         cover = cover_manifest,
         sections = manifest_sections.trim_end(),
+        gaiji = manifest_gaiji,
         cover_spine = cover_spine,
         spine = spine_sections,
         progression = progression,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_nav(
     metadata: &EpubMetadata,
     sections: &[EpubSection],
     _vertical: bool,
-    _title_markup: Option<&str>,
+    title: &str,
     chapters: &[NavChapter],
     toc_vertical: bool,
+    toc_page: bool,
+    nav_nest: bool,
+    title_toc: bool,
 ) -> String {
-    let mut nav_items = render_nav_items(chapters, sections);
-    if chapters.is_empty() && sections.iter().any(is_title_page) {
+    let mut nav_items = render_nav_items(chapters, sections, nav_nest, title_toc, title);
+    if chapters.is_empty() && title_toc && sections.iter().any(is_title_page) {
         // Java: タイトルページを目次の先頭に書籍タイトルで追加する
         let title = xml_escape(&metadata.title);
         nav_items =
@@ -457,6 +550,9 @@ pub(super) fn render_nav(
             format!("xhtml/{body_number:04}.xhtml")
         });
     let mut landmark = String::new();
+    if toc_page {
+        landmark.push_str("\t\t\t<li><a epub:type=\"toc\" href=\"nav.xhtml\">目次</a></li>\r\n");
+    }
     if sections.iter().any(is_title_page) {
         landmark.push_str(
             "\t\t\t<li><a epub:type=\"titlepage\" href=\"xhtml/title.xhtml\">扉</a></li>\r\n",
@@ -476,36 +572,84 @@ pub(super) fn render_nav(
     )
 }
 
-fn render_nav_items(chapters: &[NavChapter], sections: &[EpubSection]) -> String {
+fn render_nav_items(
+    chapters: &[NavChapter],
+    sections: &[EpubSection],
+    nav_nest: bool,
+    title_toc: bool,
+    title: &str,
+) -> String {
     if chapters.is_empty() {
         // Java: 章情報が無い場合は最初の本文セクションを「本文」で出力する
         let fallback = first_body_path(sections);
         return format!("\t\t\t<li><a href=\"{fallback}\">本文</a></li>\r\n\r\n");
     }
+    let mut entries: Vec<TocEntry> = chapters
+        .iter()
+        .map(|chapter| {
+            let anchor = chapter
+                .anchor
+                .as_deref()
+                .map(|anchor| format!("#{anchor}"))
+                .unwrap_or_default();
+            TocEntry {
+                label: chapter.label.clone(),
+                markup: false,
+                path: format!("{}{}", chapter.path, anchor),
+                level: chapter.level as usize,
+                level_start: 0,
+                level_end: 0,
+                nav_close: 0,
+            }
+        })
+        .collect();
+    // Java insertTitleToc: the title page joins the TOC as the first entry.
+    if title_toc && sections.iter().any(is_title_page) {
+        // Java: 目次の表題項目は bookInfo.title（生の表題文字列）を使う。
+        entries.insert(
+            0,
+            TocEntry {
+                label: title.to_owned(),
+                markup: false,
+                path: "xhtml/title.xhtml".to_owned(),
+                level: 0,
+                level_start: 0,
+                level_end: 0,
+                nav_close: 0,
+            },
+        );
+    }
+    set_toc_nest_level(&mut entries, false, title_toc);
     let mut output = String::new();
-    for (index, chapter) in chapters.iter().enumerate() {
-        let anchor = chapter
-            .anchor
-            .as_deref()
-            .map(|anchor| format!("#{anchor}"))
-            .unwrap_or_default();
-        let label = chapter
-            .label
-            .replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;");
-        output.push_str(&format!(
-            "\t\t\t<li><a href=\"{}{}\">{label}</a>\r\n",
-            chapter.path, anchor,
-        ));
-        if index + 1 < chapters.len() {
+    for (index, entry) in entries.iter().enumerate() {
+        // Java xhtml_nav.vm: close the previous <li> unless this entry opens
+        // a nested list (levelStart) or nesting is off and it is not first.
+        if (entry.level_start == 0 && index > 0) || (!nav_nest && index != 0) {
             output.push_str("</li>\r\n");
+        }
+        if nav_nest {
+            for _ in 0..entry.level_start {
+                output.push_str("\t\t<ol>\r\n");
+            }
+        }
+        let label = if entry.markup {
+            entry.label.clone()
+        } else {
+            xml_escape(&entry.label)
+        };
+        output.push_str(&format!(
+            "\t\t\t<li><a href=\"{}\">{label}</a>\r\n",
+            entry.path,
+        ));
+        if nav_nest {
+            for _ in 0..entry.level_end {
+                output.push_str("\t\t</li></ol>\r\n");
+            }
         }
     }
     output.push_str("\r\n\t\t</li>\r\n");
     output
 }
-
 fn first_body_path(sections: &[EpubSection]) -> String {
     sections
         .iter()
@@ -523,57 +667,82 @@ fn first_body_path(sections: &[EpubSection]) -> String {
 pub(super) fn render_ncx(
     metadata: &EpubMetadata,
     sections: &[EpubSection],
-    title_markup: Option<&str>,
+    title: &str,
     chapters: &[NavChapter],
+    ncx_nest: bool,
+    title_toc: bool,
 ) -> String {
-    let entries = if chapters.is_empty() {
-        nav_entries(sections, title_markup)
+    let mut entries: Vec<TocEntry> = if chapters.is_empty() {
+        nav_entries(sections, title, title_toc)
+            .into_iter()
+            .map(|entry| TocEntry {
+                label: entry.label,
+                markup: entry.markup,
+                path: entry.path,
+                level: entry.level,
+                level_start: 0,
+                level_end: 0,
+                nav_close: 0,
+            })
+            .collect()
     } else {
         chapters
             .iter()
-            .enumerate()
-            .map(|(index, chapter)| {
-                let label = if index == 0 && title_markup.is_some() {
-                    title_markup.unwrap_or(&chapter.label).to_owned()
-                } else {
-                    chapter.label.clone()
-                };
-                NavEntry {
-                    label,
+            .map(|chapter| {
+                let anchor = chapter
+                    .anchor
+                    .as_deref()
+                    .map(|anchor| format!("#{anchor}"))
+                    .unwrap_or_default();
+                TocEntry {
+                    label: chapter.label.clone(),
                     markup: false,
-                    path: chapter.path.clone(),
-                    level: 1,
+                    path: format!("{}{}", chapter.path, anchor),
+                    level: chapter.level as usize,
+                    level_start: 0,
+                    level_end: 0,
+                    nav_close: 0,
                 }
             })
             .collect()
     };
+    // Java insertTitleToc: the title page joins the TOC as the first entry.
+    // The auto-detected path (nav_entries) already emits the title row, so
+    // only the explicit-chapters path prepends it here.
+    if title_toc && !chapters.is_empty() && sections.iter().any(is_title_page) {
+        entries.insert(
+            0,
+            TocEntry {
+                label: title.to_owned(),
+                markup: false,
+                path: "xhtml/title.xhtml".to_owned(),
+                level: 0,
+                level_start: 0,
+                level_end: 0,
+                nav_close: 0,
+            },
+        );
+    }
     // 章情報も nav_entries も空の場合は本文のみのフォールバックを出力する
-    let entries = if entries.is_empty() {
-        vec![NavEntry {
+    if entries.is_empty() {
+        entries.push(TocEntry {
             label: "本文".to_owned(),
             markup: false,
             path: first_body_path(sections),
             level: 1,
-        }]
-    } else {
-        entries
-    };
+            level_start: 0,
+            level_end: 0,
+            nav_close: 0,
+        });
+    }
+    set_toc_nest_level(&mut entries, ncx_nest, title_toc);
     let identifier = metadata
         .identifier
         .strip_prefix("urn:uuid:")
         .or_else(|| metadata.identifier.strip_prefix("urn:"))
         .unwrap_or(&metadata.identifier);
     let mut nav_points = String::new();
-    let mut current_depth = 0usize;
     for (index, entry) in entries.iter().enumerate() {
-        while current_depth >= entry.level && current_depth > 0 {
-            let close_indent = "\t".repeat(current_depth);
-            nav_points.push_str(&format!("{close_indent}</navPoint>\n"));
-            current_depth -= 1;
-        }
-        let indent = "\t".repeat(entry.level);
-        let child_indent = format!("{indent}\t");
-        let value_indent = format!("{child_indent}\t");
         let play_order = index + 1;
         let label = if entry.markup {
             entry.label.clone()
@@ -581,21 +750,30 @@ pub(super) fn render_ncx(
             xml_escape(&entry.label)
         };
         nav_points.push_str(&format!(
-            "{indent}<navPoint id=\"toc{play_order}\" playOrder=\"{play_order}\">\n\
-        {child_indent}<navLabel>\n\
-        {value_indent}<text>{label}</text>\n\
-        {child_indent}</navLabel>\n\
-        {child_indent}<content src=\"{}\"/>\n",
+            "\t<navPoint id=\"toc{play_order}\" playOrder=\"{play_order}\">\n\
+            \t\t<navLabel>\n\
+            \t\t\t<text>{label}</text>\n\
+            \t\t</navLabel>\n\
+            \t\t<content src=\"{}\"/>\n",
             xml_escape(&entry.path),
         ));
-        current_depth = entry.level;
+        // Java toc.ncx.vm: navClose navPoint closes follow the content. With
+        // ncxNest off every entry self-closes (navClose = 1); with it on,
+        // parents stay open until their last descendant.
+        let closes = if ncx_nest { entry.nav_close } else { 1 };
+        for _ in 0..closes {
+            nav_points.push_str("\t</navPoint>\n");
+        }
     }
-    while current_depth > 0 {
-        let close_indent = "\t".repeat(current_depth);
-        nav_points.push_str(&format!("{close_indent}</navPoint>\n"));
-        current_depth -= 1;
-    }
-    let depth = entries.iter().map(|entry| entry.level).max().unwrap_or(1);
+    let depth = if ncx_nest {
+        entries
+            .iter()
+            .map(|entry| entry.level + 1)
+            .max()
+            .unwrap_or(1)
+    } else {
+        1
+    };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
@@ -643,6 +821,7 @@ pub(super) fn render_cover(metadata: &EpubMetadata, asset_path: &str, kindle: bo
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_section(
     metadata: &EpubMetadata,
     body_fragment: &str,
@@ -651,9 +830,42 @@ pub(super) fn render_section(
     title_markup: Option<&str>,
     creator_markup: Option<&str>,
     title_page_markup: Option<&str>,
+    title_page_type: usize,
 ) -> String {
     let kindle_class = if kindle { " kindle" } else { "" };
     let trimmed = body_fragment.trim();
+    // Java TITLE_HORIZONTAL (TitlePage=2): title_horizontal.vm — 横書き専用の
+    // 簡易表題ページ。custom markup は使わず TITLE/CREATOR 等を直接埋め込む。
+    if trimmed == TITLE_PAGE_MARKER && title_page_type == 2 {
+        let title = title_markup
+            .map(str::to_owned)
+            .unwrap_or_else(|| xml_escape(&metadata.title));
+        let creator = creator_markup
+            .map(str::to_owned)
+            .or_else(|| metadata.creator.as_deref().map(xml_escape));
+        let publisher_block = metadata
+            .publisher
+            .as_deref()
+            .map(|value| {
+                format!(
+                    "<div class=\"label\">\n<p class=\"label-name\">{}</p>\n</div>\n",
+                    xml_escape(value)
+                )
+            })
+            .unwrap_or_default();
+        let creator_block = creator
+            .map(|value| format!("<p>{value}</p>\n"))
+            .unwrap_or_default();
+        return format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!DOCTYPE html>\r\n<html\r\nxmlns=\"http://www.w3.org/1999/xhtml\"\r\nxmlns:epub=\"http://www.idpf.org/2007/ops\"\r\nxml:lang=\"{language}\"\r\nclass=\"hltr\"\r\n>\r\n<head>\r\n<meta charset=\"UTF-8\"/>\r\n<title>{title_text}</title>\r\n<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/book-style.css\"/>\r\n</head>\r\n<body class=\"p-titlepage{kindle_class}\">\r\n<div class=\"main\">\r\n\r\n<div class=\"book-title\">\r\n<div class=\"book-title-main\">\r\n<p>{title}</p>\r\n</div>\r\n</div>\r\n\r\n<div class=\"author\">\r\n{creator_block}</div>\r\n{publisher_block}</div>\r\n</body>\r\n</html>\r\n\r\n",
+            language = xml_escape(&metadata.language),
+            title_text = xml_escape(&metadata.title),
+            title = title,
+            creator_block = creator_block,
+            publisher_block = publisher_block,
+            kindle_class = kindle_class,
+        );
+    }
     if trimmed == TITLE_PAGE_MARKER {
         let custom_title_page = title_page_markup.is_some();
         let publisher = metadata

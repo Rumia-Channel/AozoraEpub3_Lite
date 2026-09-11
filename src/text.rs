@@ -67,12 +67,7 @@ pub fn plain_text_to_xhtml_with_config(
 ) -> Result<String, TextError> {
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
     let lines = visible_lines(input, config);
-    Ok(render_lines(
-        lines.iter().map(String::as_str),
-        &[],
-        None,
-        config,
-    ))
+    Ok(render_lines(lines.iter().map(String::as_str), &[], &[], config).0)
 }
 
 fn visible_lines(input: &str, config: &AozoraConfig) -> Vec<String> {
@@ -193,14 +188,22 @@ fn is_comment_line(line: &str) -> bool {
 /// reference converter's pre-read chapter model (TYPE_PAGEBREAK).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChapterRecord {
-    /// Index of the body section (0-based) this chapter belongs to.
+    /// Section (xhtml file) index the chapter points at.
     pub section_index: usize,
-    /// Index of the chapter line within the section's trimmed line list.
+    /// Line index inside the section where the chapter anchor is emitted.
     pub line_index: usize,
     /// Normalized navigation label.
     pub label: String,
     /// 1-based heading level (1 for page-break chapters).
     pub level: u8,
+    /// Java `ChapterLineInfo.pageBreakChapter`: the chapter sits on the
+    /// first content line after a page break, so the TOC links to the
+    /// section file without a `#kobo.N.M` fragment.
+    pub page_break_chapter: bool,
+    /// `kobo.N.M` id emitted on the chapter line; `None` until the section
+    /// is rendered. Only non-`page_break_chapter` records get a TOC
+    /// fragment.
+    pub anchor: Option<String>,
 }
 
 pub fn aozora_text_to_xhtml_sections(input: &str) -> Result<Vec<String>, TextError> {
@@ -214,14 +217,70 @@ pub fn aozora_text_to_xhtml_sections_with_config(
     Ok(aozora_text_to_xhtml_sections_with_chapters(input, config, true)?.0)
 }
 
+/// Heading level for a ［＃...］ note name, mirroring Java's
+/// `chapterChukiMap` + `ChapterLineInfo.getLevel`: 見出し/大見出し → 1,
+/// 中見出し → 2, 小見出し → 3. Only INI-enabled types match; `ここから`
+/// block-open variants share their level, `同行` variants additionally need
+/// `SameLineChapter`.
+fn heading_note_level(note: &str, config: &AozoraConfig) -> Option<u8> {
+    let (base, level) = match note {
+        "見出し" | "ここから見出し" => (0, 1),
+        "大見出し" | "ここから大見出し" => (1, 1),
+        "中見出し" | "ここから中見出し" => (2, 2),
+        "小見出し" | "ここから小見出し" => (3, 3),
+        "同行見出し" => (4, 1),
+        "同行大見出し" => (5, 1),
+        "同行中見出し" => (6, 2),
+        "同行小見出し" => (7, 3),
+        _ => return None,
+    };
+    let enabled = match base {
+        0 => config.chapter_h,
+        1 => config.chapter_h1,
+        2 => config.chapter_h2,
+        3 => config.chapter_h3,
+        _ => {
+            config.same_line_chapter
+                && match base {
+                    4 => config.chapter_h,
+                    5 => config.chapter_h1,
+                    6 => config.chapter_h2,
+                    _ => config.chapter_h3,
+                }
+        }
+    };
+    enabled.then_some(level)
+}
+
+/// All ［＃...］ note names in a line, in order, each paired with the byte
+/// offset just past its closing ］. Chapter detection (like Java's pre-read)
+/// scans every line for heading notes, not just section heads.
+fn line_note_names(line: &str) -> Vec<(String, usize)> {
+    let mut notes = Vec::new();
+    let mut search_from = 0;
+    while let Some(relative) = line[search_from..].find("［＃") {
+        let note_start = search_from + relative + "［＃".len();
+        let Some(relative_close) = line[note_start..].find('］') else {
+            break;
+        };
+        let after_end = note_start + relative_close + '］'.len_utf8();
+        notes.push((
+            line[note_start..note_start + relative_close].to_owned(),
+            after_end,
+        ));
+        search_from = after_end;
+    }
+    notes
+}
+
 /// Splits the input into body sections and detects navigation chapters the
-/// way the reference converter's pre-read does: a chapter is the first
-/// non-symbol line of each section (after a page break), with the whole line
-/// counting even when the page-break note sits mid-line.
-///
-/// `initial_add_section_chapter` mirrors the pre-read state after the title
-/// line: `false` when the metadata block already consumed the first-chapter
-/// slot (so `input` should be the meta-stripped body in that case).
+/// way the reference converter's pre-read does: chapters come from heading
+/// notes anywhere in a line (type-gated by the `ChapterH*` INI keys) and,
+/// with `ChapterSection`, from the first non-symbol line of each section
+/// after a page break. `initial_add_section_chapter` mirrors the pre-read
+/// state after the title line: `false` when the metadata block already
+/// consumed the first-chapter slot (so `input` should be the meta-stripped
+/// body in that case).
 pub fn aozora_text_to_xhtml_sections_with_chapters(
     input: &str,
     config: &AozoraConfig,
@@ -234,24 +293,83 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
     let mut section_index = 0usize;
     let mut add_section_chapter = initial_add_section_chapter;
     let mut chapters: Vec<ChapterRecord> = Vec::new();
-    let mut chapter_line: Option<usize> = None;
+    // (line index in `current`, index into `chapters`) for chapter lines in
+    // the section being accumulated.
+    let mut chapter_lines: Vec<(usize, usize)> = Vec::new();
+    // Java pre-read: a heading note with nothing after it takes its name
+    // from the next visible line only. Holds (level, page_break_chapter).
+    let mut pending_heading: Option<(u8, bool)> = None;
 
     for line in visible_lines(input, config).iter() {
         let line_start_section = section_index;
+
+        // Resolve a deferred heading name before anything else on this line;
+        // an empty name drops the pending chapter (Java clears the slot).
+        if let Some((level, pbc)) = pending_heading.take() {
+            let name = chapter_name(line, config);
+            if !name.is_empty() {
+                chapter_lines.push((current.len(), chapters.len()));
+                chapters.push(ChapterRecord {
+                    section_index: line_start_section,
+                    line_index: current.len(),
+                    label: name,
+                    level,
+                    page_break_chapter: pbc,
+                    anchor: None,
+                });
+                add_section_chapter = false;
+            }
+        }
+
         let has_page_break = find_page_break_note(line, config).is_some();
-        if has_page_break && config.split_page_breaks {
+        // Java splits on page-break notes unconditionally; the `PageBreak`
+        // INI key only enables size-based splitting (`force_page_break`).
+        if has_page_break {
             add_section_chapter = true;
         }
-        if add_section_chapter {
+
+        // Heading notes register chapters wherever they appear in the line
+        // (Java scans every line, not just section heads).
+        for (note, after_end) in line_note_names(line) {
+            let Some(level) = heading_note_level(&note, config) else {
+                continue;
+            };
+            // A heading chapter replaces the page-break chapter of the same
+            // section, exactly like the reference pre-read.
+            let pbc = add_section_chapter;
+            add_section_chapter = false;
+            if after_end >= line.len() {
+                pending_heading = Some((level, pbc));
+            } else {
+                let name = chapter_name(&line[after_end..], config);
+                if !name.is_empty() && !symbols_only(&name) {
+                    chapter_lines.push((current.len(), chapters.len()));
+                    chapters.push(ChapterRecord {
+                        section_index: line_start_section,
+                        line_index: current.len(),
+                        label: name,
+                        level,
+                        page_break_chapter: pbc,
+                        anchor: None,
+                    });
+                }
+            }
+        }
+
+        // `ChapterSection`: the first non-symbol line after a page break is a
+        // level-1 chapter unless a heading note already claimed the slot.
+        if config.chapter_section && add_section_chapter {
             let name = chapter_name(line, config);
             if !name.is_empty() && !symbols_only(&name) && !is_colophon_line(line) {
+                chapter_lines.push((current.len(), chapters.len()));
                 chapters.push(ChapterRecord {
                     section_index: line_start_section,
                     line_index: current.len(),
                     label: name,
                     level: 1,
+                    page_break_chapter: true,
+                    anchor: None,
                 });
-                chapter_line = Some(current.len());
                 add_section_chapter = false;
             } else if is_colophon_line(line) {
                 add_section_chapter = false;
@@ -259,6 +377,9 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
         }
 
         let mut remainder = line.as_str();
+        // Java: chukiFlagNoBr (chuki_tag.txt 4列目=1) のブロック注記を含む行は
+        // 行全体を <p> で括らない (printLineBuffer noBr)。
+        let line_has_block_note = contains_block_note(line, config);
         loop {
             let Some((offset, end, note)) = find_page_break_note(remainder, config) else {
                 append_section_line(
@@ -268,9 +389,10 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
                     &mut no_br,
                     &mut page_marker,
                     &mut section_index,
-                    &mut chapter_line,
+                    &mut chapter_lines,
+                    &mut chapters,
                     config,
-                    false,
+                    line_has_block_note,
                 );
                 break;
             };
@@ -283,33 +405,33 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
                     &mut no_br,
                     &mut page_marker,
                     &mut section_index,
-                    &mut chapter_line,
+                    &mut chapter_lines,
+                    &mut chapters,
                     config,
                     true,
                 );
             }
-            if config.split_page_breaks {
-                trim_trailing_empty_lines(&mut current);
-                no_br.truncate(current.len());
-                if !current.is_empty() {
-                    push_rendered_section(
-                        &mut sections,
-                        &mut current,
-                        &mut no_br,
-                        &mut chapter_line,
-                        page_marker,
-                        config,
-                    );
-                    section_index += 1;
-                }
-                page_marker = if config.page_middle_notes.contains(&note) {
-                    Some(PAGE_CHAPTER_MIDDLE_MARKER)
-                } else if config.page_bottom_notes.contains(&note) {
-                    Some(PAGE_CHAPTER_BOTTOM_MARKER)
-                } else {
-                    Some(PAGE_CHAPTER_MARKER)
-                };
+            trim_trailing_empty_lines(&mut current);
+            no_br.truncate(current.len());
+            if !current.is_empty() {
+                push_rendered_section(
+                    &mut sections,
+                    &mut current,
+                    &mut no_br,
+                    &mut chapter_lines,
+                    &mut chapters,
+                    page_marker,
+                    config,
+                );
+                section_index += 1;
             }
+            page_marker = if config.page_middle_notes.contains(&note) {
+                Some(PAGE_CHAPTER_MIDDLE_MARKER)
+            } else if config.page_bottom_notes.contains(&note) {
+                Some(PAGE_CHAPTER_BOTTOM_MARKER)
+            } else {
+                Some(PAGE_CHAPTER_MARKER)
+            };
             remainder = &remainder[end..];
             if remainder.is_empty() {
                 break;
@@ -324,31 +446,68 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
             &mut sections,
             &mut current,
             &mut no_br,
-            &mut chapter_line,
+            &mut chapter_lines,
+            &mut chapters,
             page_marker,
             config,
         );
     }
-
     Ok((sections, chapters))
 }
 
+/// Java: chukiFlagNoBr (chuki_tag.txt 4列目=1) のブロック注記を含むか。
+/// 含む行は printLineBuffer の noBr 相当で <p> ラップしない。
+fn contains_block_note(line: &str, config: &AozoraConfig) -> bool {
+    for (start, _) in line.match_indices("［＃") {
+        let note_start = start + "［＃".len();
+        let Some(close_offset) = line[note_start..].find('］') else {
+            continue;
+        };
+        let note = &line[note_start..note_start + close_offset];
+        if config.block_open_tags.contains_key(note)
+            || config.block_close_tags.contains_key(note)
+            || config.block_inline_tags.contains_key(note)
+            || config.block_single_tags.contains_key(note)
+            || generated_indent_block(note).is_some()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
 fn push_rendered_section(
     sections: &mut Vec<String>,
     current: &mut Vec<String>,
     no_br: &mut Vec<bool>,
-    chapter_line: &mut Option<usize>,
+    chapter_lines: &mut Vec<(usize, usize)>,
+    chapters: &mut [ChapterRecord],
     page_marker: Option<&'static str>,
     config: &AozoraConfig,
 ) {
     let no_br_flags = no_br.clone();
-    let fragment = render_marked_lines(
+    let line_chapters = chapter_lines
+        .iter()
+        .map(|(line_index, record)| (*line_index, chapters[*record].page_break_chapter))
+        .collect::<Vec<_>>();
+    let (fragment, emitted) = render_marked_lines(
         current.iter().map(String::as_str),
         &no_br_flags,
-        chapter_line.take(),
+        &line_chapters,
         config,
         page_marker,
     );
+    // Java: the TOC fragment (#kobo.N.M) is only used for chapters that are
+    // not page-break chapters.
+    for (line_index, id) in emitted {
+        if let Some((_, record)) = chapter_lines.iter().find(|(index, _)| *index == line_index)
+            && !chapters[*record].page_break_chapter
+        {
+            chapters[*record].anchor = Some(id);
+        }
+    }
+    chapter_lines.clear();
     sections.push(fragment);
     current.clear();
     no_br.clear();
@@ -362,7 +521,8 @@ fn append_section_line(
     no_br: &mut Vec<bool>,
     page_marker: &mut Option<&'static str>,
     section_index: &mut usize,
-    chapter_line: &mut Option<usize>,
+    chapter_lines: &mut Vec<(usize, usize)>,
+    chapters: &mut [ChapterRecord],
     config: &AozoraConfig,
     bare: bool,
 ) {
@@ -378,7 +538,15 @@ fn append_section_line(
         trim_trailing_empty_lines(current);
         no_br.truncate(current.len());
         if !current.is_empty() {
-            push_rendered_section(sections, current, no_br, chapter_line, *page_marker, config);
+            push_rendered_section(
+                sections,
+                current,
+                no_br,
+                chapter_lines,
+                chapters,
+                *page_marker,
+                config,
+            );
             *section_index += 1;
         }
         *page_marker = Some(PAGE_NO_CHAPTER_MARKER);
@@ -387,7 +555,15 @@ fn append_section_line(
         trim_trailing_empty_lines(current);
         no_br.truncate(current.len());
         if !current.is_empty() {
-            push_rendered_section(sections, current, no_br, chapter_line, *page_marker, config);
+            push_rendered_section(
+                sections,
+                current,
+                no_br,
+                chapter_lines,
+                chapters,
+                *page_marker,
+                config,
+            );
             *section_index += 1;
         }
         *page_marker = None;
@@ -661,14 +837,15 @@ const RAW_COMMENT_PREFIX: &str = "\u{0000}aozora-raw-comment\u{0000}";
 fn render_marked_lines<'a>(
     lines: impl IntoIterator<Item = &'a str>,
     no_br: &[bool],
-    chapter_line: Option<usize>,
+    chapter_lines: &[(usize, bool)],
     config: &AozoraConfig,
     marker: Option<&str>,
-) -> String {
-    let fragment = render_lines(lines, no_br, chapter_line, config);
-    marker
+) -> (String, Vec<(usize, String)>) {
+    let (fragment, emitted) = render_lines(lines, no_br, chapter_lines, config);
+    let fragment = marker
         .map(|marker| format!("{marker}\n{fragment}"))
-        .unwrap_or(fragment)
+        .unwrap_or(fragment);
+    (fragment, emitted)
 }
 
 #[derive(Clone, Copy)]
@@ -697,19 +874,22 @@ impl OpenBlock {
     }
 }
 
+/// Renders one section's lines to an XHTML fragment. `chapter_lines` maps
+/// line indices to `page_break_chapter`; each chapter line gets a
+/// `kobo.N.1` id; returns the fragment plus emitted (line_index, id) pairs.
 fn render_lines<'a>(
     lines: impl IntoIterator<Item = &'a str>,
     no_br: &[bool],
-    chapter_line: Option<usize>,
+    chapter_lines: &[(usize, bool)],
     config: &AozoraConfig,
-) -> String {
+) -> (String, Vec<(usize, String)>) {
     let mut fragment = String::new();
     let mut has_line = false;
     let mut blocks: Vec<OpenBlock> = Vec::new();
-    let mut pending_heading: Option<HeadingSpec> = None;
+
     let mut pending_config_heading: Option<(String, String)> = None;
     let mut output_count = 0usize;
-    let mut chapter_done = false;
+    let mut emitted: Vec<(usize, String)> = Vec::new();
     // Java の inYoko フィールド相当: ここから横組み〜ここで横組み終わり で切替
     let mut in_yoko = false;
 
@@ -724,9 +904,16 @@ fn render_lines<'a>(
             .into_iter()
             .enumerate()
             .flat_map(|(index, line)| {
-                split_block_notes(line, &block_markers)
-                    .into_iter()
-                    .map(move |piece| (index, piece))
+                // Java: noBr 行は行全体を1バッファで注記→タグ置換して1行出力する。
+                // ブロック注記での分割を行わず convert_inline に任せる。
+                if no_br.get(index).copied().unwrap_or(false) {
+                    vec![(index, line.to_owned())]
+                } else {
+                    split_block_notes(line, &block_markers)
+                        .into_iter()
+                        .map(move |piece| (index, piece))
+                        .collect()
+                }
             })
             .collect::<Vec<_>>(),
         config,
@@ -738,14 +925,17 @@ fn render_lines<'a>(
     {
         has_line = true;
         let line_no_br = no_br.get(line_index).copied().unwrap_or(false);
-        let chapter_id = if !chapter_done && chapter_line == Some(line_index) {
-            chapter_done = true;
-            Some(format!("kobo.{}.1", output_count + 1))
-        } else {
-            None
-        };
+        let page_break_chapter = chapter_lines
+            .iter()
+            .find(|(index, _)| *index == line_index)
+            .map(|(_, pbc)| *pbc);
+        let chapter_id = page_break_chapter.map(|_| format!("kobo.{}.1", output_count + 1));
+        if let Some(id) = chapter_id.as_deref() {
+            emitted.push((line_index, id.to_owned()));
+        }
         if line_no_br {
-            // 前-part of a mid-line page break: output bare, no <p> wrapper.
+            // Java: noBr 行は <p> で括らず行全体を1行出力する。
+            // ブロック注記は convert_inline が inline_notes 経由でタグ化する。
             output_count += 1;
             let converted = convert_inline_with_yoko(line, config, in_yoko);
             let converted = chapter_id
@@ -753,6 +943,30 @@ fn render_lines<'a>(
                 .unwrap_or(converted);
             fragment.push_str(&converted);
             fragment.push('\n');
+            // 分割を省略したため、ブロック開閉・横組み状態をここで追跡する
+            for (note, _) in line_note_names(line) {
+                if config.block_open_tags.contains_key(&note) {
+                    if note.contains("横組み") {
+                        in_yoko = true;
+                    }
+                    if let Some(open_tag) = config.block_open_tags.get(&note) {
+                        blocks.push(OpenBlock::Configured {
+                            fallback_close_tag: fallback_close_tag(open_tag),
+                            indent: note.contains("字下げ"),
+                        });
+                    }
+                } else if config.block_close_tags.contains_key(&note) {
+                    if note.contains("横組み終わり") {
+                        in_yoko = false;
+                    }
+                    blocks.pop();
+                } else if let Some((_, close_tag)) = generated_indent_block(&note) {
+                    blocks.push(OpenBlock::Generated {
+                        close_tag,
+                        indent: note.contains("字下げ"),
+                    });
+                }
+            }
             continue;
         }
         if let Some(raw) = line.strip_prefix(RAW_COMMENT_PREFIX) {
@@ -804,19 +1018,6 @@ fn render_lines<'a>(
             fragment.push_str(&convert_inline_with_yoko(line, config, in_yoko));
             fragment.push_str(&close_tag);
             fragment.push('\n');
-            continue;
-        }
-
-        if let Some(spec) = pending_heading.take() {
-            append_heading(
-                &mut fragment,
-                spec,
-                line,
-                config,
-                &mut output_count,
-                chapter_id.as_deref(),
-                in_yoko,
-            );
             continue;
         }
 
@@ -955,6 +1156,7 @@ fn render_lines<'a>(
                     config,
                     &mut output_count,
                     chapter_id.as_deref(),
+                    page_break_chapter.unwrap_or(false),
                     in_yoko,
                 );
                 continue;
@@ -974,7 +1176,17 @@ fn render_lines<'a>(
             if let Some(spec) = heading_spec(note) {
                 let content = heading_content(note, rest);
                 if content.trim().is_empty() {
-                    pending_heading = Some(spec);
+                    // Java: an empty heading note emits the empty heading tag
+                    // on its own line; the next line is a normal paragraph.
+                    append_heading(
+                        &mut fragment,
+                        spec,
+                        "",
+                        config,
+                        &mut output_count,
+                        chapter_id.as_deref(),
+                        in_yoko,
+                    );
                 } else {
                     // Java: 行頭の全角/半角空白は見出しタグの前に出力される
                     let leading_len = line.len() - line.trim_start().len();
@@ -1116,12 +1328,12 @@ fn render_lines<'a>(
             config,
             &mut output_count,
             chapter_id.as_deref(),
+            page_break_chapter.unwrap_or(false),
             in_yoko,
         );
     }
 
     while let Some(block) = blocks.pop() {
-        output_count += 1;
         match block {
             OpenBlock::Generated { close_tag, .. } => {
                 fragment.push_str(&close_tag);
@@ -1139,16 +1351,6 @@ fn render_lines<'a>(
         fragment.push_str(&open_tag);
         fragment.push_str(&close_tag);
         fragment.push('\n');
-    } else if let Some(spec) = pending_heading {
-        append_heading(
-            &mut fragment,
-            spec,
-            "",
-            config,
-            &mut output_count,
-            None,
-            in_yoko,
-        );
     }
 
     if !has_line {
@@ -1157,7 +1359,7 @@ fn render_lines<'a>(
     if config.ini.get_bool("MarkId").unwrap_or(false) {
         fragment = add_kobo_ids(&fragment);
     }
-    balance_xhtml(&fragment)
+    (balance_xhtml(&fragment), emitted)
 }
 
 fn add_kobo_ids(fragment: &str) -> String {
@@ -1525,6 +1727,79 @@ fn append_heading(
     fragment.push_str(">\n");
 }
 
+fn append_line(
+    fragment: &mut String,
+    line: &str,
+    config: &AozoraConfig,
+    output_count: &mut usize,
+    chapter_id: Option<&str>,
+    page_break_chapter: bool,
+    in_yoko: bool,
+) {
+    let converted = convert_inline_with_yoko(line, config, in_yoko);
+    if append_open_image_line(fragment, &converted) {
+        return;
+    }
+    if converted.trim().is_empty() {
+        fragment.push_str("    <p><br/></p>\n");
+    } else {
+        *output_count += 1;
+        // 見出し注記で生成された h1/h2/h3 は <p> で包まない（Java 準拠）
+        let is_heading = ["<h1", "<h2", "<h3"]
+            .iter()
+            .any(|tag| converted.contains(tag));
+        if is_heading {
+            // Java blockTag path: the chapter id goes on the heading tag.
+            let converted = chapter_id
+                .map(|id| inject_kobo_id(&converted, id))
+                .unwrap_or(converted);
+            fragment.push_str(&converted);
+            fragment.push('\n');
+        } else {
+            // Java: <p id> only for non-page-break chapters.
+            match chapter_id.filter(|_| !page_break_chapter) {
+                Some(id) => {
+                    fragment.push_str("    <p id=\"");
+                    fragment.push_str(id);
+                    fragment.push_str("\">");
+                }
+                None => fragment.push_str("    <p>"),
+            }
+            fragment.push_str(&converted);
+            fragment.push_str("</p>\n");
+        }
+    }
+}
+fn append_block_line(
+    fragment: &mut String,
+    line: &str,
+    config: &AozoraConfig,
+    output_count: &mut usize,
+    chapter_id: Option<&str>,
+    page_break_chapter: bool,
+    in_yoko: bool,
+) {
+    let converted = convert_inline_with_yoko(line, config, in_yoko);
+    if append_open_image_line(fragment, &converted) {
+        return;
+    }
+    if converted.trim().is_empty() {
+        fragment.push_str("<p><br/></p>\n");
+    } else {
+        *output_count += 1;
+        match chapter_id.filter(|_| !page_break_chapter) {
+            Some(id) => {
+                fragment.push_str("<p id=\"");
+                fragment.push_str(id);
+                fragment.push_str("\">");
+            }
+            None => fragment.push_str("<p>"),
+        }
+        fragment.push_str(&converted);
+        fragment.push_str("</p>\n");
+    }
+}
+
 /// Injects a kobo id the way the reference renderer does: into the first tag
 /// of a block line, or wrapping the first character of a bare line.
 fn inject_kobo_id(line: &str, id: &str) -> String {
@@ -1576,61 +1851,6 @@ fn append_open_image_line(fragment: &mut String, converted: &str) -> bool {
     true
 }
 
-fn append_line(
-    fragment: &mut String,
-    line: &str,
-    config: &AozoraConfig,
-    output_count: &mut usize,
-    chapter_id: Option<&str>,
-    in_yoko: bool,
-) {
-    let converted = convert_inline_with_yoko(line, config, in_yoko);
-    if append_open_image_line(fragment, &converted) {
-        return;
-    }
-    if converted.trim().is_empty() {
-        fragment.push_str("    <p><br/></p>\n");
-    } else {
-        *output_count += 1;
-        // The reference renderer does not attach kobo ids to <p>-wrapped
-        // page-break chapters, so `chapter_id` is intentionally unused here.
-        let _ = chapter_id;
-        // 見出し注記で生成された h1/h2/h3 は <p> で包まない（Java 準拠）
-        let is_heading = ["<h1", "<h2", "<h3"]
-            .iter()
-            .any(|tag| converted.contains(tag));
-        if is_heading {
-            fragment.push_str(&converted);
-            fragment.push('\n');
-        } else {
-            fragment.push_str("    <p>");
-            fragment.push_str(&converted);
-            fragment.push_str("</p>\n");
-        }
-    }
-}
-fn append_block_line(
-    fragment: &mut String,
-    line: &str,
-    config: &AozoraConfig,
-    output_count: &mut usize,
-    chapter_id: Option<&str>,
-    in_yoko: bool,
-) {
-    let converted = convert_inline_with_yoko(line, config, in_yoko);
-    if append_open_image_line(fragment, &converted) {
-        return;
-    }
-    if converted.trim().is_empty() {
-        fragment.push_str("<p><br/></p>\n");
-    } else {
-        *output_count += 1;
-        let _ = chapter_id;
-        fragment.push_str("<p>");
-        fragment.push_str(&converted);
-        fragment.push_str("</p>\n");
-    }
-}
 #[cfg(test)]
 #[path = "text_tests.rs"]
 mod tests;

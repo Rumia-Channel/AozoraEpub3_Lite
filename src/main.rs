@@ -3,7 +3,7 @@ use aozora_epub3_lite::{
     TextEntry, TitleType, aozora_text_to_xhtml_sections_with_chapters, apply_alt_upright,
     collect_image_alts, decode_text, detect_meta_with_gaiji, escape_html, file_title_creator,
     image::process as process_image, image_reference_occurrences, image_references,
-    inline_to_xhtml,
+    inline_to_xhtml, remove_metadata_lines,
 };
 use std::env;
 use std::error::Error;
@@ -77,17 +77,24 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut config = AozoraConfig::load_from_dirs(&config_dir_refs, preset)?;
     if uses_builtin_config {
         // Java CLI parity: with no -i/--preset the reference CLI leaves these
-        // flags off (empty profile), while the bundled replace.txt rules stay
-        // active (。」→」, －→―, ＜→〈, ＞→〉).
+        // flags off (empty profile). replace.txt is loaded only when the file
+        // sits next to the executable (jarPath parity) — the manifest fallback
+        // dir is a dev convenience and must not auto-apply its bundled rules.
         config.auto_yoko = false;
         config.dakuten_type = 0;
         config.print_ivs_bmp = false;
         config.print_ivs_ssp = false;
+        if config_dirs[0] == Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/aozora") {
+            config.character_replacements.clear();
+        }
     }
     apply_ini_defaults(&mut options, &config);
     let vertical = options
         .horizontal
         .unwrap_or_else(|| config.ini.get_bool("Vertical").unwrap_or(true));
+    // Java AozoraEpub3 は -hor を converter.vertical / bookInfo.vertical の両方に
+    // 反映する。Lite の config.vertical は本文変換側の converter.vertical 相当。
+    config.vertical = vertical;
     let publisher_first = config.ini.get_bool("PubFirst").unwrap_or(false);
     let title_type = options
         .title_type
@@ -252,10 +259,15 @@ fn convert_input(
         let nav_chapters = chapter_records
             .into_iter()
             .map(|record| {
-                NavChapter::new(
+                let mut chapter = NavChapter::new(
                     record.label,
                     format!("xhtml/{:04}.xhtml", record.section_index + 1),
                 )
+                .with_level(record.level);
+                if let Some(anchor) = record.anchor {
+                    chapter = chapter.with_anchor(anchor);
+                }
+                chapter
             })
             .collect::<Vec<_>>();
         let title_markup_input = if options.use_file_name {
@@ -263,14 +275,23 @@ fn convert_input(
         } else {
             detected_title_source.as_deref().unwrap_or(title.as_str())
         };
-        let title_markup = inline_to_xhtml(title_markup_input, config);
+        // Java Epub3Writer: TITLE_HORIZONTAL の表題ページは converter.vertical=false で
+        // 変換する（縦中横・正立タグが付かない）。TITLE_MIDDLE は本文と同じ縦書き設定。
+        let title_line_config = if config.title_page_type == 2 {
+            let mut horizontal = config.clone();
+            horizontal.vertical = false;
+            std::borrow::Cow::Owned(horizontal)
+        } else {
+            std::borrow::Cow::Borrowed(config)
+        };
+        let title_markup = inline_to_xhtml(title_markup_input, &title_line_config);
         let creator_markup = creator.map(|value| {
             let source = if options.use_file_name || options.creator.is_some() {
                 value
             } else {
                 detected_creator_source.as_deref().unwrap_or(value)
             };
-            inline_to_xhtml(source, config)
+            inline_to_xhtml(source, &title_line_config)
         });
         let title_page_markup = if options.use_file_name {
             None
@@ -313,8 +334,12 @@ fn convert_input(
         );
         let mut book = EpubBook::from_sections(metadata, sections)
             .with_title_page_if(title_page_selected)
+            .with_title_page_type(config.title_page_type)
             .with_vertical(vertical)
             .with_kindle(is_kindle(options))
+            .with_toc_page(config.toc_page)
+            .with_toc_nest(config.nav_nest, config.ncx_nest)
+            .with_title_toc(config.title_toc)
             .with_assets(
                 assets
                     .iter()
@@ -402,41 +427,6 @@ fn append_gaiji_assets(
         ));
     }
     Ok(())
-}
-fn remove_metadata_lines(input: &str, metadata: &BookMeta) -> String {
-    let Some(start) = metadata.meta_line_start else {
-        return input.to_owned();
-    };
-    let Some(end) = metadata.title_end_line else {
-        return input.to_owned();
-    };
-    let lines = input.lines().collect::<Vec<_>>();
-    if start >= lines.len() || end >= lines.len() || start > end {
-        return input.to_owned();
-    }
-
-    let mut remove_start = start;
-    while remove_start > 0 && is_metadata_wrapper(lines[remove_start - 1]) {
-        remove_start -= 1;
-    }
-    let mut remove_end = end;
-    while remove_end + 1 < lines.len() && is_metadata_wrapper(lines[remove_end + 1]) {
-        remove_end += 1;
-    }
-
-    let retained = lines
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, line)| (index < remove_start || index > remove_end).then_some(line))
-        .collect::<Vec<_>>();
-    // Java はタイトル行後の空行を `<p><br/></p>` として本文に出力するため、
-    // タイトル行の除去に伴う先頭空行の削除は行わない。
-    retained.join("\n")
-}
-
-fn is_metadata_wrapper(line: &str) -> bool {
-    let line = line.trim();
-    line.starts_with("［＃ここから") || line.starts_with("［＃ここで")
 }
 
 /// Builds a disambiguating output-name suffix for archives with several
@@ -943,6 +933,11 @@ fn remove_missing_image_sources(
 }
 
 fn remove_empty_image_wrappers(fragment: &mut String) {
+    // Java: 画像取得失敗で <img> を除去した後、画像だけを包んでいた
+    // <span> ラッパーを除去する。二分アキ (<span class="half_em_space"></span>)
+    // や zws (&#8203;) など、画像と無関係な空 span は消してはいけない。
+    // 画像ラッパーは class なしの素の <span> のみ (parse_raw_image / 画像注記が
+    // <span><img .../></span> を生成する)。
     let mut cursor = 0;
     while let Some(offset) = fragment[cursor..].find("</span>") {
         let close = cursor + offset;
@@ -955,7 +950,12 @@ fn remove_empty_image_wrappers(fragment: &mut String) {
             continue;
         };
         let content_start = open + content_start + 1;
-        if fragment[content_start..close].trim().is_empty() {
+        // class 属性付きの span (half_em_space 等) は画像ラッパーではない
+        let is_plain_span = fragment[open..content_start]
+            .trim_end_matches('>')
+            .trim_end()
+            == "<span";
+        if is_plain_span && fragment[content_start..close].trim().is_empty() {
             fragment.replace_range(open..close + "</span>".len(), "");
             cursor = open;
         } else {
@@ -2684,5 +2684,20 @@ mod tests {
         assert!(sections[0].contains("<div class=\"mt5\">"));
         assert!(sections[0].contains("<img class=\"fit\""));
         assert!(sections[0].contains("<p>後</p>"));
+    }
+
+    #[test]
+    fn keeps_class_carrying_empty_spans_when_images_are_missing() {
+        // 画像取得失敗で <img> が消えた後、画像ラッパー（class なし）の空 span だけが
+        // 除去される。二分アキなどクラス付きの空 span は残す。
+        let mut sections = vec![format!(
+            "<p><span class=\"half_em_space\"></span>{text}<span><img class=\"fit\" src=\"../image/missing.png\" alt=\"\"/></span></p>",
+            text = "\u{300c}\u{305d}\u{3063}\u{3061}\u{ff1f}\u{300d}",
+        )];
+        remove_missing_image_sources(&mut sections, &["missing.png".to_owned()], &[]);
+        assert_eq!(
+            sections[0],
+            "<p><span class=\"half_em_space\"></span>\u{300c}\u{305d}\u{3063}\u{3061}\u{ff1f}\u{300d}</p>"
+        );
     }
 }

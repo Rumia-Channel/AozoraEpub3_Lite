@@ -152,6 +152,7 @@ pub struct SuffixNoteRule {
     pub end: String,
 }
 
+#[derive(Clone)]
 pub struct AozoraConfig {
     pub ini: IniSettings,
     pub inline_notes: BTreeMap<String, String>,
@@ -193,6 +194,26 @@ pub struct AozoraConfig {
     pub print_ivs_bmp: bool,
     pub print_ivs_ssp: bool,
     pub vertical: bool,
+    /// `TocPage` INI: spine に nav.xhtml を入れて目次を可視ページ化 (Java 既定 false)。
+    pub toc_page: bool,
+    /// `NavNest` INI: nav.xhtml の `<ol>` を章レベルでネスト (Java 既定 false)。
+    pub nav_nest: bool,
+    /// `NcxNest` INI: toc.ncx の navPoint を章レベルでネスト (Java 既定 false)。
+    pub ncx_nest: bool,
+    /// `TitleToc` INI: 表題を目次に含める (Java BookInfo 既定 true、CLI は INI 無記載で false)。
+    pub title_toc: bool,
+    /// 章検出 `ChapterSection`: 改ページ後の先頭行を章にする (Java: キー無記載で true)。
+    pub chapter_section: bool,
+    /// 章検出 `ChapterH/H1/H2/H3`: 見出し注記を章にする (Java 既定 false)。
+    pub chapter_h: bool,
+    pub chapter_h1: bool,
+    pub chapter_h2: bool,
+    pub chapter_h3: bool,
+    /// 章検出 `SameLineChapter`: `同行見出し` 系も章にする (Java 既定 false)。
+    pub same_line_chapter: bool,
+    /// `SpaceHyphenation` INI: 行内の単独全角スペースの禁則調整。
+    /// 0=なし, 1=`<span class="fullsp"> </span>`, 2=U+2000×2 (Java 既定 0)。
+    pub space_hyphenation: u8,
 }
 
 impl Default for AozoraConfig {
@@ -332,6 +353,17 @@ impl Default for AozoraConfig {
             print_ivs_bmp: false,
             print_ivs_ssp: true,
             vertical: true,
+            toc_page: false,
+            nav_nest: false,
+            ncx_nest: false,
+            title_toc: true,
+            chapter_section: true,
+            chapter_h: false,
+            chapter_h1: false,
+            chapter_h2: false,
+            chapter_h3: false,
+            same_line_chapter: false,
+            space_hyphenation: 0,
         };
         config.load_tag_text(include_str!("../assets/aozora/chuki_tag.txt"));
         config.load_suffix_text(include_str!("../assets/aozora/chuki_tag_suf.txt"));
@@ -397,6 +429,25 @@ impl AozoraConfig {
         let print_ivs_bmp = ini.get_bool("IvsBMP").unwrap_or(false);
         let print_ivs_ssp = ini.get_bool("IvsSSP").unwrap_or(false);
         let vertical = ini.get_bool("Vertical").unwrap_or(true);
+        let toc_page = ini.get_bool("TocPage").unwrap_or(false);
+        let nav_nest = ini.get_bool("NavNest").unwrap_or(false);
+        let ncx_nest = ini.get_bool("NcxNest").unwrap_or(false);
+        let title_toc = ini.get_bool("TitleToc").unwrap_or(false);
+        // Java: ChapterSection はキー無記載で true、値があれば "1" のみ true。
+        let chapter_section = match ini.get("ChapterSection") {
+            None => true,
+            Some(value) => value == "1",
+        };
+        let chapter_h = ini.get_bool("ChapterH").unwrap_or(false);
+        let chapter_h1 = ini.get_bool("ChapterH1").unwrap_or(false);
+        let chapter_h2 = ini.get_bool("ChapterH2").unwrap_or(false);
+        let chapter_h3 = ini.get_bool("ChapterH3").unwrap_or(false);
+        let same_line_chapter = ini.get_bool("SameLineChapter").unwrap_or(false);
+        let space_hyphenation = ini
+            .get("SpaceHyphenation")
+            .and_then(|value| value.parse::<u8>().ok())
+            .filter(|value| *value <= 2)
+            .unwrap_or(0);
         Self {
             ini,
             split_page_breaks,
@@ -422,6 +473,17 @@ impl AozoraConfig {
             print_ivs_bmp,
             print_ivs_ssp,
             vertical,
+            toc_page,
+            nav_nest,
+            ncx_nest,
+            title_toc,
+            chapter_section,
+            chapter_h,
+            chapter_h1,
+            chapter_h2,
+            chapter_h3,
+            same_line_chapter,
+            space_hyphenation,
             ..Self::default()
         }
     }
