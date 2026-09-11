@@ -131,38 +131,22 @@ jobs:
           if-no-files-found: error
 
   sign-windows:
-    name: Sign ${{ matrix.name }}
+    name: Sign Windows binaries
     needs:
       - validate
       - build
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-2025
     environment: CodeSining
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Windows x64
-            os: windows-2025
-            platform: win
-            arch: x64
-            binary: AozoraEpub3_Lite.exe
-            target: x86_64-pc-windows-msvc
-          - name: Windows ARM64
-            os: windows-11-arm
-            platform: win
-            arch: arm64
-            binary: AozoraEpub3_Lite.exe
-            target: aarch64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download unsigned binary
+      - name: Download unsigned binaries
         uses: actions/download-artifact@v4
         with:
-          name: unsigned-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release
+          pattern: unsigned-*
+          path: unsigned
 
-      - name: Sign Windows binary (Certum SimplySign)
+      - name: Sign Windows binaries (Certum SimplySign)
         uses: Rumia-Channel/windows-certum-signin@main
         with:
           certum-username: ${{ secrets.CERTUM_USERNAME }}
@@ -170,26 +154,33 @@ jobs:
           certum-key-id: ${{ vars.CERTUM_KEY_ID }}
           signer: authenticode
           files: |
-            target/${{ matrix.target }}/release/${{ matrix.binary }}
+            unsigned\unsigned-x86_64-pc-windows-msvc\AozoraEpub3_Lite.exe
+            unsigned\unsigned-aarch64-pc-windows-msvc\AozoraEpub3_Lite.exe
 
-      - name: Package release asset
-        id: package
+      - name: Package signed assets
         shell: pwsh
         run: |
-          $archivePath = & .\scripts\package-release.ps1 `
-            -BinaryPath "target/${{ matrix.target }}/release/${{ matrix.binary }}" `
-            -Platform "${{ matrix.platform }}" `
-            -Arch "${{ matrix.arch }}" `
-            -Version "${{ needs.validate.outputs.version }}" `
-            -OutputDir "dist"
-
-          "archive_path=$archivePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "archive_name=$([System.IO.Path]::GetFileName($archivePath))" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $targets = @(
+            @{ Target = "x86_64-pc-windows-msvc"; Arch = "x64" },
+            @{ Target = "aarch64-pc-windows-msvc"; Arch = "arm64" }
+          )
+          foreach ($t in $targets) {
+            $binary = "unsigned\unsigned-$($t.Target)\AozoraEpub3_Lite.exe"
+            if (-not (Test-Path -Path $binary -PathType Leaf)) {
+              throw "Signed binary not found: $binary"
+            }
+            & .\scripts\package-release.ps1 `
+              -BinaryPath $binary `
+              -Platform "win" `
+              -Arch $t.Arch `
+              -Version "${{ needs.validate.outputs.version }}" `
+              -OutputDir "dist"
+          }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.package.outputs.archive_name }}
-          path: ${{ steps.package.outputs.archive_path }}
+          name: windows-assets
+          path: dist
           if-no-files-found: error
 
   release:
