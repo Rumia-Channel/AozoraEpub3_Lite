@@ -99,6 +99,17 @@ jobs:
         shell: pwsh
         run: cargo build --locked --release --target "${{ matrix.target }}" --bin AozoraEpub3_Lite
 
+      - name: Sign Windows binary (Certum SimplySign)
+        if: runner.os == 'Windows'
+        uses: Rumia-Channel/windows-certum-signin@main
+        with:
+          certum-username: ${{ secrets.CERTUM_USERNAME }}
+          certum-otp-uri: ${{ secrets.CERTUM_OTP_URI }}
+          certum-key-id: ${{ vars.CERTUM_KEY_ID }}
+          signer: authenticode
+          files: |
+            target/${{ matrix.target }}/release/${{ matrix.binary }}
+
       - name: Package release asset
         id: package
         shell: pwsh
