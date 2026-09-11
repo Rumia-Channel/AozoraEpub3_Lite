@@ -206,7 +206,7 @@ jobs:
         run: |
           $repo = $env:REPOSITORY
           $tag = $env:TAG_NAME
-          $assets = Get-ChildItem -Path "release-assets" -File | Sort-Object Name
+          $assets = Get-ChildItem -Path "release-assets" -File -Filter "*.zip" | Sort-Object Name
           if ($assets.Count -eq 0) {
             throw "No release assets were downloaded."
           }
