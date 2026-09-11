@@ -130,7 +130,7 @@ fn normalize_chapter_label(label: String) -> String {
         trimmed.to_owned()
     }
 }
-fn nav_entries(sections: &[EpubSection], title_markup: Option<&str>, title_toc: bool) -> Vec<NavEntry> {
+fn nav_entries(sections: &[EpubSection], title: &str, title_toc: bool) -> Vec<NavEntry> {
     let body_count = sections
         .iter()
         .filter(|section| {
@@ -160,11 +160,12 @@ fn nav_entries(sections: &[EpubSection], title_markup: Option<&str>, title_toc: 
             first_body_entry = false;
         }
         let label = if is_title {
-            title_markup.unwrap_or("タイトル").to_owned()
+            // Java: 目次の表題項目は bookInfo.title（生の表題文字列）を使う。
+            title.to_owned()
         } else {
             section_label(section, body_number, body_count)
         };
-        let markup = title_markup.is_some() && is_title;
+        let markup = false;
         let level = if is_title {
             1
         } else {
@@ -418,6 +419,8 @@ pub(super) fn render_package(
         spine_sections.insert_str(0, "\t\t<itemref idref=\"nav\" linear=\"yes\"/>\n");
     }
     let mut manifest_assets = String::new();
+    // Java: 外字フォントの item は xhtml セクション群の後、ncx の前に出力される
+    let mut manifest_gaiji = String::new();
     let mut gaiji_number = 0;
     for (index, asset) in assets.iter().enumerate() {
         let properties = if !image_only && cover_asset == Some(asset.path.as_str()) {
@@ -425,12 +428,16 @@ pub(super) fn render_package(
         } else {
             ""
         };
-        let id = if asset.path.starts_with("gaiji/") {
+        if asset.path.starts_with("gaiji/") {
             gaiji_number += 1;
-            format!("gaiji_{gaiji_number}")
-        } else {
-            asset_manifest_id(&asset.path, index + 1)
-        };
+            manifest_gaiji.push_str(&format!(
+                "\t\t<item id=\"gaiji_{gaiji_number}\" href=\"{}\" media-type=\"{}\"{properties}/>\n",
+                xml_escape(&asset.path),
+                xml_escape(&asset.media_type),
+            ));
+            continue;
+        }
+        let id = asset_manifest_id(&asset.path, index + 1);
         manifest_assets.push_str(&format!(
             "\t\t<item id=\"{id}\" href=\"{}\" media-type=\"{}\"{properties}/>\n",
             xml_escape(&asset.path),
@@ -482,7 +489,7 @@ pub(super) fn render_package(
 {styles}<!-- image -->
 {assets}<!-- xhtml -->
 {cover}{sections}
-		<item href="toc.ncx" id="ncx" media-type="application/x-dtbncx+xml"/>
+{gaiji}		<item href="toc.ncx" id="ncx" media-type="application/x-dtbncx+xml"/>
 	</manifest>
 
 	<spine page-progression-direction="{progression}" toc="ncx">
@@ -500,24 +507,26 @@ pub(super) fn render_package(
         assets = manifest_assets,
         cover = cover_manifest,
         sections = manifest_sections.trim_end(),
+        gaiji = manifest_gaiji,
         cover_spine = cover_spine,
         spine = spine_sections,
         progression = progression,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_nav(
     metadata: &EpubMetadata,
     sections: &[EpubSection],
     _vertical: bool,
-    title_markup: Option<&str>,
+    title: &str,
     chapters: &[NavChapter],
     toc_vertical: bool,
     toc_page: bool,
     nav_nest: bool,
     title_toc: bool,
 ) -> String {
-    let mut nav_items = render_nav_items(chapters, sections, nav_nest, title_toc, title_markup);
+    let mut nav_items = render_nav_items(chapters, sections, nav_nest, title_toc, title);
     if chapters.is_empty() && title_toc && sections.iter().any(is_title_page) {
         // Java: タイトルページを目次の先頭に書籍タイトルで追加する
         let title = xml_escape(&metadata.title);
@@ -542,9 +551,7 @@ pub(super) fn render_nav(
         });
     let mut landmark = String::new();
     if toc_page {
-        landmark.push_str(
-            "\t\t\t<li><a epub:type=\"toc\" href=\"nav.xhtml\">目次</a></li>\r\n",
-        );
+        landmark.push_str("\t\t\t<li><a epub:type=\"toc\" href=\"nav.xhtml\">目次</a></li>\r\n");
     }
     if sections.iter().any(is_title_page) {
         landmark.push_str(
@@ -570,7 +577,7 @@ fn render_nav_items(
     sections: &[EpubSection],
     nav_nest: bool,
     title_toc: bool,
-    title_markup: Option<&str>,
+    title: &str,
 ) -> String {
     if chapters.is_empty() {
         // Java: 章情報が無い場合は最初の本文セクションを「本文」で出力する
@@ -598,12 +605,12 @@ fn render_nav_items(
         .collect();
     // Java insertTitleToc: the title page joins the TOC as the first entry.
     if title_toc && sections.iter().any(is_title_page) {
-        let label = title_markup.unwrap_or("タイトル").to_owned();
+        // Java: 目次の表題項目は bookInfo.title（生の表題文字列）を使う。
         entries.insert(
             0,
             TocEntry {
-                label,
-                markup: true,
+                label: title.to_owned(),
+                markup: false,
                 path: "xhtml/title.xhtml".to_owned(),
                 level: 0,
                 level_start: 0,
@@ -660,13 +667,13 @@ fn first_body_path(sections: &[EpubSection]) -> String {
 pub(super) fn render_ncx(
     metadata: &EpubMetadata,
     sections: &[EpubSection],
-    title_markup: Option<&str>,
+    title: &str,
     chapters: &[NavChapter],
     ncx_nest: bool,
     title_toc: bool,
 ) -> String {
     let mut entries: Vec<TocEntry> = if chapters.is_empty() {
-        nav_entries(sections, title_markup, title_toc)
+        nav_entries(sections, title, title_toc)
             .into_iter()
             .map(|entry| TocEntry {
                 label: entry.label,
@@ -703,12 +710,11 @@ pub(super) fn render_ncx(
     // The auto-detected path (nav_entries) already emits the title row, so
     // only the explicit-chapters path prepends it here.
     if title_toc && !chapters.is_empty() && sections.iter().any(is_title_page) {
-        let label = title_markup.unwrap_or("タイトル").to_owned();
         entries.insert(
             0,
             TocEntry {
-                label,
-                markup: true,
+                label: title.to_owned(),
+                markup: false,
                 path: "xhtml/title.xhtml".to_owned(),
                 level: 0,
                 level_start: 0,
@@ -815,6 +821,7 @@ pub(super) fn render_cover(metadata: &EpubMetadata, asset_path: &str, kindle: bo
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_section(
     metadata: &EpubMetadata,
     body_fragment: &str,
@@ -823,9 +830,42 @@ pub(super) fn render_section(
     title_markup: Option<&str>,
     creator_markup: Option<&str>,
     title_page_markup: Option<&str>,
+    title_page_type: usize,
 ) -> String {
     let kindle_class = if kindle { " kindle" } else { "" };
     let trimmed = body_fragment.trim();
+    // Java TITLE_HORIZONTAL (TitlePage=2): title_horizontal.vm — 横書き専用の
+    // 簡易表題ページ。custom markup は使わず TITLE/CREATOR 等を直接埋め込む。
+    if trimmed == TITLE_PAGE_MARKER && title_page_type == 2 {
+        let title = title_markup
+            .map(str::to_owned)
+            .unwrap_or_else(|| xml_escape(&metadata.title));
+        let creator = creator_markup
+            .map(str::to_owned)
+            .or_else(|| metadata.creator.as_deref().map(xml_escape));
+        let publisher_block = metadata
+            .publisher
+            .as_deref()
+            .map(|value| {
+                format!(
+                    "<div class=\"label\">\n<p class=\"label-name\">{}</p>\n</div>\n",
+                    xml_escape(value)
+                )
+            })
+            .unwrap_or_default();
+        let creator_block = creator
+            .map(|value| format!("<p>{value}</p>\n"))
+            .unwrap_or_default();
+        return format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!DOCTYPE html>\r\n<html\r\nxmlns=\"http://www.w3.org/1999/xhtml\"\r\nxmlns:epub=\"http://www.idpf.org/2007/ops\"\r\nxml:lang=\"{language}\"\r\nclass=\"hltr\"\r\n>\r\n<head>\r\n<meta charset=\"UTF-8\"/>\r\n<title>{title_text}</title>\r\n<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/book-style.css\"/>\r\n</head>\r\n<body class=\"p-titlepage{kindle_class}\">\r\n<div class=\"main\">\r\n\r\n<div class=\"book-title\">\r\n<div class=\"book-title-main\">\r\n<p>{title}</p>\r\n</div>\r\n</div>\r\n\r\n<div class=\"author\">\r\n{creator_block}</div>\r\n{publisher_block}</div>\r\n</body>\r\n</html>\r\n\r\n",
+            language = xml_escape(&metadata.language),
+            title_text = xml_escape(&metadata.title),
+            title = title,
+            creator_block = creator_block,
+            publisher_block = publisher_block,
+            kindle_class = kindle_class,
+        );
+    }
     if trimmed == TITLE_PAGE_MARKER {
         let custom_title_page = title_page_markup.is_some();
         let publisher = metadata

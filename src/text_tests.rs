@@ -833,3 +833,67 @@ fn suppresses_non_leading_mado_notes() {
     assert!(output.contains("<span class=\"mado M\">龍王岬</span>"));
     assert!(output.contains("是を則　龍王嶋　と云り。"));
 }
+
+#[test]
+fn keeps_block_note_lines_out_of_paragraph_wrappers() {
+    // Java printLineBuffer の noBr: chuki_tag.txt 4列目=1 のブロック注記を
+    // 含む行は <p> で括らず、注記のタグを本文と同じ行に出す。
+    let config = AozoraConfig::from_ini(IniSettings::parse("TitlePage=0\n").expect("ini parses"));
+    // noBr はセクション分割側 (aozora_text_to_xhtml_sections_with_chapters) で
+    // 行ごとに決まるため、render_lines 直呼びの plain_text_to_xhtml では検証できない。
+    let sections = aozora_text_to_xhtml_sections_with_config(
+        "前の行テキスト［＃ここから太字］強調される［＃ここで太字終わり］\n次の行",
+        &config,
+    )
+    .unwrap();
+    let output = sections.join("");
+    let block_line = output
+        .lines()
+        .find(|line| line.contains("の行テキスト"))
+        .expect("text line is emitted");
+    assert!(
+        block_line.contains("<div class=\"bold\">強調される</div>"),
+        "block note must stay on the same line as the text: {output}"
+    );
+    assert!(
+        !block_line.trim_start().starts_with("<p"),
+        "block note line must not be paragraph-wrapped: {output}"
+    );
+    assert!(output.contains("<p>次の行</p>"));
+}
+
+#[test]
+fn merges_consecutive_explicit_ruby_groups() {
+    // Java convertRubyText: 連続する｜X《Y》は末尾の </ruby> を削って1つの
+    // ruby 要素にまとめる（rt は基底の語ごと）。
+    let output = super::plain_text_to_xhtml("｜ＩＭ’ｓ 《イム》｜ｃｌｏｓｅｔ《施設》").unwrap();
+    assert_eq!(
+        output,
+        "    <p><ruby>ＩＭ’ｓ <rt>イム</rt>ｃｌｏｓｅｔ<rt>施設</rt></ruby></p>\n"
+    );
+}
+
+#[test]
+fn applies_space_hyphenation_for_late_full_width_spaces() {
+    // Java convertReplacedChar: SpaceHyphenation=1 は 20 文字目以降の
+    // 「文字に挟まれた」全角スペースだけを <span class="fullsp"> にする。
+    // 連続スペースの先頭側と行末は対象外。
+    let config =
+        AozoraConfig::from_ini(IniSettings::parse("SpaceHyphenation=1\n").expect("ini parses"));
+    let output = super::plain_text_to_xhtml_with_config(
+        "これはとても長いテストの行で二十文字を超えた位置に　全角スペースがあります。",
+        &config,
+    )
+    .unwrap();
+    assert!(
+        output.contains(
+            "二十文字を超えた位置に<span class=\"fullsp\"> </span>全角スペースがあります。"
+        ),
+        "late full-width space must become fullsp: {output}"
+    );
+
+    // 20文字以内の全角スペースはそのまま
+    let early = super::plain_text_to_xhtml_with_config("短い　行", &config).unwrap();
+    assert!(early.contains("短い　行"));
+    assert!(!early.contains("fullsp"));
+}

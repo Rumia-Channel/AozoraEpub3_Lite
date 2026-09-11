@@ -152,6 +152,7 @@ pub struct SuffixNoteRule {
     pub end: String,
 }
 
+#[derive(Clone)]
 pub struct AozoraConfig {
     pub ini: IniSettings,
     pub inline_notes: BTreeMap<String, String>,
@@ -210,6 +211,9 @@ pub struct AozoraConfig {
     pub chapter_h3: bool,
     /// 章検出 `SameLineChapter`: `同行見出し` 系も章にする (Java 既定 false)。
     pub same_line_chapter: bool,
+    /// `SpaceHyphenation` INI: 行内の単独全角スペースの禁則調整。
+    /// 0=なし, 1=`<span class="fullsp"> </span>`, 2=U+2000×2 (Java 既定 0)。
+    pub space_hyphenation: u8,
 }
 
 impl Default for AozoraConfig {
@@ -359,6 +363,7 @@ impl Default for AozoraConfig {
             chapter_h2: false,
             chapter_h3: false,
             same_line_chapter: false,
+            space_hyphenation: 0,
         };
         config.load_tag_text(include_str!("../assets/aozora/chuki_tag.txt"));
         config.load_suffix_text(include_str!("../assets/aozora/chuki_tag_suf.txt"));
@@ -438,6 +443,11 @@ impl AozoraConfig {
         let chapter_h2 = ini.get_bool("ChapterH2").unwrap_or(false);
         let chapter_h3 = ini.get_bool("ChapterH3").unwrap_or(false);
         let same_line_chapter = ini.get_bool("SameLineChapter").unwrap_or(false);
+        let space_hyphenation = ini
+            .get("SpaceHyphenation")
+            .and_then(|value| value.parse::<u8>().ok())
+            .filter(|value| *value <= 2)
+            .unwrap_or(0);
         Self {
             ini,
             split_page_breaks,
@@ -473,6 +483,7 @@ impl AozoraConfig {
             chapter_h2,
             chapter_h3,
             same_line_chapter,
+            space_hyphenation,
             ..Self::default()
         }
     }

@@ -67,13 +67,7 @@ pub fn plain_text_to_xhtml_with_config(
 ) -> Result<String, TextError> {
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
     let lines = visible_lines(input, config);
-    Ok(render_lines(
-        lines.iter().map(String::as_str),
-        &[],
-        &[],
-        config,
-    )
-    .0)
+    Ok(render_lines(lines.iter().map(String::as_str), &[], &[], config).0)
 }
 
 fn visible_lines(input: &str, config: &AozoraConfig) -> Vec<String> {
@@ -383,6 +377,9 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
         }
 
         let mut remainder = line.as_str();
+        // Java: chukiFlagNoBr (chuki_tag.txt 4列目=1) のブロック注記を含む行は
+        // 行全体を <p> で括らない (printLineBuffer noBr)。
+        let line_has_block_note = contains_block_note(line, config);
         loop {
             let Some((offset, end, note)) = find_page_break_note(remainder, config) else {
                 append_section_line(
@@ -395,7 +392,7 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
                     &mut chapter_lines,
                     &mut chapters,
                     config,
-                    false,
+                    line_has_block_note,
                 );
                 break;
             };
@@ -455,16 +452,37 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
             config,
         );
     }
-
     Ok((sections, chapters))
 }
 
+/// Java: chukiFlagNoBr (chuki_tag.txt 4列目=1) のブロック注記を含むか。
+/// 含む行は printLineBuffer の noBr 相当で <p> ラップしない。
+fn contains_block_note(line: &str, config: &AozoraConfig) -> bool {
+    for (start, _) in line.match_indices("［＃") {
+        let note_start = start + "［＃".len();
+        let Some(close_offset) = line[note_start..].find('］') else {
+            continue;
+        };
+        let note = &line[note_start..note_start + close_offset];
+        if config.block_open_tags.contains_key(note)
+            || config.block_close_tags.contains_key(note)
+            || config.block_inline_tags.contains_key(note)
+            || config.block_single_tags.contains_key(note)
+            || generated_indent_block(note).is_some()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
 fn push_rendered_section(
     sections: &mut Vec<String>,
     current: &mut Vec<String>,
     no_br: &mut Vec<bool>,
     chapter_lines: &mut Vec<(usize, usize)>,
-    chapters: &mut Vec<ChapterRecord>,
+    chapters: &mut [ChapterRecord],
     page_marker: Option<&'static str>,
     config: &AozoraConfig,
 ) {
@@ -483,9 +501,7 @@ fn push_rendered_section(
     // Java: the TOC fragment (#kobo.N.M) is only used for chapters that are
     // not page-break chapters.
     for (line_index, id) in emitted {
-        if let Some((_, record)) = chapter_lines
-            .iter()
-            .find(|(index, _)| *index == line_index)
+        if let Some((_, record)) = chapter_lines.iter().find(|(index, _)| *index == line_index)
             && !chapters[*record].page_break_chapter
         {
             chapters[*record].anchor = Some(id);
@@ -506,7 +522,7 @@ fn append_section_line(
     page_marker: &mut Option<&'static str>,
     section_index: &mut usize,
     chapter_lines: &mut Vec<(usize, usize)>,
-    chapters: &mut Vec<ChapterRecord>,
+    chapters: &mut [ChapterRecord],
     config: &AozoraConfig,
     bare: bool,
 ) {
@@ -860,8 +876,7 @@ impl OpenBlock {
 
 /// Renders one section's lines to an XHTML fragment. `chapter_lines` maps
 /// line indices to `page_break_chapter`; each chapter line gets a
-/// `kobo.N.1` id (Java `chapterId`), and the emitted `(line_index, id)`
-/// pairs are returned so callers can wire TOC fragments.
+/// `kobo.N.1` id; returns the fragment plus emitted (line_index, id) pairs.
 fn render_lines<'a>(
     lines: impl IntoIterator<Item = &'a str>,
     no_br: &[bool],
@@ -889,9 +904,16 @@ fn render_lines<'a>(
             .into_iter()
             .enumerate()
             .flat_map(|(index, line)| {
-                split_block_notes(line, &block_markers)
-                    .into_iter()
-                    .map(move |piece| (index, piece))
+                // Java: noBr 行は行全体を1バッファで注記→タグ置換して1行出力する。
+                // ブロック注記での分割を行わず convert_inline に任せる。
+                if no_br.get(index).copied().unwrap_or(false) {
+                    vec![(index, line.to_owned())]
+                } else {
+                    split_block_notes(line, &block_markers)
+                        .into_iter()
+                        .map(move |piece| (index, piece))
+                        .collect()
+                }
             })
             .collect::<Vec<_>>(),
         config,
@@ -912,7 +934,8 @@ fn render_lines<'a>(
             emitted.push((line_index, id.to_owned()));
         }
         if line_no_br {
-            // 前-part of a mid-line page break: output bare, no <p> wrapper.
+            // Java: noBr 行は <p> で括らず行全体を1行出力する。
+            // ブロック注記は convert_inline が inline_notes 経由でタグ化する。
             output_count += 1;
             let converted = convert_inline_with_yoko(line, config, in_yoko);
             let converted = chapter_id
@@ -920,6 +943,30 @@ fn render_lines<'a>(
                 .unwrap_or(converted);
             fragment.push_str(&converted);
             fragment.push('\n');
+            // 分割を省略したため、ブロック開閉・横組み状態をここで追跡する
+            for (note, _) in line_note_names(line) {
+                if config.block_open_tags.contains_key(&note) {
+                    if note.contains("横組み") {
+                        in_yoko = true;
+                    }
+                    if let Some(open_tag) = config.block_open_tags.get(&note) {
+                        blocks.push(OpenBlock::Configured {
+                            fallback_close_tag: fallback_close_tag(open_tag),
+                            indent: note.contains("字下げ"),
+                        });
+                    }
+                } else if config.block_close_tags.contains_key(&note) {
+                    if note.contains("横組み終わり") {
+                        in_yoko = false;
+                    }
+                    blocks.pop();
+                } else if let Some((_, close_tag)) = generated_indent_block(&note) {
+                    blocks.push(OpenBlock::Generated {
+                        close_tag,
+                        indent: note.contains("字下げ"),
+                    });
+                }
+            }
             continue;
         }
         if let Some(raw) = line.strip_prefix(RAW_COMMENT_PREFIX) {

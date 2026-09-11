@@ -27,6 +27,9 @@ fn convert_inline_with_options(
     allow_upright: bool,
     in_yoko: bool,
 ) -> String {
+    // Java convertReplacedChar: 正立 (<span class="upr">) は縦書き時のみ。
+    // 外字・IVS も同じく this.vertical で gate される。
+    let allow_upright = allow_upright && config.vertical;
     let input = rewrite_character_replacements(input, config);
     // エスケープペア: ＜＜→※《 ＞＞→※》 <<→※《 >>→※》 (Java convertEscapedText)
     // ※マーカーはループ内のエスケープ分岐で除去される
@@ -50,6 +53,12 @@ fn convert_inline_with_options(
     let mut in_mado = false;
     let mut link_started = false;
     let mut implicit_ruby_open = false;
+    // Java convertReplacedChar の idx 相当: 注記→タグ変換後 (phase-1) 文字列上の
+    // 文字位置。SpaceHyphenation の `idx > 20` 判定に使う。注記はタグ長、
+    // ルビ・生タグ・〔〕は raw 文字数、※エスケープは 2 として数える。
+    let mut java_pos = 0usize;
+    // Java bufSuf 相当: chuki_tag.txt 3列目の行末タグを行末に出力するための遅延バッファ
+    let mut deferred_close = String::new();
     while index < chars.len() {
         if implicit_ruby_open
             && chars[index] != '《'
@@ -82,6 +91,7 @@ fn convert_inline_with_options(
             }
             push_text_char_escaped(&mut output, chars[index]);
             index += 1;
+            java_pos += 1;
             continue;
         }
         if chars[index] == '※'
@@ -97,10 +107,12 @@ fn convert_inline_with_options(
             {
                 let _ = replacement;
                 index = end;
+                java_pos += 1 + replacement.chars().count();
                 continue;
             }
             output.push_str(&replacement);
             index = end;
+            java_pos += 1 + replacement.chars().count();
             continue;
         }
         if chars[index] == '※'
@@ -109,6 +121,7 @@ fn convert_inline_with_options(
         {
             output.push_str(&replacement);
             index = end;
+            java_pos += replacement.chars().count();
             continue;
         }
         if chars[index] == '※'
@@ -116,26 +129,31 @@ fn convert_inline_with_options(
         {
             output.push_str(&replacement);
             index = end;
+            java_pos += 1 + replacement.chars().count();
             continue;
         }
         if let Some((end, replacement)) = parse_unicode_note(&chars, index, config) {
             output.push_str(&replacement);
             index = end;
+            java_pos += replacement.chars().count();
             continue;
         }
         if let Some((end, replacement)) = parse_image_note(&chars, index, config) {
             output.push_str(&replacement);
             index = end;
+            java_pos += replacement.chars().count();
             continue;
         }
         if let Some((end, replacement)) = parse_inline_heading(&chars, index, config) {
             output.push_str(&replacement);
             index = end;
+            java_pos += replacement.chars().count();
             continue;
         }
         if let Some((end, replacement)) = parse_configured_inline_block(&chars, index, config) {
             output.push_str(&replacement);
             index = end;
+            java_pos += replacement.chars().count();
             continue;
         }
         // Java: 窓*見出しは行頭のみ対応。行単位の inMado 状態で、行頭でない
@@ -156,6 +174,14 @@ fn convert_inline_with_options(
                     }
                 }
                 index = end;
+                java_pos += if suppress {
+                    0
+                } else {
+                    config
+                        .inline_notes
+                        .get(&note)
+                        .map_or(0, |tag| tag.chars().count())
+                };
                 continue;
             }
         }
@@ -173,7 +199,14 @@ fn convert_inline_with_options(
                 yoko_depth += 1;
             }
             output.push_str(&replacement);
+            // Java: chuki_tag.txt 3列目の行末タグ (tags[1]) は bufSuf に積まれ
+            // 行末に出力される。block_inline_tags の close を遅延出力で再現。
+            let note_str: String = note_name.iter().collect();
+            if let Some((_, close_tag)) = config.block_inline_tags.get(&note_str) {
+                deferred_close.push_str(close_tag);
+            }
             index = end;
+            java_pos += replacement.chars().count();
             continue;
         }
         if chars[index] == '<'
@@ -186,6 +219,7 @@ fn convert_inline_with_options(
             }
             output.push_str(&markup);
             index = end;
+            java_pos += markup.chars().count();
             continue;
         }
         if chars[index] == '<'
@@ -193,6 +227,7 @@ fn convert_inline_with_options(
         {
             output.push_str(&replacement);
             index = end;
+            java_pos += replacement.chars().count();
             continue;
         }
         if chars[index] == '<'
@@ -210,6 +245,7 @@ fn convert_inline_with_options(
                 link_started = true;
                 output.push_str(&replacement);
             }
+            java_pos += end - index;
             index = end;
             continue;
         }
@@ -221,14 +257,20 @@ fn convert_inline_with_options(
                 let separated = inner.iter().collect::<String>();
                 let replacement = convert_latin(&separated, config);
                 output.push_str(&escape_text(&replacement));
+                java_pos += close + 1 - index;
                 index = close + 1;
                 continue;
             }
         }
 
-        if chars[index] == '｜'
-            && let Some((open, close)) = find_ruby_bounds(&chars, index + 1)
-        {
+        if chars[index] == '｜' {
+            // Java: ｜ はルビ開始マーカー。対応する 《》 が無い場合はマーカー
+            // だけが消費され、以降の文字は通常処理される（〝｜♡〟 → 〝♡〟）。
+            let Some((open, close)) = find_ruby_bounds(&chars, index + 1) else {
+                index += 1;
+                java_pos += 1;
+                continue;
+            };
             let base = chars[index + 1..open].iter().collect::<String>();
             if !base.is_empty() {
                 let reading = chars[open + 1..close].iter().collect::<String>();
@@ -252,6 +294,7 @@ fn convert_inline_with_options(
                         auto_yoko && tcy_depth == 0,
                     );
                 }
+                java_pos += close + 1 - index;
                 index = close + 1;
                 continue;
             }
@@ -383,6 +426,7 @@ fn convert_inline_with_options(
             if !continues {
                 output.push_str("</ruby>");
             }
+            java_pos += close + 1 - index;
             index = close + 1;
             continue;
         }
@@ -390,21 +434,27 @@ fn convert_inline_with_options(
             && let Some(close) = find_closing_ruby(&chars, index)
         {
             // Java: ルビ開始文字無しの《》は警告して破棄する
+            java_pos += close + 1 - index;
             index = close + 1;
             continue;
         }
-        index += push_text_char(
+        let consumed = push_text_char(
             &mut output,
             &chars,
             index,
             config,
             allow_upright && tcy_depth == 0,
             yoko_depth > 0,
+            tcy_depth > 0,
+            java_pos,
         );
+        index += consumed;
+        java_pos += consumed;
     }
     if implicit_ruby_open {
         output.push_str("</ruby>");
     }
+    output.push_str(&deferred_close);
     output
 }
 
@@ -1169,7 +1219,16 @@ fn render_gaiji_replacement(input: &str, config: &AozoraConfig, allow_upright: b
             index += 1;
             continue;
         }
-        index += push_text_char(&mut output, &chars, index, config, allow_upright, false);
+        index += push_text_char(
+            &mut output,
+            &chars,
+            index,
+            config,
+            allow_upright,
+            false,
+            false,
+            0,
+        );
     }
     output
 }
@@ -1879,10 +1938,7 @@ fn should_preserve_unconverted_note(note: &str) -> bool {
         && !note.contains("」に「")
         && !note.ends_with("の注記")
 }
-/// 自動縦中横（rewrite_auto_yoko）が生成した tcy タグのみ素通しする。
-/// Java は convertTcyText でタグを生成した後に convertReplacedChar が
-/// 文字変換を行うため、tcy タグはエスケープされない。それ以外の生タグ
-/// （入力中の `<br/>` 等）は Java と同じく本文テキストとしてエスケープされる。
+
 fn parse_configured_markup(
     chars: &[char],
     start: usize,
@@ -1908,6 +1964,7 @@ fn is_tcy_close(markup: &str, config: &AozoraConfig) -> bool {
     config.inline_notes.get("縦中横終わり").map(String::as_str) == Some(markup)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_text_char(
     output: &mut String,
     chars: &[char],
@@ -1915,12 +1972,32 @@ fn push_text_char(
     config: &AozoraConfig,
     allow_upright: bool,
     in_yoko: bool,
+    in_tcy: bool,
+    java_pos: usize,
 ) -> usize {
     // Single-character replacement (replace.txt): the result is emitted raw,
     // exactly like the reference replaceMap, so it is not re-normalized.
     let key = chars[index].to_string();
     if let Some(replacement) = config.character_replacements.get(&key) {
         output.push_str(replacement);
+        return 1;
+    }
+    // Java convertReplacedChar: 文字の間の全角スペースを禁則調整
+    // (SpaceHyphenation)。横組み・縦中横内では抑止。idx は注記→タグ変換後の
+    // 文字位置で、行末の全角スペースと連続全角スペースの先頭側は対象外。
+    if config.space_hyphenation > 0
+        && !in_yoko
+        && !in_tcy
+        && chars[index] == '\u{3000}'
+        && java_pos > 20
+        && !output.is_empty()
+        && !output.ends_with('\u{3000}')
+        && chars.get(index + 1).is_some_and(|next| *next != '\u{3000}')
+    {
+        match config.space_hyphenation {
+            1 => output.push_str("<span class=\"fullsp\"> </span>"),
+            _ => output.push_str("\u{2000}\u{2000}"),
+        }
         return 1;
     }
     if let Some((class_name, consumed)) = glyph_font_for_sequence(chars, index, config) {
@@ -1969,7 +2046,8 @@ fn push_text_char(
     }
 
     let character = normalize_vertical_character(chars[index], config.vertical, in_yoko);
-    if allow_upright && is_upright_character(character) {
+    // Java: 記号の正立は `this.vertical && !inYoko` の中でだけ適用される
+    if allow_upright && !in_yoko && is_upright_character(character) {
         output.push_str("<span class=\"upr\">");
         push_text_char_escaped(output, character);
         output.push_str("</span>");
