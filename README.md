@@ -2,257 +2,280 @@
 
 ## 謝辞
 
-本ツールは、[急急如律令](https://github.com/kyukyunyorituryo) さんが開発された改造版 [AozoraEpub3](https://github.com/kyukyunyorituryo/AozoraEpub3)、および [hmdev](https://github.com/hmdev) さんが開発された [AozoraEpub3](https://github.com/hmdev/AozoraEpub3) の成果に基づいています。両開発者に深く感謝いたします。
+本ツールは、[hmdev](https://github.com/hmdev) さんが開発した AozoraEpub3 と、[急急如律令](https://github.com/kyukyunyorituryo) さんによる改造版 AozoraEpub3 の成果に基づいています。
 
-青空文庫のテキストを EPUB 3 に変換する、Rust 製の軽量 CLI ツールです。
+両開発者、および青空文庫・GlyphWiki など関連プロジェクトの関係者に感謝します。
 
-Java 版 [AozoraEpub3](https://github.com/kyukyunyorituryo/AozoraEpub3) のローカル変換機能を Rust で再実装しており、GUI やネットワーク機能を持たない代わりに、単一バイナリで動作します。
+青空文庫形式のテキストを EPUB 3 に変換する、Rust 製のコマンドラインツールです。
 
-## 特徴
+Java 版 [AozoraEpub3](https://github.com/kyukyunyorituryo/AozoraEpub3) のうち、ローカルファイルの変換に必要な機能を Rust で再実装しています。GUI や Web 小説の取得機能は持たず、TXT / ZIP / TXTZ / CBZ から EPUB を生成する処理に絞っています。
 
-- **ローカル入力のみ**: TXT / ZIP / TXTZ / CBZ から EPUB 3 を生成
-- **青空文庫注記に対応**: ルビ、縦中横、傍点、傍線、割り注、外字、字下げ、見出し、改ページ、画像注記など
-- **縦書き・横書き**: 既定は縦書き、`--horizontal` で横書き
-- **画像処理**: 回り込み、単ページの SVG 固定レイアウト化、表紙、リサイズ・回転
-- **外字フォント埋め込み**: GlyphWiki の 1 文字フォントを EPUB 内に格納
-- **Java 版との互換性**: ローカル変換の XHTML 出力を、21 件のテストフィクスチャ中 19 件で完全一致（2026-08-16 時点）
-- **追加ランタイム不要**: Java は不要
+## 主な特徴
 
-## 動作環境とビルド
+- TXT / ZIP / TXTZ / CBZ から EPUB 3 を生成
+- 青空文庫の主な注記に対応（ルビ、縦中横、傍点、傍線、割り注、字下げ、見出し、改ページ、画像注記など）
+- 縦書き・横書きに対応
+- 表紙、画像の回り込み、リサイズ・回転、単ページ画像の SVG 固定レイアウト化に対応
+- GlyphWiki の 1 文字フォントを EPUB に埋め込み可能
+- Java ランタイム不要
+- Windows / macOS / Linux の x64 / ARM64 向けリリースを用意
 
-- Windows / macOS / Linux
-- Rust 1.85 以降（edition 2024）
+GUI、Web 小説の取得、RAR 入力は対象外です。
+
+## ダウンロード
+
+ビルド済みの実行ファイルは [Releases](https://github.com/Rumia-Channel/AozoraEpub3_Lite/releases) から入手できます。
+
+配布 ZIP には実行ファイルだけでなく、変換に必要な注記定義ファイル、外字フォント用ディレクトリ、プリセット、EPUB テンプレートも含まれています。ZIP を展開し、中のファイル構成を保ったまま使用してください。
+
+macOS / Linux で実行権限が付いていない場合は、次のように設定します。
+
+```sh
+chmod +x AozoraEpub3_Lite
+```
+
+ソースからビルドする場合は Rust 1.85 以降が必要です（edition 2024）。
 
 ```sh
 cargo build --release
 ```
 
-生成物は `target/release/AozoraEpub3_Lite`（Windows では `AozoraEpub3_Lite.exe`）です。
+生成される実行ファイルは `target/release/AozoraEpub3_Lite`、Windows では `target/release/AozoraEpub3_Lite.exe` です。
 
-## 配置（本家 AozoraEpub3 と同じ構成）
-
-リリースパッケージは、本家 AozoraEpub3 と同じ配置で展開できます。
-
-```text
-AozoraEpub3_Lite(.exe)
-chuki_*.txt        # 注記資産
-replace.txt        # 文字置換
-gaiji/             # 外字フォント
-presets/*.ini      # 端末プリセット
-template/          # EPUB テンプレート
-```
-
-実行時にバイナリは**実行ファイルと同じディレクトリ**の資産を読み込みます
-（見つからない場合はリポジトリ内の `assets/aozora` にフォールバック）。
-`--config-dir` で別ディレクトリを明示指定することもできます。
-
-## 使い方
+## まず使う
 
 ```text
 AozoraEpub3_Lite [options] input_files(txt, zip, txtz, cbz)
 ```
 
-例:
+最小の例:
 
 ```sh
-# 作品.txt を縦書き EPUB に変換して out/ に出力
-AozoraEpub3_Lite -d out 作品.txt
-
-# 横書きで複数ファイルを一括変換
-AozoraEpub3_Lite --horizontal -d out 作品1.txt 作品2.zip
-
-# 設定ファイルと端末プリセットを指定
-AozoraEpub3_Lite -i reader.ini --preset kobo_touch.ini -d out 作品.txt
+AozoraEpub3_Lite 作品.txt
 ```
 
-出力ファイル名は、抽出したメタデータがある場合は `[著者] タイトル.epub` のような形で生成されます。`-of` を指定すると入力ファイル名（例: `作品.txt` → `作品.epub`）が使われます。`-d` を省略すると、入力ファイルと同じディレクトリに出力します。入力が複数ある場合も、それぞれ独立した EPUB が生成されます。
+出力先を指定する場合:
 
-### オプション一覧
+```sh
+AozoraEpub3_Lite -d out 作品.txt
+```
 
-| オプション | 説明 |
-|---|---|
-| `-h`, `--help` | 使い方を表示 |
-| `-i <file>`, `--ini <file>` | 外部 INI 設定を読み込む |
-| `-t <index>` | タイトル種別。`0`: タイトル→著者（既定）/ `1`: 著者→タイトル / `2`: タイトル→著者（副題優先）/ `3`: タイトルのみ / `4`: タイトル＋著者のみ / `5`: なし |
-| `-tf` | 入力ファイル名をタイトル・著者として使う |
-| `-c <value>`, `--cover <value>` | 表紙。`0`: 最初の挿絵 / `1`: 入力ファイルと同名の画像 / 画像ファイル名。省略時は INI の `Cover` を参照 |
-| `-ext <ext>`, `--ext <ext>` | 出力拡張子（既定 `.epub`、INI の `Ext` を参照） |
-| `-of` | 出力ファイル名に入力ファイル名を使う |
-| `-d <dir>`, `--dst <dir>` | 出力ディレクトリ（事前に存在している必要がある） |
-| `-enc <name>`, `--encoding <name>` | 入力エンコーディング。`AUTO`（既定・自動判定）/ `MS932` / `UTF-8` |
-| `-hor`, `--horizontal` | 横書き（既定は縦書き） |
-| `--vertical` | 縦書きを明示指定 |
-| `-device <name>`, `--device <name>` | 端末別の出力処理（例: `kindle`）。端末プリセット INI と併用 |
-| `--language <lang>` | EPUB の言語（既定 `ja`） |
-| `--creator <name>` | 著者名を上書き |
-| `--config-dir <dir>` | 注記資産などの設定ディレクトリ（繰り返し指定可） |
-| `--preset <file>` | 外部プリセット INI を読み込む |
+`out` ディレクトリは事前に作成しておく必要があります。
+
+横書きにする場合:
+
+```sh
+AozoraEpub3_Lite --horizontal 作品.txt
+```
+
+Kobo 向けのプリセットを使う場合:
+
+```sh
+AozoraEpub3_Lite --preset presets/kobo_touch.ini 作品.txt
+```
+
+外部 INI を使う場合は `-i` でも指定できます。
+
+```sh
+AozoraEpub3_Lite -i presets/reader.ini 作品.txt
+```
+
+`-i` / `--ini` と `--preset` は同時には指定できません。
+
+### オプションは入力ファイルより前に指定する
+
+Java 版との互換性のため、オプションの解釈は最初の入力ファイルで終了します。その後に続く引数はすべて入力ファイルとして扱われます。
+
+```sh
+# 正しい
+AozoraEpub3_Lite --horizontal -d out 作品.txt
+
+# --horizontal はオプションではなく入力ファイルとして扱われる
+AozoraEpub3_Lite 作品.txt --horizontal
+```
 
 ## 入力形式
 
 | 拡張子 | 内容 |
 |---|---|
-| `.txt` | 青空文庫形式のプレーンテキスト。Shift_JIS / UTF-8（BOM 付き含む）を自動判定 |
-| `.zip`, `.txtz` | テキストと画像を同梱した ZIP |
-| `.cbz` | 画像のみの ZIP。画像 1 枚を 1 ページとする画像専用 EPUB を生成 |
+| `.txt` | 青空文庫形式のプレーンテキスト。Shift_JIS / MS932 / UTF-8 を自動判定 |
+| `.zip`, `.txtz` | テキストと画像をまとめた ZIP。複数のテキストが入っている場合は、テキストごとに EPUB を生成 |
+| `.cbz` | 画像のみの ZIP。画像 1 枚を 1 ページとする EPUB を生成 |
 
-拡張子が未知のファイルは、ZIP マジックバイトで判定します。
+拡張子が不明な場合でも、ZIP のマジックバイトを持つファイルは ZIP として判定します。
 
-## 出力
+## 出力ファイル名
 
-EPUB 3 準拠のファイルが生成されます。
+本文からタイトル・著者を取得できた場合、通常は次のような名前で出力します。
+
+```text
+[著者] タイトル.epub
+```
+
+`-of` を指定すると入力ファイル名をそのまま使います。
+
+```sh
+AozoraEpub3_Lite -of 作品.txt
+# -> 作品.epub
+```
+
+`-d` を省略した場合は、入力ファイルと同じディレクトリに出力します。
+
+## オプション
+
+| オプション | 説明 |
+|---|---|
+| `-h`, `--help` | ヘルプを表示 |
+| `-i <file>`, `--ini <file>` | 外部 INI を読み込む |
+| `-t <index>` | タイトル・著者の取得方法を指定。`0`: タイトル→著者（既定）、`1`: 著者→タイトル、`2`: タイトル→著者（副題優先）、`3`: タイトルのみ、`4`: タイトル＋著者のみ、`5`: 取得しない |
+| `-tf` | 入力ファイル名からタイトル・著者を決める |
+| `-c <value>`, `--cover <value>` | 表紙を指定。`0`: 最初の挿絵、`1`: 入力ファイルと同名の画像、または画像ファイル名 |
+| `-ext <ext>`, `--ext <ext>` | 出力拡張子を指定。既定は `.epub` |
+| `-of`, `--of` | 出力ファイル名に入力ファイル名を使う |
+| `-d <dir>`, `--dst <dir>` | 出力先ディレクトリを指定。ディレクトリは事前に作成しておく必要がある |
+| `-enc <name>`, `--encoding <name>` | 入力文字コードを指定。`AUTO`（既定）、`MS932`、`UTF-8` など |
+| `-hor`, `--horizontal` | 横書きにする |
+| `--vertical` | 縦書きにする |
+| `-device <name>`, `--device <name>` | 端末固有の出力処理を有効にする。現在は `kindle` を想定 |
+| `--language <lang>` | EPUB の言語を指定。既定は `ja` |
+| `--creator <name>` | 著者名を上書き |
+| `--config-dir <dir>` | 注記定義ファイルなどを読むディレクトリを指定。複数回指定可能 |
+| `--preset <file>` | プリセット INI を読み込む |
+
+`-i` / `--ini` と `--preset` は排他的です。
+
+## 配布 ZIP のファイル構成
+
+配布 ZIP は、Java 版 AozoraEpub3 と近い構成になっています。
+
+```text
+AozoraEpub3_Lite(.exe)
+chuki_*.txt        # 青空文庫注記の変換定義
+replace.txt        # 文字置換規則
+gaiji/             # 外字用の 1 文字フォント
+presets/*.ini      # 変換設定・端末別プリセット
+template/          # EPUB テンプレート
+README.md
+LICENSE.txt
+```
+
+通常はこの構成のまま使えば、追加設定は不要です。
+
+実行時には、まず実行ファイルと同じディレクトリにある `chuki_*.txt` や `gaiji/` などを参照します。ソースツリーから開発中に実行した場合は、必要に応じて `assets/aozora/` を使用します。
+
+別の定義ファイル一式を使いたい場合は `--config-dir` で明示できます。
+
+## 設定ファイルとプリセット
+
+配布 ZIP の `presets/` には `reader.ini` のほか、`kindle_pw.ini`、`kindle_fire.ini`、`kobo_touch.ini`、`kobo_glo.ini` などが入っています。
+
+プリセットを使う場合:
+
+```sh
+AozoraEpub3_Lite --preset presets/kobo_touch.ini 作品.txt
+```
+
+主な設定項目:
+
+- `Vertical`: 縦書き / 横書き
+- `TitleType`: タイトル・著者の取得方法
+- `PageBreak*`: 改ページ判定のしきい値
+- `CoverW` / `CoverH`: 表紙サイズ
+- `FitImage`: 画像を表示領域に収めるかどうか
+- `ImageFloatPage` / `ImageFloatBlock`: 画像の回り込み設定
+- `SvgImage`: 単ページ画像を SVG 固定レイアウトにするかどうか
+
+## 注記定義ファイル
+
+`chuki_*.txt` には、青空文庫注記を XHTML に変換するための定義が入っています。字下げ、傍点、割り注、外字などの処理で使用します。
+
+ソースツリーでは `assets/aozora/`、配布 ZIP では実行ファイルと同じディレクトリに置かれています。
+
+## 外字フォント
+
+`gaiji/` に GlyphWiki 形式の 1 文字フォントを置くと、対応する外字を EPUB に埋め込めます。
+
+たとえば `u4e35.ttf` を用意すると、`※［＃U+4E35］` のような外字指定に対応できます。フォントは EPUB 内の `fonts/` に格納されます。
+
+フォントは [GlyphWiki](http://glyphwiki.org/wiki/) から入手できます。ファイル名の規則や調整方法は `gaiji/README.txt` を参照してください。
+
+## 生成される EPUB
+
+生成する EPUB の内部構成はおおむね次のようになります。
 
 ```text
 作品.epub
-├── mimetype                  # 非圧縮・先頭配置
+├── mimetype
 ├── META-INF/container.xml
 └── item/
-    ├── standard.opf          # manifest / spine / metadata
-    ├── nav.xhtml             # EPUB 3 ナビゲーション
-    ├── toc.ncx               # EPUB 2 互換の目次
-    ├── xhtml/0001.xhtml …    # セクション本文
-    ├── image/                # 本文・表紙画像
-    ├── style/                # CSS
-    └── fonts/                # 外字フォント（利用時のみ）
+    ├── standard.opf
+    ├── nav.xhtml
+    ├── toc.ncx
+    ├── xhtml/0001.xhtml ...
+    ├── image/
+    ├── style/
+    └── fonts/          # 外字フォントを使った場合のみ
 ```
 
-## 設定
+`nav.xhtml` は EPUB 3 のナビゲーション、`toc.ncx` は EPUB 2 系リーダーとの互換用です。
 
-### INI / プリセット
+## Rust ライブラリとして使う
 
-`-i` で外部 INI、`--preset` でプリセット INI を読み込めます。`assets/aozora/` には既定の `reader.ini` と、端末別プリセット（`kindle_pw.ini`、`kobo_touch.ini`、`kobo_glo.ini` など）を同梱しています。主なキー:
-
-- `Vertical`: 縦書き / 横書き
-- `TitleType`: タイトル種別
-- `PageBreak*`: 改ページ判定のしきい値
-- `CoverW` / `CoverH`: 表紙サイズ
-- `FitImage` / `ImageFloatPage` / `ImageFloatBlock`: 画像の配置方法
-- `SvgImage`: 単ページ画像の SVG 固定レイアウト化
-
-### 注記資産
-
-`assets/aozora/` の `chuki_*.txt` に、字下げ・傍点・割り注などの注記定義を同梱しています。`--config-dir` で別ディレクトリの資産に置き換えられます。
-
-### 外字資産（GlyphWiki 1 文字フォント）
-
-`assets/aozora/gaiji/` に GlyphWiki 形式の 1 文字フォント（例: `u4e35.ttf`）を配置すると、対応する外字（`※［＃U+4E35］` など）がそのフォントで表示されます。本文の外字は `〓` に置換され、フォントは EPUB 内の `fonts/` に埋め込まれます。
-
-フォントは <http://glyphwiki.org/wiki/> から入手できます。ファイル名規則とフォント調整手順は `assets/aozora/gaiji/README.txt` を参照してください。
-
-## ライブラリとして使う
-
-`aozora_epub3_lite` クレートとして、Rust プログラムから変換機能を呼び出せます。
+変換処理は `aozora_epub3_lite` クレートとしても利用できます。
 
 ```sh
 cargo add aozora_epub3_lite --git https://github.com/Rumia-Channel/AozoraEpub3_Lite
 ```
 
-または Cargo.toml に直接:
+または `Cargo.toml` に直接記述します。
 
 ```toml
 [dependencies]
 aozora_epub3_lite = { git = "https://github.com/Rumia-Channel/AozoraEpub3_Lite" }
 ```
 
-使用例（設定のロード → テキスト変換 → 画像収集 → EPUB 書き出し）:
+単純な TXT → EPUB の例:
 
 ```rust
-use std::fs::File;
+use std::fs::{self, File};
 use std::path::Path;
 
 use aozora_epub3_lite::{
-    AozoraConfig, EpubAsset, EpubBook, EpubMetadata, Input,
-    aozora_text_to_xhtml_sections_with_config, decode_input, image_references,
+    AozoraConfig, EpubBook, EpubMetadata,
+    aozora_text_to_xhtml_sections_with_config, decode_text,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. 設定（INI・注記資産・外字資産）を読み込む
     let config = AozoraConfig::load_from_dirs(&[Path::new("assets/aozora")], None)?;
 
-    // 2. 入力（TXT / ZIP / TXTZ / CBZ）を開く
-    let input = Input::open("作品.txt")?;
+    let bytes = fs::read("作品.txt")?;
+    let text = decode_text(&bytes, None)?;
+    let sections = aozora_text_to_xhtml_sections_with_config(&text, &config)?;
 
-    for entry in input.text_entries() {
-        // 3. テキストをデコードして XHTML セクションへ変換
-        let text = decode_input(&input.read_text(entry)?, None)?;
-        let sections = aozora_text_to_xhtml_sections_with_config(&text, &config)?;
+    let metadata = EpubMetadata::new("作品タイトル", "urn:uuid:example");
+    let book = EpubBook::from_sections(metadata, sections).with_vertical(true);
 
-        // 4. 本文が参照する画像を遅延アセット化（バイトは書き出し時に1枚ずつ読む）
-        let assets = image_references(&text)
-            .iter()
-            .filter_map(|reference| {
-                let source = input.resolve_image_path(entry, reference)?;
-                let media_type = if source.ends_with(".png") {
-                    "image/png"
-                } else if source.ends_with(".gif") {
-                    "image/gif"
-                } else {
-                    "image/jpeg"
-                };
-                Some(EpubAsset::lazy(format!("image/{source}"), media_type))
-            })
-            .collect::<Vec<_>>();
-
-        // 5. EPUB を組み立てて書き出す（画像は provider から1枚ずつ解決）
-        let metadata = EpubMetadata::new("作品タイトル", "urn:uuid:example");
-        let book = EpubBook::from_sections(metadata, sections)
-            .with_vertical(true)
-            .with_assets(assets);
-        let file = File::create("作品.epub")?;
-        book.write_to_with(file, |epub_path| {
-            let name = epub_path.strip_prefix("image/")?;
-            input.read_image(name).ok().flatten()
-        })?;
-    }
+    book.write_to(File::create("作品.epub")?)?;
     Ok(())
 }
 ```
 
+この例は本文だけを扱う最小構成です。画像を含む入力では `Input`、`EpubAsset`、`image_references` などを組み合わせます。
+
 主な公開 API:
 
-- `aozora_text_to_xhtml_sections*`: 青空文庫テキストを XHTML セクションに変換
-- `AozoraConfig`: INI・注記資産・外字資産の設定
-- `EpubBook` / `EpubAsset`: EPUB の組み立て。`write_to`（シーク可能）と `write_to_stream`（シーク不要）
-- `Input` / `FileSource` / `decode_text`: 入力の読込とエンコーディング判定
-- `BookMeta` / `TitleType`: タイトル・著者などのメタデータ推定
+- `AozoraConfig`: INI、注記定義、外字フォントなどの設定を読み込む
+- `aozora_text_to_xhtml_sections*`: 青空文庫形式の本文を XHTML セクションへ変換する
+- `EpubBook` / `EpubAsset`: EPUB を組み立てて書き出す
+- `Input` / `FileSource`: TXT / ZIP / TXTZ / CBZ や独自の入力元を扱う
+- `decode_text`: 入力文字コードを判定して `String` に変換する
+- `BookMeta` / `TitleType`: タイトル・著者などのメタデータを推定する
 
-### ストリーミング（省メモリ環境・Cloudflare Workers 向け）
+### ストリーミング出力
 
-画像が多い入力でも、変換中は画像バイトを保持せず、書き出し時に1枚ずつ
-読み込みます。書き出しには `write_to_stream_with` を使うと、`Write`
-トレイトだけに EPUB をストリーミングできます（ZIP は data descriptor 方式で
-書き、シーク不要）。HTTP レスポンスや Workers のレスポンスボディに直接
-書き出せます。
+`EpubBook::write_to_stream` / `write_to_stream_with` は `Seek` を要求せず、`Write` のみで EPUB を出力できます。HTTP レスポンスや Cloudflare Workers など、シークできない出力先に向いています。
 
-入力も ZIP ではなくオブジェクトストレージ（R2 など）から読む場合は、
-`FileSource` を実装して `Input::from_source` で渡します。ファイル一覧を
-先に把握し、個別ファイルの生データをストリームで開くトレイトです。
-
-```rust
-use std::io::Read;
-use std::sync::Arc;
-
-use aozora_epub3_lite::{FileSource, Input, InputError};
-
-struct R2Source {
-    keys: Vec<String>,
-    // bucket / prefix など
-}
-
-impl FileSource for R2Source {
-    fn list(&self) -> &[String] {
-        &self.keys
-    }
-    fn open(&self, name: &str) -> Result<Option<Box<dyn Read + Send>>, InputError> {
-        // bucket.get(name) のボディを Box<dyn Read + Send> にして返す
-        Ok(None)
-    }
-}
-
-let input = Input::from_source(Arc::new(R2Source { keys, /* ... */ }))?;
-```
-
-書き出しは `Write` トレイトのみを要求します。
+`EpubAsset::lazy` と `write_to_stream_with` を組み合わせると、画像をすべてメモリに保持せず、書き出し時に 1 枚ずつ取得できます。
 
 ```rust
 book.write_to_stream_with(response_body, |epub_path| {
@@ -261,22 +284,27 @@ book.write_to_stream_with(response_body, |epub_path| {
 })?;
 ```
 
-ピークメモリは「テキスト + 処理中の画像1枚」程度に収まります。
+入力側もローカル ZIP ではなくオブジェクトストレージなどから読みたい場合は、`FileSource` を実装して `Input::from_source` に渡せます。
 
-## Java 版との関係
+## Java 版 AozoraEpub3 との関係
 
-- 移植元: [AozoraEpub3](https://github.com/kyukyunyorituryo/AozoraEpub3)（GPL v3）
-- ローカル変換の XHTML 出力を 21 件のフィクスチャで比較し、19 件が完全一致。残り 8 行は原因特定済みです（表紙画像の特殊ケース 3 行、Java 側のデータ欠落バグ 5 行）。
-- Java 側のバグ（章名の `※` が偶数個続くと行ごと欠落する問題）は再現せず、正しい出力を生成します。詳細は [kyukyunyorituryo/AozoraEpub3#34](https://github.com/kyukyunyorituryo/AozoraEpub3/issues/34)。
+このプロジェクトは、次の実装を参照・移植しています。
 
-### 対象外（軽量版の設計判断）
+- [hmdev/AozoraEpub3](https://github.com/hmdev/AozoraEpub3)
+- [kyukyunyorituryo/AozoraEpub3](https://github.com/kyukyunyorituryo/AozoraEpub3)
 
-以下は実装しません。対象外であっても欠陥とは扱いません。
+ローカル変換の XHTML 出力について、21 件のテストフィクスチャのうち 19 件は Java 版と完全一致しています。残る差分は 8 行で、表紙画像まわりの特殊ケース 3 行と、Java 版側のデータ欠落挙動 5 行です。
+
+Java 版で、章名中の `※` の並びによって行が欠落するケースがあります。この挙動は AozoraEpub3_Lite では意図的に再現していません。詳細は [kyukyunyorituryo/AozoraEpub3#34](https://github.com/kyukyunyorituryo/AozoraEpub3/issues/34) を参照してください。
+
+## 対象外
+
+AozoraEpub3_Lite では、次の機能は実装対象としていません。
 
 - GUI
-- Web 小説の取得・変換（ネットワーク通信）
+- Web 小説の取得・変換
 - RAR 入力
 
 ## ライセンス
 
-GPL-3.0-only。AozoraEpub3 に合わせて GPL v3 で配布します。
+GNU General Public License v3.0 only（GPL-3.0-only）。詳細は [LICENSE.txt](LICENSE.txt) と [gpl.txt](gpl.txt) を参照してください。
