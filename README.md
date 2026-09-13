@@ -1,5 +1,11 @@
 # AozoraEpub3_Lite
 
+## 謝辞
+
+本ツールは、[hmdev](https://github.com/hmdev) さんが開発した AozoraEpub3 と、[急急如律令](https://github.com/kyukyunyorituryo) さんによる改造版 AozoraEpub3 の成果に基づいています。
+
+両開発者、および青空文庫・GlyphWiki など関連プロジェクトの関係者に感謝します。
+
 青空文庫形式のテキストを EPUB 3 に変換する、Rust 製のコマンドラインツールです。
 
 Java 版 [AozoraEpub3](https://github.com/kyukyunyorituryo/AozoraEpub3) のうち、ローカルファイルの変換に必要な機能を Rust で再実装しています。GUI や Web 小説の取得機能は持たず、TXT / ZIP / TXTZ / CBZ から EPUB を生成する処理に絞っています。
@@ -298,12 +304,6 @@ AozoraEpub3_Lite では、次の機能は実装対象としていません。
 - GUI
 - Web 小説の取得・変換
 - RAR 入力
-
-## 謝辞
-
-本ツールは、[hmdev](https://github.com/hmdev) さんが開発した AozoraEpub3 と、[急急如律令](https://github.com/kyukyunyorituryo) さんによる改造版 AozoraEpub3 の成果に基づいています。
-
-両開発者、および青空文庫・GlyphWiki など関連プロジェクトの関係者に感謝します。
 
 ## ライセンス
 
