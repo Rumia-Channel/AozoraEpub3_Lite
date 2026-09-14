@@ -408,6 +408,13 @@ differs: 5/589
 残り 5 件は「`ページ左下`/`ページの左下` の `id="kobo.N.M"` 注入 (注記と章の
 先頭行が同一行のときのみ)」2 件と「Java が閉じタグを二重出力する
 `地付き`/`字下げ省略`/`行内地付き`」3 件で、いずれも再現しない方針。
+
+除外した 33 行が未検証のまま残るわけではない。画像タグ 19 行は
+`main.rs` の画像処理 (`decorate_image_tags`、float / 単ページ / 外字画像) と
+`applies_java_float_image_classes` などのテスト、`test_image.txt` /
+`test_gaiji_image.txt` / `test_png.zip` フィクスチャで検証している。断片・属性
+14 行は複合字下げとして `realistic_cases.py` の 6 形態で検証している。
+`柱` は `chuki_ivs.txt` の IVS 外字エントリでタグ注記ではない (外字経路で検証)。
 `tools/realistic_cases.py` は 22 ケース中 21 件が Java と一致 (残りは上記の
 二重 `</div>`)。複合字下げのクラスは全形で一致する。
 
