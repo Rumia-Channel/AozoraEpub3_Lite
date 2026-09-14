@@ -497,6 +497,25 @@ chuki ###` ブロックを再適用すること (`tools/java_reference.py` の `
   テンプレートはコンパイル埋め込みなので影響しないが、**ディスク上の gaiji
   フォント** (`<dir>/gaiji/*.ttf`) は指定ディレクトリのものだけになる。注記だけの
   overlay を渡すと外字フォントを失う点に注意 (加算化は未対応のまま)
+- 実測 (`--config-dir` に `custom_chuki_tag.txt` 1 ファイルだけ置いた dir を指定):
+  `［＃大見出し］` → `<h1 class="font-1em50">`、`［＃ここから太字］` →
+  `<div class="bold">`、`［＃ここから３字下げ、罫囲みと中央揃え］` →
+  `<div class="mt3 border center">` がいずれも出力され、追加注記も同時に効く。
+  つまり組み込み表は `--config-dir` でも常に有効で、表が失われることはない
+
+#### 未対応: テンプレートの `_custom` 上書き
+
+Java の `Epub3Writer.writeFile` (Epub3Writer.java:371-383) は、EPUB に格納する
+テンプレートファイルごとに `template/<dir>_custom/<同名ファイル>` があれば
+そちらを優先する (2012 年の README_Changes 1.1.0b8 の項目)。配布物の
+`template/OPS/css_custom/vertical_font.css` と `template/item/css_custom/*.css`
+はこの仕組み用のファイル。
+
+Lite はテンプレートを `include_str!` でコンパイル埋め込みしているため、
+この上書き機構を持たない。現状で出力差は出ない (配布物の `_custom` のファイル名が
+実際に格納されるテンプレート名と一致せず、生成 EPUB に `css_custom` 由来の
+ファイルが入らないことを実測)。ユーザーが格納済みテンプレートと同じ名前で
+`_custom` を置いた場合のみ Java 側だけが差し替えるため、既知の残差として扱う。
 
 ## 作業ツリーとコミット状態
 引き継ぎ後に完了した論理単位は、以下のコミットとして `develop` へ commit / push 済み。
