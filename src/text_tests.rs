@@ -897,3 +897,20 @@ fn applies_space_hyphenation_for_late_full_width_spaces() {
     assert!(early.contains("短い　行"));
     assert!(!early.contains("fullsp"));
 }
+
+/// Java `JisConverter` の全表を移植しているので、辞書 (chuki_utf.txt) に
+/// 載っていない面区点コード付き外字注記も文字に解決できる。
+#[test]
+fn resolves_gaiji_notes_by_jis_code_without_dictionary_entry() {
+    let output = plain_text_to_xhtml(
+        "表題\n著者\n\n\
+         ※［＃てすと、1-16-1］\n\
+         ※［＃てすと、第3水準1-14-1］\n\
+         ※［＃てすと、2-1-1］\n",
+    )
+    .unwrap();
+    assert!(output.contains("<p>亜</p>"), "{output}");
+    assert!(output.contains("<p>俱</p>"), "{output}");
+    assert!(output.contains("<p>\u{20089}</p>"), "{output}");
+    assert!(!output.contains("〓"), "{output}");
+}

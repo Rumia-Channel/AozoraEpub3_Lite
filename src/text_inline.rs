@@ -1396,27 +1396,13 @@ fn jis_note_replacement(note: &str, config: &AozoraConfig, allow_upright: bool) 
     let row = parts.next()?.parse::<u8>().ok()?;
     let cell = parts.next()?.parse::<u8>().ok()?;
     let character = jis_to_unicode(plane, row, cell)?;
-    Some(render_gaiji_replacement(
-        &character.to_string(),
-        config,
-        allow_upright,
-    ))
+    Some(render_gaiji_replacement(&character, config, allow_upright))
 }
 
-/// JIS X 0213 1面 8区(㉑-㊿)・12区(❶-❿,⓫-⓴)・13区(①-⑳) → Unicode.
-fn jis_to_unicode(plane: u8, row: u8, cell: u8) -> Option<char> {
-    if plane != 1 {
-        return None;
-    }
-    let code = match row {
-        8 if (33..=47).contains(&cell) => 0x3251 + (cell - 33) as u32,
-        8 if (48..=62).contains(&cell) => 0x32b1 + (cell - 48) as u32,
-        12 if (1..=10).contains(&cell) => 0x2776 + (cell - 1) as u32,
-        12 if (11..=20).contains(&cell) => 0x24eb + (cell - 11) as u32,
-        13 if (1..=20).contains(&cell) => 0x2460 + (cell - 1) as u32,
-        _ => return None,
-    };
-    char::from_u32(code)
+/// JIS X 0213 の面区点 → 文字列。Java `JisConverter.toCharString` の全表を
+/// `crate::jis` に持つ (1 面 14〜94 区と 2 面、BMP 外はサロゲートペア)。
+fn jis_to_unicode(plane: u8, row: u8, cell: u8) -> Option<String> {
+    crate::jis::to_char_string(u32::from(plane), u32::from(row), u32::from(cell))
 }
 
 fn gaiji_note_range(chars: &[char], start: usize) -> Option<(usize, String)> {

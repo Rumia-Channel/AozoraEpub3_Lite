@@ -2,6 +2,7 @@ pub mod config;
 pub mod epub;
 pub mod image;
 pub mod input;
+pub(crate) mod jis;
 pub mod metadata;
 pub mod text;
 
