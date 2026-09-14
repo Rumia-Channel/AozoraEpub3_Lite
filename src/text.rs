@@ -1710,7 +1710,14 @@ fn indent_block_open_tag(line: &str, config: &AozoraConfig) -> Option<String> {
     line_note_names(line)
         .into_iter()
         .find(|(note, _)| note.ends_with("字下げ"))
-        .and_then(|(note, _)| config.block_open_tags.get(&note).cloned())
+        .and_then(|(note, _)| {
+            config.block_open_tags.get(&note).cloned().or_else(|| {
+                config
+                    .block_inline_tags
+                    .get(&note)
+                    .map(|(open, _)| open.clone())
+            })
+        })
 }
 
 /// 行中の複合字下げ注記を (開始, 終了, 注記名) で列挙する。
