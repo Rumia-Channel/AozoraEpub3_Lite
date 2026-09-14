@@ -872,6 +872,16 @@ impl OpenBlock {
             OpenBlock::Generated { indent, .. } | OpenBlock::Configured { indent, .. } => *indent,
         }
     }
+
+    /// ブロックを閉じるタグ。Java の `字下げ省略` (`</div>`) 相当。
+    fn close_tag(&self) -> &str {
+        match self {
+            OpenBlock::Generated { close_tag, .. } => close_tag,
+            OpenBlock::Configured {
+                fallback_close_tag, ..
+            } => fallback_close_tag,
+        }
+    }
 }
 
 /// Renders one section's lines to an XHTML fragment. `chapter_lines` maps
@@ -935,9 +945,25 @@ fn render_lines<'a>(
         }
         if line_no_br {
             // Java: noBr 行は <p> で括らず行全体を1行出力する。
-            // ブロック注記は convert_inline が inline_notes 経由でタグ化する。
+            // ブロック注記は convert_inline が inline_notes 経由でタグ化するが、
+            // chuki_tag.txt に無い複合字下げ（ここから N 字下げ、折り返して M
+            // 字下げ / N 字下げ、M 字詰め）だけはここでタグを差し込む。
             output_count += 1;
-            let converted = convert_inline_with_yoko(line, config, in_yoko);
+            // Java: 字下げブロック継続時は前の字下げブロックを閉じて同じ行で開く
+            // (convertTextLineToEpub3 の `字下げ省略` → buf.append("</div>"))。
+            let open_tag = indent_block_open_tag(line, config);
+            let previous_close = match open_tag {
+                Some(_) if blocks.iter().any(OpenBlock::is_indent) => {
+                    blocks.pop().map(|block| block.close_tag().to_owned())
+                }
+                _ => None,
+            };
+            let mut converted = convert_no_br_block_notes(line, config, in_yoko, &mut blocks);
+            if let (Some(open_tag), Some(close_tag)) = (open_tag, previous_close)
+                && let Some(position) = converted.find(&open_tag)
+            {
+                converted.insert_str(position, &close_tag);
+            }
             let converted = chapter_id
                 .map(|id| inject_kobo_id(&converted, &id))
                 .unwrap_or(converted);
@@ -959,12 +985,15 @@ fn render_lines<'a>(
                     if note.contains("横組み終わり") {
                         in_yoko = false;
                     }
+                    // Java: キャプション終わりの </span> で画像ラッパーも閉じる
+                    // (printLineBuffer の noBr 行でも同じ後始末を行う)
+                    if config.block_close_tags.get(&note).map(String::as_str) == Some("</span>")
+                        && image_wrapper_is_open(&fragment)
+                    {
+                        fragment.push_str("</span>");
+                        fragment.push('\n');
+                    }
                     blocks.pop();
-                } else if let Some((_, close_tag)) = generated_indent_block(&note) {
-                    blocks.push(OpenBlock::Generated {
-                        close_tag,
-                        indent: note.contains("字下げ"),
-                    });
                 }
             }
             continue;
@@ -1634,6 +1663,67 @@ fn heading_spec(note: &str) -> Option<HeadingSpec> {
         }),
         _ => None,
     }
+}
+
+/// noBr 行の本文をインライン変換する。Java は `chukiPattern` の複合字下げ
+/// （ここから N 字下げ、折り返して M 字下げ / N 字下げ、M 字詰め）でも
+/// タグをその位置に出力するが、`chuki_tag.txt` に定義が無いため
+/// `convert_inline` ではタグ化されない。生成ブロックの注記だけを開きタグへ
+/// 置き換え、それ以外の注記は行ごと1回の変換に任せる。
+fn convert_no_br_block_notes(
+    line: &str,
+    config: &AozoraConfig,
+    in_yoko: bool,
+    blocks: &mut Vec<OpenBlock>,
+) -> String {
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    for (start, end, note) in generated_indent_notes(line) {
+        let Some((open_tag, close_tag)) = generated_indent_block(&note) else {
+            continue;
+        };
+        output.push_str(&convert_inline_with_yoko(
+            &line[cursor..start],
+            config,
+            in_yoko,
+        ));
+        output.push_str(&open_tag);
+        blocks.push(OpenBlock::Generated {
+            close_tag,
+            indent: note.contains("字下げ"),
+        });
+        cursor = end;
+    }
+    output.push_str(&convert_inline_with_yoko(&line[cursor..], config, in_yoko));
+    output
+}
+
+/// 行中の「字下げブロックを開く注記」の開きタグを返す。
+/// `chuki_tag.txt` にある `ここからＮ字下げ` 系と、プログラム生成の
+/// 複合字下げ（`generated_indent_block`）の両方を対象にする。
+fn indent_block_open_tag(line: &str, config: &AozoraConfig) -> Option<String> {
+    if let Some((_, _, note)) = generated_indent_notes(line).into_iter().next()
+        && let Some((open_tag, _)) = generated_indent_block(&note)
+    {
+        return Some(open_tag);
+    }
+    line_note_names(line)
+        .into_iter()
+        .find(|(note, _)| note.ends_with("字下げ"))
+        .and_then(|(note, _)| config.block_open_tags.get(&note).cloned())
+}
+
+/// 行中の複合字下げ注記を (開始, 終了, 注記名) で列挙する。
+fn generated_indent_notes(line: &str) -> Vec<(usize, usize, String)> {
+    let mut notes = Vec::new();
+    for (note, end) in line_note_names(line) {
+        if generated_indent_block(&note).is_none() {
+            continue;
+        }
+        let start = end - note.len() - "［＃］".len();
+        notes.push((start, end, note));
+    }
+    notes
 }
 
 fn generated_indent_block(note: &str) -> Option<(String, String)> {
