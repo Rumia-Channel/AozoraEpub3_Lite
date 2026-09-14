@@ -362,6 +362,18 @@ java -cp "<classes>;AozoraEpub3.jar" AozoraEpub3 -i <ini> -ext .epub -d <out> <i
   `ChapterExclude`) を実装。抽出 4 種 + 次行連結 + 除外の 6 構成で
   nav / toc.ncx が Java と一致
 - `tools/parity_check.py` を追加 (21 フィクスチャの差分をカーネル外で測る)
+- 注記表の網羅検証 `tools/note_coverage.py` を追加。`chuki_tag.txt` /
+  `chuki_tag_suf.txt` の全行を 1 行ずつ Java / Rust で変換して比較した結果、
+  **タグが完全に欠落する注記は 0 件**。生の差分 239/630 の大半は検証入力の
+  非現実性（閉じ注記を単独行に置く、`表題後` のような閉じ専用行、
+  `折り返し1`/`２`/`３` のような複数行タグの部分使用、画像実体の無い
+  画像注記）に起因し、実欠落は `ページ左下` / `ページの左下` の
+  `<div class="btm"></div>` のみだった
+- ページ下付き注記 (chuki_tag.txt 4列目=L) を flag=1 と同じタグ登録に含め、
+  改ページ後の行に開閉タグを出力するようにした。`tools/realistic_cases.py`
+  (現実的な用法 17 ケース) は 16 件が Java と一致。残り 1 件は `［＃地付き］`
+  で Java が `</div>` を二重出力する件で、意図的に再現しない
+  (Java 側の出力が非整合)
 
 ## 作業ツリーとコミット状態
 引き継ぎ後に完了した論理単位は、以下のコミットとして `develop` へ commit / push 済み。

@@ -768,7 +768,7 @@ impl AozoraConfig {
                 }
                 _ => {}
             }
-            if flag == Some('1') {
+            if matches!(flag, Some('1' | 'L')) {
                 let tag = fields
                     .get(1)
                     .map(|value| value.trim())

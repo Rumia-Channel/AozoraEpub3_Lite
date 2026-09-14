@@ -527,6 +527,14 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
             } else {
                 Some(PAGE_CHAPTER_MARKER)
             };
+            // Java: ページ左下/ページの左下 のタグは改ページ後の行に出力される
+            // (タグは行末で閉じる)。注記自体は行末まで本文を包むため、残りを
+            // この行に取り込んで改ページ処理を打ち切る。
+            if config.block_inline_tags.contains_key(&note) {
+                current.push(format!("［＃{note}］{}", &remainder[end..]));
+                no_br.push(true);
+                break;
+            }
             remainder = &remainder[end..];
             if remainder.is_empty() {
                 break;

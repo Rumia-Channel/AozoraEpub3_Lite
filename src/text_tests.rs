@@ -148,6 +148,21 @@ fn classifies_middle_and_bottom_page_breaks() {
 }
 
 #[test]
+fn emits_page_bottom_tag_on_the_break_target_page() {
+    // Java: ページ左下/ページの左下 は改ページ後の行に <div class="btm"></div> を出力する
+    let mut config = AozoraConfig::default();
+    config.load_tag_text("ページ左下\t<div class=\"btm\">\t</div>\tL\n");
+    let sections =
+        super::aozora_text_to_xhtml_sections_with_config("前\n［＃ページ左下］\n後", &config)
+            .unwrap();
+    assert_eq!(sections.len(), 2);
+    assert!(sections[0].contains("<p>前</p>"));
+    assert!(sections[1].contains("<div class=\"btm\"></div>"));
+    assert!(sections[1].contains("<p>後</p>"));
+    assert!(!sections[1].contains("&lt;div"));
+}
+
+#[test]
 fn converts_and_collects_safe_raw_image_tags() {
     let input = r#"<img src="fig/sample.png" alt="図"/>"#;
     let output = plain_text_to_xhtml(input).unwrap();
