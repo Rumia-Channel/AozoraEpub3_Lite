@@ -1,22 +1,42 @@
 """実際の青空文庫テキストに近い形で Java / Rust の出力を比較する。
 
-注記表の網羅テスト (note_coverage.py) は「注記＋本文を同一行に置く」という
+注記表の網羅テスト (`note_coverage.py`) は「注記＋本文を同一行に置く」という
 非現実的な形で差を拾うため、ここでは現実的な用法だけを並べる。
+
+Narou.rb / Narou Bridge のカスタム注記は `narou.rs` が所有する
+(`preset/custom_chuki_tag.txt`、インストール先への書き込みは narou の init)。
+Lite 本体の資産には含まれないため、Narou グループだけは
+
+  Java : 配布物ディレクトリを CWD にして実行 (narou init 済みの表)
+  Rust : `--config-dir` に narou のプリセットを `custom_chuki_tag.txt` として渡す
+
+という、実際の narou → Lite の経路で比較する。
 """
 
+import os
 import pathlib
 import re
 import shutil
-import subprocess
 import zipfile
 
-RUST = pathlib.Path(__file__).resolve().parent.parent
-JAVA_REPO = pathlib.Path("C:/Users/rumia/Desktop/APP/Java/AozoraEpub3")
+from java_reference import (
+    CLASSES,
+    DIST,
+    JAR,
+    JAVABIN,
+    RUST,
+    RUSTBIN,
+    run,
+    sync_tables,
+)
+
 WORK = RUST / "target" / "realistic"
-CLASSES = RUST / "target" / "audit-diff" / "classes"
-JAR = pathlib.Path("C:/Users/rumia/Documents/AozoraEpub3/AozoraEpub3.jar")
-JAVABIN = RUST / "target" / "audit-diff" / "javabin"
-RUSTBIN = RUST / "target" / "release" / "AozoraEpub3_Lite.exe"
+NAROU_PRESET = pathlib.Path(
+    os.environ.get(
+        "NAROU_PRESET",
+        "C:/Users/rumia/Desktop/APP/Rust/narou.rs/preset/custom_chuki_tag.txt",
+    )
+)
 
 CASES = {
     "page-bottom": "［＃ページ左下］\nテキスト\n",
@@ -41,7 +61,9 @@ CASES = {
     "indent-jizume": "［＃ここから３字下げ、５字詰め］\n本文\n［＃ここで字下げ終わり］\n",
     "indent-dashed-kekomi": "［＃ここから２字下げ、破線罫囲み］\n本文\n［＃ここで字下げ終わり］\n",
     "indent-yoko": "［＃ここから２字下げ、横書き］\n本文\n［＃ここで字下げ終わり］\n",
-    # 配布物 (Narou.rb / Narou Bridge 同梱) のカスタム注記
+}
+
+NAROU_CASES = {
     "narou-hashira": "［＃ここから柱］\n柱の本文\n［＃ここで柱終わり］\n本文\n",
     "narou-preface": "［＃ここから前書き］\n前書き本文\n［＃ここで前書き終わり］\n本文\n",
     "narou-postscript": "［＃ここから後書き］\n後書き本文\n［＃ここで後書き終わり］\n",
@@ -65,57 +87,52 @@ def entries(path: pathlib.Path) -> dict[str, str]:
 def body_of(epub: dict[str, str]) -> str:
     """本文 XHTML (item/xhtml/*.xhtml) の <body> 中身を連結して返す。"""
     parts = []
-    for name in sorted(n for n in epub
-                       if n.startswith("item/xhtml/") and n.endswith(".xhtml")):
+    for name in sorted(
+        n for n in epub if n.startswith("item/xhtml/") and n.endswith(".xhtml")
+    ):
         text = epub[name]
         start = text.find("<body")
         if start < 0:
             continue
         start = text.find(">", start) + 1
-        end = text.rfind("</body>")
-        parts.append(text[start:end])
+        parts.append(text[start : text.rfind("</body>")])
     return "".join(parts).strip()
 
 
-def run(command: list[str], cwd: pathlib.Path) -> tuple[int, str]:
-    done = subprocess.run(
-        command, cwd=cwd, capture_output=True, text=True,
-        encoding="utf-8", errors="replace",
-    )
-    return done.returncode, (done.stdout or "") + (done.stderr or "")
+def compare(
+    cases: dict[str, str],
+    java_cwd: pathlib.Path,
+    rust_args: list[str],
+    label: str,
+) -> tuple[int, int]:
+    java_out = WORK / f"j-{label}"
+    rust_out = WORK / f"r-{label}"
+    shutil.rmtree(java_out, ignore_errors=True)
+    shutil.rmtree(rust_out, ignore_errors=True)
+    java_out.mkdir(parents=True)
+    rust_out.mkdir(parents=True)
 
-
-def main() -> None:
-    shutil.rmtree(WORK, ignore_errors=True)
-    source = WORK / "src"
-    source.mkdir(parents=True)
     paths = []
-    for key, text in CASES.items():
-        path = source / f"{key}.txt"
-        path.write_text(
-            f"表題{key}\n著者{key}\n\n{text}", encoding="cp932", newline=""
-        )
+    for key, text in cases.items():
+        path = WORK / "src" / f"{key}.txt"
+        path.write_text(f"表題{key}\n著者{key}\n\n{text}", encoding="cp932", newline="")
         paths.append(str(path))
 
-    java_out = WORK / "j"
-    rust_out = WORK / "r"
-    java_out.mkdir()
-    rust_out.mkdir()
     code, log = run(
         ["java", "-cp", f"{CLASSES};{JAR}", "AozoraEpub3", "-ext", ".epub",
          "-d", str(java_out), *paths],
-        JAVABIN,
+        java_cwd,
     )
     if code != 0:
-        print("java exit", code, log[:400])
+        print(f"java exit {code}: {log[:300]}")
     code, log = run(
-        [str(RUSTBIN), "-ext", ".epub", "-d", str(rust_out), *paths], RUST
+        [str(RUSTBIN), *rust_args, "-ext", ".epub", "-d", str(rust_out), *paths], RUST
     )
     if code != 0:
-        print("rust exit", code, log[:400])
+        print(f"rust exit {code}: {log[:300]}")
 
     same = 0
-    for key in CASES:
+    for key in cases:
         try:
             java = body_of(entries(next(java_out.glob(f"*{key}.epub"))))
             rust = body_of(entries(next(rust_out.glob(f"*{key}.epub"))))
@@ -141,7 +158,30 @@ def main() -> None:
                 shown += 1
                 if shown >= 4:
                     break
-    print(f"\n一致 {same}/{len(CASES)}")
+    print(f"[{label}] 一致 {same}/{len(cases)}")
+    return same, len(cases)
+
+
+def main() -> None:
+    sync_tables()
+    shutil.rmtree(WORK, ignore_errors=True)
+    (WORK / "src").mkdir(parents=True)
+
+    compare(CASES, JAVABIN, [], "aozora")
+
+    if NAROU_PRESET.is_file():
+        # Java 側は「上流表 + narou のプリセット」だけを差とした作業ディレクトリで
+        # 実行する (配布物ディレクトリ直下には INI があり、タイトルページ設定まで
+        # 拾って比較条件がずれるため)。
+        javabin_narou = WORK / "narou-javabin"
+        shutil.copytree(JAVABIN, javabin_narou, dirs_exist_ok=True)
+        shutil.copyfile(DIST / "chuki_tag.txt", javabin_narou / "chuki_tag.txt")
+        config_dir = WORK / "narou-cfg"
+        config_dir.mkdir(parents=True)
+        shutil.copyfile(NAROU_PRESET, config_dir / "custom_chuki_tag.txt")
+        compare(NAROU_CASES, javabin_narou, ["--config-dir", str(config_dir)], "narou")
+    else:
+        print(f"Narou プリセットが見つからないためスキップ: {NAROU_PRESET}")
 
 
 if __name__ == "__main__":

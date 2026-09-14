@@ -427,55 +427,39 @@ differs: 5/589
 ［＃ここから３字下げ、折り返して２字下げ］ → pt2 idt1
 ```
 
-### 2026-09-14: Narou.rb / Narou Bridge のカスタム注記を取り込む
+### 2026-09-14: Narou カスタム注記は narou.rs が所有 (Lite 側は上流表のまま)
 
-`assets/aozora/chuki_tag.txt` は上流リポジトリの表 (874 行) ではなく
-**インストール済み配布物 `C:/Users/rumia/Documents/AozoraEpub3/chuki_tag.txt`
-(904 行) と同じ内容**にした。配布物は上流表に `### Narou.rb embedded custom
-chuki ###` / `### Narou Bridge embedded custom chuki ###` の 26 行を追加した
-もので、上流リポジトリには一度も存在しない (`git log -S "ここから柱"` が空)。
+Narou.rb / Narou Bridge のカスタム注記 (`ここから柱` / 前書き / 後書き /
+パラメーター / 一字〜三字下げ / 二分アキ / 濁点 / zws / `ｌｉｎｋ＿ｓ` 系) は
+**narou.rs 側の資産**であり、Lite の `assets/aozora/chuki_tag.txt` には
+取り込まない (上流 874 行のまま)。当初は配布物の表 (904 行) を正として
+30 行を取り込んだが、次の理由で撤回した。
 
-追加された注記: `ここから柱`/`ここで柱終わり`、`ここから前書き`/`ここで前書き終わり`、
-`ここから後書き`/`ここで後書き終わり`、`ここからパラメーター`/`ここでパラメーター終わり`、
-`一字下げ`/`二字下げ`/`三字下げ`、`二分アキ`、`濁点`/`濁点終わり`、`zws`、
-Narou Bridge の `ｌｉｎｋ＿ｓ`/`ｌｉｎｋ＿ｔ`/`ｌｉｎｋ＿ｅ` (ASCII 別名も)。
+- 配布物の 30 行は narou.rs の `init` が書き込んだもの。`init.rs:286-305` が
+  `preset/custom_chuki_tag.txt` を読み、インストール先 `chuki_tag.txt` の
+  `### Narou.rb embedded custom chuki ###` マーカー間を置換 (無ければ追記) する。
+  上流リポジトリの表には痕跡が無い (`git log -S "ここから柱"` が空)
+- narou.rs は Lite 資産のスナップショット `assets/aozora_lite/*.txt` (874 行) を
+  `include_str!` で持ち、`AozoraConfig::default()` に `load_tag_text` などで
+  自前で重ねる (`src/epub_lite.rs:28-60` の `embedded_config()`)。注入配線は
+  narou.rs 側にあり、Lite に焼き込んでもスナップショットを更新するまで届かない
+- つまり焼き込みは二重管理。Lite 側の責務は「注記タグを外部から注入できる口」で、
+  それは実装済み (下記)
 
-- これらのクラス (`running_head` / `half_em_space` / `introduction` /
-  `postscript` / `custom_parameter_block` / `dakuten` / `clear`) は配布物側の
-  CSS にも定義が無く、マークアップのみの差。Rust 側も CSS 追加は不要
-- `chuki_tag.txt` 以外の 5 表は配布物と上流が同一。ただし
-  `chuki_utf.txt` は Rust 資産だけ 1 行修正済み
-  (`U+003AC` → `U+01F71`、JIS X 0213 1-11-39 の文字。6de28a6)。この修正は
-  意図的に残すので、Rust 資産と配布物の表はこの 1 行だけ異なる
-- `tools/java_reference.py` を追加し、Java 参照実行ディレクトリ
-  (`target/audit-diff/javabin`) の注記資産を配布物から同期する
-  (`sync_tables()`)。`note_coverage.py` / `realistic_cases.py` はこの経路で
-  表を読むため、追加 26 行も自動でテスト対象になる
-
-検証 (配布物の表を正とした状態):
+検証 (上流表に戻した状態):
 
 ```text
-tools/note_coverage.py : 599 ケース中 5 件差分、タグ欠落 0 件
-tools/realistic_cases.py: 31 ケース中 30 件一致 (Narou 注記 9 ケースを含む)
-tools/parity_check.py  : 18/21 (既知 3 件のみ、変化なし)
-cargo test --release   : 全バイナリ green
+tools/note_coverage.py  : 589 ケース中 5 件差分、タグ欠落 0 件
+tools/realistic_cases.py: [aozora] 21/22 / [narou] 9/9
+tools/parity_check.py   : 18/21 (既知 3 件のみ)
+cargo test --release    : 全バイナリ green
 ```
 
-残る 5 件は `ページ左下`/`ページの左下` の kobo id 注入 2 件と、Java が閉じタグを
-二重出力する `地付き`/`字下げ省略`/`行内地付き` 3 件 (いずれも再現しない方針)。
-Narou Bridge のリンク注記は 3 点 1 組 (`［＃ｌｉｎｋ＿ｓ］URL［＃ｌｉｎｋ＿ｔ］
-文言［＃ｌｉｎｋ＿ｅ］`) なので行単位の検証からは外し、`realistic_cases.py` の
-`narou-link` で `<a href="https://example.com">リンク</a>` が Java と一致することを
-確認している (単独の `［＃ｌｉｎｋ＿ｅ］` は Java が裸の `</a>` を出すだけ)。
-
-#### 注意: 上流資産を取り直すとき
-
-`assets/aozora/chuki_tag.txt` は「上流 874 行 + 配布物由来の Narou ブロック 30 行」。
-Narou ブロックは配布物の表の**末尾にしか無く**、上流リポジトリには痕跡が無い
-(`git log -S "ここから柱"` が空)。上流から資産を更新した場合は
-`### Narou.rb embedded custom chuki ###` / `### Narou Bridge embedded custom
-chuki ###` ブロックを再適用すること (`tools/java_reference.py` の `sync_tables()`
-は Java 参照側だけを配布物に合わせるので、Rust 側は手当てが要る)。
+`realistic_cases.py` の Narou グループは実経路で比較する: Java は
+「上流表 + narou プリセット」の作業ディレクトリ、Rust は
+`--config-dir` に narou.rs の `preset/custom_chuki_tag.txt` を
+`custom_chuki_tag.txt` として渡す。プリセットの場所は環境変数 `NAROU_PRESET` で
+差し替え可 (既定 `../narou.rs/preset/custom_chuki_tag.txt`)。無い場合はスキップ。
 
 #### 注記タグ / CSS の外部注入 (配線状況)
 
@@ -485,6 +469,12 @@ chuki ###` ブロックを再適用すること (`tools/java_reference.py` の `
   `--config-dir <dir>` でこれを配線済み。実測: `custom_chuki_tag.txt` に
   `テスト強調<TAB><span class="test-em">` だけ置いたディレクトリを
   `--config-dir` で渡すと `<span class="test-em">強調</span>` が出力される
+- 組み込み表は `include_str!` でコンパイル埋め込みのため、`--config-dir` を
+  渡しても既定の注記は失われない。実測: `--config-dir` (追加 1 ファイルのみ) でも
+  `［＃大見出し］` / `［＃ここから太字］` / `［＃ここから３字下げ、罫囲みと中央揃え］`
+  がすべて期待どおり出力される
+- `--config-dir` が置き換えるのは**ディスク上の資産解決** (`main.rs:70-73`)。
+  失われるのは `<dir>/gaiji/*.ttf` のみ (加算化は未対応)
 - CSS: ライブラリは `EpubBook::with_assets([EpubAsset::new("style/x.css",
   "text/css", bytes)])` で追加できる (manifest にも入る)。CLI に CSS を足す口は
   無い (既定で有効にする必要が出たときのみ検討)
@@ -493,15 +483,8 @@ chuki ###` ブロックを再適用すること (`tools/java_reference.py` の `
   `.custom_parameter_block` の定義があるが、**変換では使われない** (Java ソースに
   `css_custom` 参照なし、生成 EPUB に `OPS/` も `css_custom/` も含まれない)。
   README_Changes 1.1.0b8 の名残で、リーダー向けの手動カスタム用サンプル
-- `--config-dir` は既定ディレクトリを置き換える (`main.rs:70-73`)。注記表・CSS・
-  テンプレートはコンパイル埋め込みなので影響しないが、**ディスク上の gaiji
-  フォント** (`<dir>/gaiji/*.ttf`) は指定ディレクトリのものだけになる。注記だけの
-  overlay を渡すと外字フォントを失う点に注意 (加算化は未対応のまま)
-- 実測 (`--config-dir` に `custom_chuki_tag.txt` 1 ファイルだけ置いた dir を指定):
-  `［＃大見出し］` → `<h1 class="font-1em50">`、`［＃ここから太字］` →
-  `<div class="bold">`、`［＃ここから３字下げ、罫囲みと中央揃え］` →
-  `<div class="mt3 border center">` がいずれも出力され、追加注記も同時に効く。
-  つまり組み込み表は `--config-dir` でも常に有効で、表が失われることはない
+- `chuki_utf.txt` は Rust 資産だけ 1 行修正済み (`U+003AC` → `U+01F71`、
+  JIS X 0213 1-11-39 の文字。6de28a6)。意図的に残す
 
 #### 未対応: テンプレートの `_custom` 上書き
 
@@ -517,7 +500,7 @@ Lite はテンプレートを `include_str!` でコンパイル埋め込みし�
 ファイルが入らないことを実測)。ユーザーが格納済みテンプレートと同じ名前で
 `_custom` を置いた場合のみ Java 側だけが差し替えるため、既知の残差として扱う。
 
-## 作業ツリーとコミット状態
+## 作業ツリーとコミット状態## 作業ツリーとコミット状態
 引き継ぎ後に完了した論理単位は、以下のコミットとして `develop` へ commit / push 済み。
 
 - `bc3a29d`: Aozora 変換データ資産

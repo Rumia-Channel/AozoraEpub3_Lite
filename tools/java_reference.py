@@ -5,9 +5,12 @@
 インストール済み配布物 (`Documents/AozoraEpub3`) の jar・注記資産・テンプレートを
 `target/audit-diff/javabin` に置いて、そこを CWD にして Java を実行する。
 
-注記資産は配布物側を正とする。上流リポジトリの表は Narou.rb / Narou Bridge の
-カスタム注記 26 行を含まないため、配布物と同じ挙動を測るには配布物の表が必要
-(`sync_tables()` が実行前に揃える)。
+注記資産は上流リポジトリ (`JAVA_REPO`) 側を正とする。Narou.rb / Narou Bridge
+のカスタム注記は narou.rs が `preset/custom_chuki_tag.txt` として所有し、
+インストール先の `chuki_tag.txt` へ書き込む (`narou.rs` の `init` コマンド) もの
+なので、Lite 本体の資産には含めない。配布物の表は narou の init 後であり、
+比較したい場合は `DIST` を CWD にして Java を動かす (`realistic_cases.py` の
+Narou グループがこの経路)。
 """
 
 import pathlib
@@ -33,9 +36,9 @@ TABLES = (
 
 
 def sync_tables() -> None:
-    """Java 実行ディレクトリの注記資産を配布物のものへ揃える。"""
+    """Java 実行ディレクトリの注記資産を上流リポジトリのものへ揃える。"""
     for name in TABLES:
-        source = DIST / name
+        source = JAVA_REPO / name
         if source.is_file():
             shutil.copyfile(source, JAVABIN / name)
 

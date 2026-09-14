@@ -3,23 +3,23 @@
 import pathlib
 import re
 import shutil
-import subprocess
 import sys
 import zipfile
 
-RUST = pathlib.Path("C:/Users/rumia/Desktop/APP/Rust/AozoraEpub3_Lite")
-work = RUST / "target" / "audit-diff"
-classes = work / "classes"
-JAR = pathlib.Path("C:/Users/rumia/Documents/AozoraEpub3/AozoraEpub3.jar")
-jdir = work / "javabin"
+from java_reference import (
+    CLASSES as classes,
+    JAR,
+    JAVABIN as jdir,
+    RUST,
+    RUSTBIN as _default_binary,
+    run,
+    sync_tables,
+)
+
 RUSTBIN = RUST / "target" / ("debug" if "--debug" in sys.argv else "release") / "AozoraEpub3_Lite.exe"
+work = RUST / "target" / "audit-diff"
 alld = work / "all"
-
-
-def run(cmd, cwd):
-    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
-    return p.returncode, (p.stdout or "") + (p.stderr or "")
+del _default_binary
 
 
 def entries(path):
@@ -27,6 +27,8 @@ def entries(path):
         return {n: z.read(n).replace(b"\r\n", b"\n").decode("utf-8", "replace")
                 for n in z.namelist()}
 
+
+sync_tables()
 
 fixtures = sorted(str(p) for p in alld.glob("*.txt")) + sorted(str(p) for p in alld.glob("*.zip"))
 base = RUST / "target" / "fx-run"
