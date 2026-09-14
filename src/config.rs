@@ -33,6 +33,108 @@ impl From<io::Error> for ConfigError {
     }
 }
 
+/// Java `text.vm` に流し込むスタイル設定。INI の `PageMargin` /
+/// `BodyMargin` / `PageMarginUnit` / `BodyMarginUnit` / `LineHeight` /
+/// `FontSize` / `BoldUseGothic` / `gothicUseBold` に対応する。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StyleSettings {
+    /// `@page` の margin (4 値、単位込み)。
+    pub page_margin: [String; 4],
+    /// `html.vrtl` / `html.hltr` の margin (4 値、単位込み)。
+    pub body_margin: [String; 4],
+    /// `body` の line-height。Java は `Float.toString` で出力する。
+    pub line_height: String,
+    /// `body` の font-size (%)。
+    pub font_size: i32,
+    /// `BoldUseGothic`: 太字にゴシック体を併用する。
+    pub bold_use_gothic: bool,
+    /// `gothicUseBold`: ゴシック体を太字にする (Java 側のキーは小文字始まり)。
+    pub gothic_use_bold: bool,
+}
+
+impl Default for StyleSettings {
+    fn default() -> Self {
+        Self {
+            page_margin: [
+                "0".to_owned(),
+                "0".to_owned(),
+                "0".to_owned(),
+                "0".to_owned(),
+            ],
+            body_margin: [
+                "0".to_owned(),
+                "0".to_owned(),
+                "0".to_owned(),
+                "0".to_owned(),
+            ],
+            line_height: "1.8".to_owned(),
+            font_size: 100,
+            bold_use_gothic: false,
+            gothic_use_bold: false,
+        }
+    }
+}
+
+impl StyleSettings {
+    /// Java `AozoraEpub3.java` と同じ解釈で INI から読む。4 値でない
+    /// `PageMargin` / `BodyMargin` は単位なしの既定値 `0 0 0 0` になる。
+    pub fn from_ini(ini: &IniSettings) -> Self {
+        let margin = |key: &str, unit_key: &str| {
+            let Some(value) = ini.get(key) else {
+                return [
+                    "0".to_owned(),
+                    "0".to_owned(),
+                    "0".to_owned(),
+                    "0".to_owned(),
+                ];
+            };
+            let parts = value.split(',').collect::<Vec<_>>();
+            if parts.len() != 4 {
+                return [
+                    "0".to_owned(),
+                    "0".to_owned(),
+                    "0".to_owned(),
+                    "0".to_owned(),
+                ];
+            }
+            // Java: PageMarginUnit が "0" なら em、それ以外 (未指定含む) は %。
+            let unit = if ini.get(unit_key) == Some("0") {
+                "em"
+            } else {
+                "%"
+            };
+            let mut values = [
+                "0".to_owned(),
+                "0".to_owned(),
+                "0".to_owned(),
+                "0".to_owned(),
+            ];
+            for (index, part) in parts.iter().enumerate() {
+                values[index] = format!("{}{unit}", part.trim());
+            }
+            values
+        };
+        let line_height = ini
+            .get("LineHeight")
+            .and_then(|value| value.trim().parse::<f32>().ok())
+            .filter(|value| value.is_finite())
+            .unwrap_or(1.8);
+        let font_size = ini
+            .get("FontSize")
+            .and_then(|value| value.trim().parse::<i32>().ok())
+            .unwrap_or(100);
+        Self {
+            page_margin: margin("PageMargin", "PageMarginUnit"),
+            body_margin: margin("BodyMargin", "BodyMarginUnit"),
+            // Java Float.toString は常に小数点を含む ("2" ではなく "2.0")。
+            line_height: format!("{line_height:?}"),
+            font_size,
+            bold_use_gothic: ini.get_bool("BoldUseGothic").unwrap_or(false),
+            gothic_use_bold: ini.get_bool("gothicUseBold").unwrap_or(false),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct IniSettings {
     values: BTreeMap<String, String>,

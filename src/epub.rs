@@ -9,72 +9,14 @@ mod render;
 
 use render::{is_image_only, render_cover, render_nav, render_ncx, render_package, render_section};
 
+use crate::config::StyleSettings;
+
 const MIMETYPE: &str = "application/epub+zip";
 const CONTAINER_XML: &str = "<?xml version=\"1.0\"?>\r\n<container\r\n version=\"1.0\"\r\n xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\"\r\n>\r\n<rootfiles>\r\n<rootfile\r\n full-path=\"item/standard.opf\"\r\n media-type=\"application/oebps-package+xml\"\r\n/>\r\n</rootfiles>\r\n</container>\r\n";
 const BOOK_STYLE_CSS: &str = include_str!("../assets/aozora/template/item/style/book-style.css");
-const TEXT_CSS: &str = r#"@charset "utf-8";
-@namespace "http://www.w3.org/1999/xhtml";
-
-/** 共通 テキスト用スタイル */
-@page {
-margin: 0 0 0 0;
-}
-body {
-margin: 0;
-padding: 0;
-display: block;
-color: #000;
-font-size: 100%;
-line-height: 1.8;
-vertical-align: baseline;
-}
-/** 縦書き テキスト用スタイル */
-html.vrtl {
-margin: 0 0 0 0;
-padding: 0;
-writing-mode: vertical-rl;
--webkit-writing-mode: vertical-rl;
--epub-writing-mode: vertical-rl;
--epub-line-break: strict;
-line-break: strict;
--epub-word-break: normal;
-word-break: normal;
-}
-
-
-/** 太字、ゴシック */
-.vrtl .gtc {
-font-family: '@ＭＳ ゴシック','@MS Gothic',sans-serif;
-}
-.b { font-weight: bold; }
-.i { font-style: italic; }
-
-/** 外字フォント */
-
-/** 横書き テキスト用スタイル */
-
-html.hltr {
-margin: 0 0 0 0;
-padding: 0;
-writing-mode: horizontal-tb;
--webkit-writing-mode: horizontal-tb;
--epub-writing-mode: horizontal-tb;
--epub-line-break: strict;
-line-break: strict;
--epub-word-break: normal;
-word-break: normal;
-}
-
-/** 太字、ゴシック */
-.hltr .gtc {
-font-family: 'ＭＳ ゴシック','MS Gothic',sans-serif;
-}
-.hltr .b { font-weight: bold; }
-.hltr .i { font-style: italic; }
-"#;
-
-fn render_text_css(assets: &[EpubAsset]) -> String {
-    let marker = "/** 外字フォント */";
+/// Java `text.vm` を再現する。スタイル値は INI から、外字フォントの
+/// `@font-face` は使用したフォントから差し込む。
+fn render_text_css(assets: &[EpubAsset], style: &StyleSettings) -> String {
     let mut font_css = String::new();
     for asset in assets {
         if asset.media_type != "application/font-sfnt" {
@@ -95,24 +37,98 @@ fn render_text_css(assets: &[EpubAsset]) -> String {
              .{stem} {{font-family:\"{stem}\";}}\n"
         ));
     }
-    if font_css.is_empty() {
-        return TEXT_CSS.to_owned();
-    }
-    let Some(marker_end) = TEXT_CSS.find(marker).map(|index| index + marker.len()) else {
-        return TEXT_CSS.to_owned();
-    };
-    let mut css = String::with_capacity(TEXT_CSS.len() + font_css.len());
-    css.push_str(&TEXT_CSS[..marker_end]);
+    let (head, tail) = text_css_parts(style);
+    let mut css = head;
     css.push('\n');
     css.push_str(&font_css);
-    // font_css は \n 終端。後続テンプレートの先頭 \n を1つ落として Java と同じ
-    // 空行1つにする。
-    css.push_str(
-        TEXT_CSS[marker_end..]
-            .strip_prefix('\n')
-            .unwrap_or(&TEXT_CSS[marker_end..]),
-    );
+    css.push_str(&tail);
     css
+}
+
+/// `{fonts}` プレースホルダの前後を `text.vm` の展開結果として組み立てる。
+/// `tail` は外字フォント節の後ろの空行から始まる。
+fn text_css_parts(style: &StyleSettings) -> (String, String) {
+    let page_margin = style.page_margin.join(" ");
+    let body_margin = style.body_margin.join(" ");
+    let line_height = &style.line_height;
+    let font_size = style.font_size;
+    // text.vm の `#if`: 有効なときだけセレクタ行が増える。
+    let vrtl_bold = if style.bold_use_gothic {
+        ".vrtl .b,\n"
+    } else {
+        ""
+    };
+    let hltr_bold = if style.bold_use_gothic {
+        ".hltr .b,\n"
+    } else {
+        ""
+    };
+    let gtc_bold = if style.gothic_use_bold { ".gtc,\n" } else { "" };
+    let head = format!(
+        r#"@charset "utf-8";
+@namespace "http://www.w3.org/1999/xhtml";
+
+/** 共通 テキスト用スタイル */
+@page {{
+margin: {page_margin};
+}}
+body {{
+margin: 0;
+padding: 0;
+display: block;
+color: #000;
+font-size: {font_size}%;
+line-height: {line_height};
+vertical-align: baseline;
+}}
+/** 縦書き テキスト用スタイル */
+html.vrtl {{
+margin: {body_margin};
+padding: 0;
+writing-mode: vertical-rl;
+-webkit-writing-mode: vertical-rl;
+-epub-writing-mode: vertical-rl;
+-epub-line-break: strict;
+line-break: strict;
+-epub-word-break: normal;
+word-break: normal;
+}}
+
+
+/** 太字、ゴシック */
+{vrtl_bold}.vrtl .gtc {{
+font-family: '@ＭＳ ゴシック','@MS Gothic',sans-serif;
+}}
+{gtc_bold}.b {{ font-weight: bold; }}
+.i {{ font-style: italic; }}
+
+/** 外字フォント */"#
+    );
+    let tail = format!(
+        r#"
+/** 横書き テキスト用スタイル */
+
+html.hltr {{
+margin: {body_margin};
+padding: 0;
+writing-mode: horizontal-tb;
+-webkit-writing-mode: horizontal-tb;
+-epub-writing-mode: horizontal-tb;
+-epub-line-break: strict;
+line-break: strict;
+-epub-word-break: normal;
+word-break: normal;
+}}
+
+/** 太字、ゴシック */
+{hltr_bold}.hltr .gtc {{
+font-family: 'ＭＳ ゴシック','MS Gothic',sans-serif;
+}}
+{gtc_bold}.hltr .b {{ font-weight: bold; }}
+.hltr .i {{ font-style: italic; }}
+"#
+    );
+    (head, tail)
 }
 
 const TITLE_PAGE_MARKER: &str = "<!-- aozora-title-page -->";
@@ -305,6 +321,8 @@ pub struct EpubBook {
     pub cover_asset: Option<String>,
     /// 表紙画像の元寸法。Java `cover.vm` の viewport / viewBox に使う。
     pub cover_dimensions: Option<(u32, u32)>,
+    /// `text.css` に展開するスタイル設定 (Java `text.vm` の変数)。
+    pub style: StyleSettings,
     pub chapters: Vec<NavChapter>,
     vertical: bool,
     toc_vertical: bool,
@@ -350,6 +368,7 @@ impl EpubBook {
             assets: Vec::new(),
             cover_asset: None,
             cover_dimensions: None,
+            style: StyleSettings::default(),
             chapters: Vec::new(),
             vertical: true,
             toc_vertical: false,
@@ -382,6 +401,12 @@ impl EpubBook {
     /// `<svg viewBox>` に出力される。
     pub fn with_cover_dimensions(mut self, dimensions: Option<(u32, u32)>) -> Self {
         self.cover_dimensions = dimensions;
+        self
+    }
+
+    /// `text.css` のスタイル設定 (Java `text.vm` の変数) を差し替える。
+    pub fn with_style(mut self, style: StyleSettings) -> Self {
+        self.style = style;
         self
     }
 
@@ -629,7 +654,7 @@ fn write_epub_body<W: Write + Seek>(
         )?;
     }
     if !image_only {
-        let text_css = render_text_css(&book.assets);
+        let text_css = render_text_css(&book.assets, &book.style);
         write_entry(
             archive,
             "item/style/text.css",

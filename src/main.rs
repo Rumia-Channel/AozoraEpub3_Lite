@@ -1,9 +1,9 @@
 use aozora_epub3_lite::{
     AozoraConfig, BookMeta, ChapterRecord, EpubAsset, EpubBook, EpubMetadata, Input, NavChapter,
-    TextEntry, TitleType, aozora_text_to_xhtml_sections_with_chapters, apply_alt_upright,
-    collect_image_alts, decode_text, detect_meta_with_gaiji, escape_html, file_title_creator,
-    image::process as process_image, image_reference_occurrences, image_references,
-    inline_to_xhtml, remove_metadata_lines,
+    StyleSettings, TextEntry, TitleType, aozora_text_to_xhtml_sections_with_chapters,
+    apply_alt_upright, collect_image_alts, decode_text, detect_meta_with_gaiji, escape_html,
+    file_title_creator, image::process as process_image, image_reference_occurrences,
+    image_references, inline_to_xhtml, remove_metadata_lines,
 };
 use std::env;
 use std::error::Error;
@@ -338,6 +338,7 @@ fn convert_input(
             .with_vertical(vertical)
             .with_kindle(is_kindle(options))
             .with_toc_page(config.toc_page)
+            .with_style(StyleSettings::from_ini(&config.ini))
             .with_toc_nest(config.nav_nest, config.ncx_nest)
             .with_title_toc(config.title_toc)
             .with_assets(

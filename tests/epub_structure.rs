@@ -1,6 +1,6 @@
 use std::io::{Cursor, Read};
 
-use aozora_epub3_lite::{EpubAsset, EpubBook, EpubMetadata};
+use aozora_epub3_lite::{EpubAsset, EpubBook, EpubMetadata, IniSettings, StyleSettings};
 use zip::{CompressionMethod, ZipArchive};
 
 #[test]
@@ -265,6 +265,59 @@ fn manifest_hrefs(package: &str) -> Vec<String> {
             (!href.starts_with("http")).then(|| href.to_owned())
         })
         .collect()
+}
+
+/// Java `text.vm` と同じく、INI のスタイル値が text.css に反映されること。
+#[test]
+fn writes_text_css_from_style_settings() {
+    let ini = IniSettings::parse(
+        "PageMargin=0,0.5,0,0\n\
+         PageMarginUnit=0\n\
+         BodyMargin=1,1,0.5,0.5\n\
+         BodyMarginUnit=0\n\
+         LineHeight=1.5\n\
+         FontSize=120\n\
+         BoldUseGothic=1\n\
+         gothicUseBold=1\n",
+    )
+    .unwrap();
+    let book = EpubBook::new(EpubMetadata::new("題名", "urn:test:css"), "<p>本文</p>")
+        .with_style(StyleSettings::from_ini(&ini));
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let mut css = String::new();
+    archive
+        .by_name("item/style/text.css")
+        .unwrap()
+        .read_to_string(&mut css)
+        .unwrap();
+
+    assert!(css.contains("margin: 0em 0.5em 0em 0em;"));
+    assert!(css.contains("margin: 1em 1em 0.5em 0.5em;"));
+    assert!(css.contains("font-size: 120%;"));
+    assert!(css.contains("line-height: 1.5;"));
+    // BoldUseGothic / gothicUseBold はセレクタ行を増やす
+    assert!(css.contains(".vrtl .b,\n.vrtl .gtc {"));
+    assert!(css.contains(".gtc,\n.b { font-weight: bold; }"));
+}
+
+/// キー未指定なら Java CLI の既定 (PageMargin/BodyMargin は単位なしの 0)。
+#[test]
+fn writes_default_text_css_without_style_settings() {
+    let book = EpubBook::new(EpubMetadata::new("題名", "urn:test:css"), "<p>本文</p>");
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let mut css = String::new();
+    archive
+        .by_name("item/style/text.css")
+        .unwrap()
+        .read_to_string(&mut css)
+        .unwrap();
+
+    assert!(css.contains("margin: 0 0 0 0;"));
+    assert!(css.contains("font-size: 100%;"));
+    assert!(css.contains("line-height: 1.8;"));
+    assert!(!css.contains(".vrtl .b,\n"));
 }
 
 #[test]
