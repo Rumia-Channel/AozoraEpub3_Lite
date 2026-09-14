@@ -412,10 +412,12 @@ impl Default for AozoraConfig {
                 "３字下げ".to_owned(),
                 ("<div class=\"mt3\">".to_owned(), "</div>".to_owned()),
             )]),
+            // Java の chuki_tag.txt でタグ列が空の注記 (ページの左右中央 等) は
+            // ブロック注記ではないため、ここには入れない (入れると noBr になり
+            // `<p>` が落ちる)。読み込む資産側が正で、この既定は資産が無い場合用。
             block_single_tags: BTreeMap::from([
                 ("空行".to_owned(), "<p><br/></p>".to_owned()),
                 ("区切り線".to_owned(), "<hr/>".to_owned()),
-                ("ページの左右中央".to_owned(), String::new()),
             ]),
             page_break_notes: BTreeSet::from([
                 "改丁".to_owned(),

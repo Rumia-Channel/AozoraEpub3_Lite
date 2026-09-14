@@ -29,45 +29,124 @@ def run(cmd, cwd):
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
 
-def tag_rows():
-    """chuki_tag.txt の (見出し, 注記テキスト) 一覧。
-
-    開始注記と終わり注記は対にして 1 ケースにする (片方だけの行は単体で出す)。
-    """
+def _tag_notes():
     notes = []
     for line in (JAVA_REPO / "chuki_tag.txt").read_text("utf-8", errors="replace").splitlines():
         if not line.strip() or line.startswith("#"):
             continue
-        fields = line.split("\t")
-        note = fields[0].strip()
+        note = line.split("\t")[0].strip()
         if note:
             notes.append(note)
-    known = set(notes)
+    return notes
 
-    def close_of(note):
-        if note.endswith("終わり"):
-            return None
-        candidates = []
-        if note.startswith("ここから"):
-            candidates.append("ここまで" + note[len("ここから"):])
-            candidates.append("ここで" + note[len("ここから"):] + "終わり")
-        candidates.append(note + "終わり")
-        candidates.append(note + "終り")
-        for candidate in candidates:
+
+def close_of(note, notes):
+    """開始注記に対応する終了注記を表の意味論から求める。
+
+    `X前`↔`X後`、`ここからX`↔`ここまでX`/`ここでX終わり` のほか、
+    段番号が落ちる綴り (`ここから１段階大きな文字` ↔ `ここで大きな文字終わり`)
+    を接尾辞の最長一致で拾う。
+    """
+    known = set(notes)
+    if note.endswith(("終わり", "終り")):
+        return None
+    if note.endswith("前") and note[:-1] + "後" in known:
+        return note[:-1] + "後"
+    if note.endswith("開始") and note[:-2] + "終了" in known:
+        return note[:-2] + "終了"
+    if note.startswith("ここから"):
+        rest = note[len("ここから"):]
+        for candidate in (
+            "ここまで" + rest,
+            f"ここで{rest}終わり",
+            f"ここで{rest}終り",
+        ):
             if candidate in known:
                 return candidate
-        return None
+    for candidate in (note + "終わり", note + "終り"):
+        if candidate in known:
+            return candidate
+    # 表記が一部落ちる綴りを接尾辞の最長一致で拾う。
+    # `ここから…` は `ここで…終わり`/`ここまで…` で閉じ、それ以外は
+    # `…終わり` で閉じる (取り違えるとブロック用の `</div>` を当ててしまう)。
+    body = note[len("ここから"):] if note.startswith("ここから") else note
+    block_form = note.startswith("ここから")
+    candidates = []
+    for candidate in notes:
+        if candidate.startswith("ここまで"):
+            rest = candidate[len("ここまで"):]
+        elif candidate.startswith("ここで") and candidate.endswith(("終わり", "終り")):
+            rest = candidate[len("ここで"):]
+            rest = rest[:-3] if rest.endswith("終わり") else rest[:-2]
+        elif candidate.endswith(("終わり", "終り")):
+            rest = candidate[:-3] if candidate.endswith("終わり") else candidate[:-2]
+        else:
+            continue
+        is_block_form = candidate.startswith(("ここまで", "ここで"))
+        if is_block_form != block_form:
+            continue
+        if rest and body.endswith(rest):
+            candidates.append((len(rest), candidate))
+    if candidates:
+        return max(candidates)[1]
+    return None
 
+
+def is_internal_row(fields):
+    """利用者が本文に書けない行かどうか。
+
+    - 画像タグ 19 行: Java `printImageChuki` が `String.format` で埋める内部
+      テンプレート (画像注記から生成される)。本文に直接書いても意味を持たない。
+    - 折り返し1/2/3 等の断片・属性 14 行: 複合タグの一部で単独では不完全な HTML。
+    """
+    note = fields[0].strip()
+    tag = fields[1].strip() if len(fields) > 1 else ""
+    close_tag = fields[2].strip() if len(fields) > 2 else ""
+    if "%" in tag or "%" in close_tag:
+        return True
+    if tag and not tag.startswith("%"):
+        if ("<" in tag) != (">" in tag):
+            return True
+        if "<" not in tag and ">" not in tag:
+            return True
+    del note
+    return False
+
+
+def tag_rows():
+    """chuki_tag.txt の (見出し, 注記テキスト) 一覧。
+
+    開始注記と終了注記は意味論的に対にして 1 ケースにする。対になる注記が
+    無い開始注記は単独で、終了専用の注記は対の開始注記側で検証する。
+    """
+    all_fields = [
+        line.split("\t")
+        for line in (JAVA_REPO / "chuki_tag.txt").read_text("utf-8", errors="replace").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    internal = [f for f in all_fields if is_internal_row(f)]
+    notes = [f[0].strip() for f in all_fields
+             if f[0].strip() and not is_internal_row(f)]
+    print(f"  (内部生成タグ/断片として除外: {len(internal)})", flush=True)
+    known = set(notes)
+    closers = {close_of(note, notes) for note in notes}
+    closers.discard(None)
     rows = []
+    unclosed = []
     for note in notes:
-        if note.endswith(("終わり", "終り")):
-            # 対応する開始注記があればそちらで検証する
+        if note.endswith(("終わり", "終り")) or note.startswith("ここまで"):
             continue
-        if note.startswith("ここまで"):
+        if note.endswith("後") and note[:-1] + "前" in known:
             continue
-        close = close_of(note)
+        if note in closers:
+            # 他の開始注記の終了として検証される
+            continue
+        close = close_of(note, notes)
         body = f"［＃{note}］テスト本文" + (f"［＃{close}］" if close else "")
-        rows.append((f"tag-{len(rows):04}", body))
+        if close is None:
+            unclosed.append(note)
+        rows.append((f"tag-{len(rows):04}", note, body))
+    print(f"  (対になる終了注記なし: {len(unclosed)})", flush=True)
     return rows
 
 
@@ -81,7 +160,10 @@ def suffix_rows():
         suffix = fields[0].strip()
         if suffix:
             # 実際の用法どおり対象文字列の後ろに置く
-            rows.append((f"suf-{len(rows):04}", f"テスト対象本文［＃「テスト対象本文」{suffix}］"))
+            rows.append(
+                (f"suf-{len(rows):04}", f"「テスト対象本文」{suffix}",
+                 f"テスト対象本文［＃「テスト対象本文」{suffix}］")
+            )
     return rows
 
 
@@ -105,7 +187,7 @@ def main():
 
     rows = tag_rows() + suffix_rows()
     if args.only:
-        rows = [r for r in rows if args.only in r[1]]
+        rows = [r for r in rows if args.only in r[2]]
     if args.limit:
         rows = rows[: args.limit]
     print(f"notes: {len(rows)}", flush=True)
@@ -114,9 +196,9 @@ def main():
     src = work / "src"
     src.mkdir(parents=True)
     paths = []
-    for key, note in rows:
+    for key, _note, body in rows:
         path = src / f"{key}.txt"
-        path.write_text(f"表題{key}\n著者{key}\n\n{note}テスト本文\n", encoding="cp932")
+        path.write_text(f"表題{key}\n著者{key}\n\n{body}\n", encoding="cp932")
         paths.append(str(path))
 
     jd = work / "j"
@@ -143,7 +225,7 @@ def main():
     if extra:
         print("only rust produced:", extra[:10])
 
-    by_key = dict(rows)
+    by_key = {key: note for key, note, _ in rows}
     tag_tags = {}
     for line in (JAVA_REPO / "chuki_tag.txt").read_text("utf-8", errors="replace").splitlines():
         if not line.strip() or line.startswith("#"):
