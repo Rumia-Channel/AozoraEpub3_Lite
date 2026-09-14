@@ -345,7 +345,23 @@ java -cp "<classes>;AozoraEpub3.jar" AozoraEpub3 -i <ini> -ext .epub -d <out> <i
   `convert_gaiji_notes` と `remove_ruby` / `unescape_marks` の適用順の整理が
   必要 (未着手)。
 
-フィクスチャ 21 件のうち 17 件が byte 一致 (残り 4 件は上記)。
+フィクスチャ 21 件のうち 18 件が byte 一致。差分は `test_chuki.txt` 0049
+(Java 側のエスケープ退行)、`test_title.txt` 0001 (表題前バッファ)、
+`test_png.zip` (画像のみ EPUB の OPF) の 3 件。
+
+2026-09-14 の追加修正 (続き):
+
+- 米印外字の `※` を 2 文字出力 (Java の内部マーカーは 《》｜＃ では `\u0001`
+  だが ※ では literal な ※ のため)。タイトル・目次ラベルが一致し
+  `test_ruby.txt` が完全一致に
+- ChukiRuby 周辺: `※［＃…のルビ］` を前方参照注記として扱わない
+  (Java は外字変換を先に通す)、対象が行頭に無い場合の空基底ルビ、
+  その際のインデックス外 panic を修正
+- 章の自動抽出 (`ChapterName` / `ChapterNumOnly` / `ChapterNumTitle` /
+  `ChapterNumParen` / `ChapterNumParenTitle` / `ChapterUseNextLine` /
+  `ChapterExclude`) を実装。抽出 4 種 + 次行連結 + 除外の 6 構成で
+  nav / toc.ncx が Java と一致
+- `tools/parity_check.py` を追加 (21 フィクスチャの差分をカーネル外で測る)
 
 ## 作業ツリーとコミット状態
 引き継ぎ後に完了した論理単位は、以下のコミットとして `develop` へ commit / push 済み。
