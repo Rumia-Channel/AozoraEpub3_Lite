@@ -147,9 +147,9 @@ fn classifies_middle_and_bottom_page_breaks() {
     assert!(sections[2].starts_with("<!-- aozora-page-bottom -->"));
 
     // タグ列が空のページ注記はブロック注記ではないので、注記と本文が同一行でも
-    // Java は <p> を付ける (noBr にしない)。
-    let inline =
-        super::aozora_text_to_xhtml_sections_with_config("前\n［＃中寄せ］中央", &config).unwrap();
+    // Java は <p> を付ける (noBr にしない)。既定 config の `ページの左右中央` は
+    // 以前 block_single_tags に入っていたため bare 出力になっていた。
+    let inline = super::aozora_text_to_xhtml_sections("前\n［＃ページの左右中央］中央").unwrap();
     assert_eq!(inline.len(), 2);
     assert!(inline[1].contains("<p>中央</p>"));
 }

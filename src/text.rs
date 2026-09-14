@@ -2100,14 +2100,18 @@ fn generated_indent_block(note: &str) -> Option<(String, String)> {
         (format!("pt{indent} jzm{width}"), "")
     } else {
         let mut classes = vec![format!("mt{indent}")];
-        for (needle, class) in [
-            ("破線罫囲み", "dashed_border"),
-            ("罫囲み", "border"),
-            ("破線枠囲み", "dashed_border"),
-            ("枠囲み", "border"),
-            ("中央揃え", "center"),
-            ("横書き", "yoko"),
-        ] {
+        // Java は 罫囲み / 枠囲み の各組で「破線 → 実線」を else-if で排他にする
+        // (AozoraEpub3Converter.java:2277-2283)。`破線枠囲み` は `枠囲み` を含むため、
+        // 独立した contains 判定にすると `border` が余計に付く。
+        for (dashed, solid) in [("破線罫囲み", "罫囲み"), ("破線枠囲み", "枠囲み")]
+        {
+            if rest.contains(dashed) {
+                classes.push("dashed_border".to_owned());
+            } else if rest.contains(solid) {
+                classes.push("border".to_owned());
+            }
+        }
+        for (needle, class) in [("中央揃え", "center"), ("横書き", "yoko")] {
             if rest.contains(needle) {
                 classes.push(class.to_owned());
             }

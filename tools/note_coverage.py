@@ -235,6 +235,22 @@ def main():
         if note:
             tag_tags[note] = [f.strip() for f in fields[1:]
                               if f.strip() and f.strip() not in ("1", "2", "3", "P", "M", "L", "K")]
+    # suffix 注記 (chuki_tag_suf.txt) の期待タグは、その開始/終了注記名に対応する
+    # chuki_tag.txt のタグ列。suf 行も gap 判定の対象にする。
+    for line in (JAVA_REPO / "chuki_tag_suf.txt").read_text(
+        "utf-8", errors="replace"
+    ).splitlines():
+        fields = line.split("\t")
+        if len(fields) < 3 or line.startswith("#") or not line.strip():
+            continue
+        suffix, start_note, end_note = (f.strip() for f in fields[:3])
+        if not suffix or not start_note:
+            continue
+        expected = list(tag_tags.get(start_note, []))
+        expected.extend(tag_tags.get(end_note, []))
+        if expected:
+            tag_tags[f"「テスト対象本文」{suffix}"] = expected
+
     differs = []
     for name in sorted(set(java_out) & set(rust_out)):
         jb = body_of(java_out[name])
