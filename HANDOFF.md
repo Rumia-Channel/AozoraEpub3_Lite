@@ -63,12 +63,21 @@ Java版にこれらの機能が存在していても、軽量版の互換対象�
 
 公開 API は `src/lib.rs` から次を再 export している。
 
-- `AozoraConfig`, `IniSettings`
+- `AozoraConfig`, `IniSettings`, `StyleSettings`
 - `EpubBook`, `EpubAsset`, `EpubMetadata`, `EpubSection`
-- `Input`, `TextEntry`, `decode_text`
-- `BookMeta`, `TitleType`, `detect_meta`
-- `plain_text_to_xhtml`, `aozora_text_to_xhtml_sections_with_config`
-- `image_references`, `escape_html`
+- `Input`, `TextEntry`, `decode_text`, `detect_encoding`
+- `BookMeta`, `TitleType`, `detect_meta`, `detect_meta_with_gaiji`
+- `plain_text_to_xhtml`, `aozora_text_to_xhtml_sections_with_config`,
+  `aozora_text_to_xhtml_sections_with_chapters`, `inline_to_xhtml`
+- 画像・表紙パイプライン (`pipeline` モジュール): `collect_assets` +
+  `CollectedAsset` (参照名 / EPUB パス / 実ファイル名の対応)、
+  `decorate_image_tags`, `split_image_page_sections`, `reflow_image_sections`,
+  `remove_image_sources`, `remove_missing_image_sources`, `rewrite_image_source`,
+  `is_auto_cover`, `is_same_name_cover`, `is_no_cover`, `build_title_page_markup`,
+  `append_gaiji_assets`, `build_metadata`, `java_name_uuid`, `svg_image_fragment`
+  (呼び出し順は `src/pipeline.rs` のモジュール doc を参照)
+- `image::process`, `image::dimensions`
+- `image_references`, `escape_html`, `tcy_label`
 
 CLI のヘルプは次で確認できる。
 
@@ -207,8 +216,11 @@ cargo run --quiet -- -d target/progress-check \
 - `n2878hd いろはにサキュバスⅡ～今度こそ、サキュバスの倒し方教えます～`（縦書き・49ファイル、横書き49ファイル）
 
 比較方法: `java -cp AozoraEpub3.jar AozoraEpub3 -i AozoraEpub3.ini -enc UTF-8 -ext .epub -of` と
-Lite CLI を同じ INI / config-dir で実行し、EPUB 内の xhtml / css / opf / ncx / nav を
-CR 除去して byte 比較（`dcterms:modified` は変換時刻のため比較から除外）。
+Lite CLI を同じ INI / config-dir で実行し、EPUB 内エントリを byte 比較する
+（`dcterms:modified` は変換時刻のため比較から除外）。改行も厳密に比較する
+（2026-09-15 以降。`tools/parity_check.py` も同様）。2026-09-15 時点で
+`n0421du 【26年7月よりアニメ放送中】ヒロイン？聖女？いいえ、オールワークスメイドです（誇）！`
+（423 エントリ）も 422 エントリが byte 一致（残りは dcterms:modified のみ）。
 
 残差分（21件フィクスチャの旧記録）:
 - **出版社0001（3行）**: タイトル前の表紙画像（`［＃（img/表紙.jpg）］` + 直後改ページ）。Java は `isImageSectionLine`（画像単独行+直後改ページ→pなし）とタイトル前バッファ処理（preTitleBuf）で `<p><br/></p>` + pなし `<span>` を出力し、Rust は `<p><span>` で出力する。解消には Java のタイトル前バッファ処理の再現が必要（2026-09-12 時点で未検証・未解消）。
@@ -225,11 +237,11 @@ CLI の主要オプションと外部設定の基本経路は実装・テスト�
 
 ### 3. 検証環境
 
-- 差分計測: `target/parity-check/{java,rust,java2,rust2,java-hor,rust-hor}` に Java / Lite の出力を置き、EPUB 内エントリを CR 除去して byte 比較（Python + zipfile/difflib）。`dcterms:modified` は変換時刻のため比較前に除去する。
+- 差分計測: `target/parity-check/{java,rust,java2,rust2,java-hor,rust-hor}` に Java / Lite の出力を置き、EPUB 内エントリを byte 比較（Python + zipfile/difflib）。`dcterms:modified` は変換時刻のため比較前に除去する。改行は厳密比較（2026-09-15 以降）。
 - `tests/epub_parity.rs` は比較用のJava/Rust生成ディレクトリが必要なため通常は ignored（`AOZORA_JAVA_DIR` / `AOZORA_RUST_DIR` を設定して `cargo test -- --ignored`）。
 - `target/parity-rust-head` に現行実装で生成した21件を EPUBCheck で検証し、19件 0 エラー。注記（4件）・外字画像（1件）は J 参照と同一のエラー（alt 内 `<span class="upr">`、`&times;` 未宣言、playOrder 重複、未定義フラグメント）。
 - Java 参照の再生成・デバッグには、`target/java-build`（sample ソースの javac ビルド）または公式バイナリ（`C:/Users/rumia/Documents/AozoraEpub3/AozoraEpub3.jar`、CLI は `java -cp AozoraEpub3.jar AozoraEpub3` で起動）が使える。
-- テスト: `cargo test --all` 170 passed / 1 ignored、`cargo clippy --all-targets --all-features -D warnings` 通過。
+- テスト: `cargo test --all` 187 passed / 1 ignored (lib 155 / CLI 14 / epub_structure 15 / cli_config 3)、`cargo clippy --all-targets --all-features -D warnings` 通過。
 
 ### 4. 対象外
 
@@ -515,6 +527,93 @@ Lite はテンプレートを `include_str!` でコンパイル埋め込みし�
     (手動実行で誤った名前の成果物が出るため。CI は既に `-Version` を渡している)
   - HANDOFF の「作業ツリーとコミット状態」見出しが 1 行に 2 回並んでいたのを修正
 
+## 2026-09-15: SpaceHyphenation の位置カウント / 改行コード / 画像パイプライン公開
+
+narou.rs 側の実測レポート (全角スペースの取りこぼし 126 箇所、423 ファイル中
+290 ファイルが CR だけの差分、画像パイプラインがライブラリから使えない、
+dc:identifier の不一致) に対応した。
+
+### 1-A / 1-B: SpaceHyphenation の位置カウント (commit `e6a9159`)
+
+Java の `convertReplacedChar` は行全体を 1 つの「フェーズ1バッファ」
+(外字変換と注記→タグ置換、文字エスケープを済ませた文字列) として扱い、
+`idx > 20` をその UTF-16 位置で判定する。Lite は位置を近似していた。
+
+- **見出し (1-A)**: 開きタグ (`<h1 class="font-1em50">` など 21 文字以上) が
+  idx に数えられるため、短い見出しでも変換される。Lite は入れ子の変換で
+  位置を 0 から数え直していたため 125 箇所すべてを取りこぼしていた
+- **BMP 外文字 (1-B)**: Java の char[] ではサロゲートペアの 2 文字。
+  `&` `<` `>` も実体参照の長さ (5/4/4) で数える。Lite は素の index だった
+- 入れ子の変換 (見出し・複合字下げブロック・ルビ基底) へ位置を引き継ぎ、
+  変換範囲の前後 1 文字 (Java の `!buf.isEmpty()` / `ch[idx+1]` 相当) を
+  `InlineContext` で渡す。ルビ読みは Java と同じ noTcy (禁則調整と正立を抑止)
+
+実測 (n0421du novel.txt、401 セクション): 全角スペース span が
+Java 1,944 / Lite 1,944 で一致し、EPUB 内 423 エントリのうち 422 が
+byte 一致 (残りは standard.opf の dcterms:modified のみ)。本文の閾値
+(0-based index 21 以上、字下げ有無) は従来どおり Java と一致している。
+
+### 2: 生成物の改行コード (commit `3d1ca41`)
+
+Java の出力は「セクション xhtml と CSS が LF、nav.xhtml / standard.opf /
+toc.ncx / container.xml が CRLF」。Java はテンプレートファイルをそのまま
+EPUB に入れるため、配布物 `Documents/AozoraEpub3/template/**` の改行が
+出力の改行になる (style/*.css と xhtml 断片、cover.vm などが LF、
+package.vm / toc.ncx.vm / xhtml_nav.vm / container.xml が CRLF を実測)。
+
+- `.gitattributes` を追加してテキストを LF 固定にし、作業ツリーも正規化
+  (`* text=auto eol=lf`)。core.autocrlf=true でも raw リテラルと
+  include_str! に CR が入らない (同じコミットなら Windows/Linux で同一バイト)
+- CRLF が要る出力はコードで明示 (`lf_to_crlf`)。`render_section`
+  (表題ページ・単ページ画像・SVG ページを含む) は LF に変更した
+- `tools/parity_check.py` は改行厳密比較が既定 (`--ignore-newlines` で従来動作)。
+  参照 (Java) のテンプレートは `java_reference.sync_templates()` が配布物から
+  取り直す (注記表は従来どおり上流リポジトリ側を正とする)
+- `tests/epub_structure.rs` にエントリごとの改行 (LF/CRLF) を固定するテストを追加
+
+実データ: 417 ファイルの CR 差分が解消し、423 エントリ中 422 が byte 一致。
+
+### 3: 画像パイプラインの公開 (commit `df295de`)
+
+main.rs に閉じていた画像・表紙・表題ページの処理をライブラリの
+`src/pipeline.rs` へ移した (CLI は同じ関数を呼ぶだけ。出力は不変)。
+モジュール doc に CLI と同じ呼び出し順を書いてある。
+
+- `collect_assets` + `CollectedAsset` (`references` = 本文中の参照名、
+  `resolved` = EPUB 内の格納名、`source` = 実際に読み出すファイル名/エントリ。
+  表紙だけファイル名のまま格納され得るため、この対応が必要)
+- セクション整形: `decorate_image_tags` / `split_image_page_sections` /
+  `reflow_image_sections` / `remove_image_sources` /
+  `remove_missing_image_sources` / `rewrite_image_source`
+- 表紙判定: `is_auto_cover` / `is_same_name_cover` / `is_no_cover` (+
+  `AozoraConfig::cover_page` / `cover_page_toc`)
+- 表題ページ・外字・識別子: `build_title_page_markup` / `append_gaiji_assets` /
+  `build_metadata` / `java_name_uuid` / `svg_image_fragment`
+- 画像の実処理は従来どおり `image::process` (ライブラリ)
+
+テスト 15 件は `src/pipeline_tests.rs` へ移動した。
+
+### 4: dc:identifier
+
+Java の規則は `UUID.nameUUIDFromBytes((title + "-" + creator).getBytes())`
+(著者無しのとき creator は空文字) で、Lite の CLI は `java_name_uuid` で
+既に一致している。実測: n0421du novel.txt で Java / Lite とも
+`urn:uuid:b3fc7e46-539d-3973-b6b7-9b8f311e72e1` (レポートと同じ値)、
+著者無しの入力でも Java と一致 (`表題のみ-` → `urn:uuid:3c0fe03d-...`)。
+レポートの差分は narou.rs 側が `EpubMetadata` に独自ハッシュの identifier を
+渡しているため。`java_name_uuid` を公開したので narou.rs からも同じ値を作れる。
+
+### 今回見つけた残差 (未修正・いずれも既存挙動)
+
+- 章が 1 つも抽出できない入力で nav.xhtml / toc.ncx のフォールバックが
+  Java と違う (Lite は「本文」エントリ、Java は表題ページのエントリ)。
+  章のある実データでは発生しない。`threshold.txt` / `test_png.zip` で再現
+- 注記だけで空になった行 (例: `［＃中見出し終わり］` 単独行) は Lite が
+  `<p><br/></p>` を出すが Java は何も出さない (MaxEmptyLine=0 では空行も出さない)
+- 複合字下げ (`ここから N 字下げ、…`) の直後の全角スペース: 閉じ注記が
+  タグを持たない場合、Java のバッファはそこで終わるため変換されないが、
+  Lite は text.rs の片分割で次の 1 文字を見ていないため変換する
+
 ## 作業ツリーとコミット状態
 引き継ぎ後に完了した論理単位は、以下のコミットとして `develop` へ commit / push 済み。
 
@@ -534,6 +633,12 @@ Lite はテンプレートを `include_str!` でコンパイル埋め込みし�
 - `f740859`: Parity 残差分 64行→8行（19/21完全一致、画像・横組み・窓見出し・0049・目次章名・空行処理）
 
 `develop` の HEAD は `origin/develop` と同期している (`master` は変更していない)。
+2026-09-15 の修正は以下のコミット (develop、未 push)。
+
+- `e6a9159`: SpaceHyphenation を Java の位置カウントに一致させる
+- `3d1ca41`: 生成物の改行を Java 版 (LF/CRLF) に固定する
+- `df295de`: 画像・表紙パイプラインをライブラリ API として公開する
+
 2026-09-14 の修正は以下のコミット。
 
 - `a7e0144`: 表紙ページと OPF/NCX を Java 版に一致させる
