@@ -14,6 +14,7 @@ Java 版 [AozoraEpub3](https://github.com/kyukyunyorituryo/AozoraEpub3) のう�
 
 - TXT / ZIP / TXTZ / CBZ から EPUB 3 を生成
 - 青空文庫の主な注記に対応（ルビ、縦中横、傍点、傍線、割り注、字下げ、見出し、改ページ、画像注記など）
+- Narou.rb / Narou Bridge のカスタム注記に対応（柱、前書き、後書き、パラメーター、二分アキ、濁点、zws、ｌｉｎｋ系）
 - 縦書き・横書きに対応
 - 表紙、画像の回り込み、リサイズ・回転、単ページ画像の SVG 固定レイアウト化に対応
 - GlyphWiki の 1 文字フォントを EPUB に埋め込み可能
