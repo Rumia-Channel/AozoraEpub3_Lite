@@ -503,7 +503,10 @@ fn convert_image_only(
     let input_path = input.path();
     let mut sections = Vec::new();
     let mut assets = Vec::new();
-    for (index, path) in input.image_paths().iter().enumerate() {
+    // Java AozoraEpub3: imageOnly のときだけ FileNameComparator で並べ替える
+    let mut image_paths = input.image_paths().to_vec();
+    image_paths.sort_by(|left, right| compare_image_names(left, right));
+    for (index, path) in image_paths.iter().enumerate() {
         let data = input.read_image(path)?.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -521,7 +524,8 @@ fn convert_image_only(
                 format!("unsupported image type: {path}"),
             )
         })?;
-        let output_name = format!("{:04}.{extension}", index + 1);
+        // Java: 出力拡張子は常に .jpg (.jpeg の jpeg を jpg に置換)
+        let output_name = format!("{:04}.{}", index + 1, extension.replace("jpeg", "jpg"));
         let processed_data = process_image(&data, media_type, &config.ini, index == 0)?;
         let dimensions = image_dimensions(&processed_data, media_type);
         let fragment = dimensions
@@ -801,7 +805,7 @@ fn collect_assets(
             fs::read(base.join(source_path.replace('\\', "/")))?
         };
         let dimensions = image_dimensions(&data, media_type);
-        let output_name = format!("{:04}.{extension}", image_index);
+        let output_name = format!("{:04}.{}", image_index, extension.replace("jpeg", "jpg"));
         let epub_path = format!("image/{output_name}");
         let is_cover = is_auto_cover(cover)
             && cover_asset.is_none()
@@ -1256,9 +1260,10 @@ fn image_page_type(
         return ImagePageType::Inline;
     }
 
-    let single_page_width = image_setting_usize(config, "SinglePageWidth", 550) as u32;
-    let single_page_size_width = image_setting_usize(config, "SinglePageSizeW", 400) as u32;
-    let single_page_size_height = image_setting_usize(config, "SinglePageSizeH", 600) as u32;
+    // Java AozoraEpub3.java の既定値 (CLI)
+    let single_page_width = image_setting_usize(config, "SinglePageWidth", 600) as u32;
+    let single_page_size_width = image_setting_usize(config, "SinglePageSizeW", 480) as u32;
+    let single_page_size_height = image_setting_usize(config, "SinglePageSizeH", 640) as u32;
     let eligible = dimensions.width >= single_page_width
         || (dimensions.width >= single_page_size_width
             && dimensions.height >= single_page_size_height);
@@ -1657,6 +1662,9 @@ fn decorate_image_tags(
             } else {
                 image_width_ratio(dimensions, config, has_caption)
             };
+            // Java は `style="width:%s%%"` に double を渡すため Double.toString と同じ
+            // 表記 (70 → "70.0") になる。Rust の `{:?}` が同じ書式。
+            let ratio_text = format!("{ratio:?}");
             // Java: 行バッファ全体の事後変換で alt 内の正立文字も <span class="upr"> 化される
             let alt = apply_alt_upright(
                 &escape_image_alt(tag_attribute(tag, "alt").unwrap_or_default().trim()),
@@ -1709,7 +1717,7 @@ fn decorate_image_tags(
                 if ratio > 0.0 {
                     (
                         Some(format!(
-                            "<span class=\"img {class}\" style=\"width:{ratio}%\">"
+                            "<span class=\"img {class}\" style=\"width:{ratio_text}%\">"
                         )),
                         None,
                         Some("width:100%".to_owned()),
@@ -1732,7 +1740,7 @@ fn decorate_image_tags(
                 if ratio > 0.0 {
                     (
                         Some(format!(
-                            "<span class=\"img fblk\" style=\"width:{ratio}%\">"
+                            "<span class=\"img fblk\" style=\"width:{ratio_text}%\">"
                         )),
                         None,
                         Some("width:100%".to_owned()),
@@ -1748,7 +1756,9 @@ fn decorate_image_tags(
                 }
             } else if ratio > 0.0 {
                 (
-                    Some(format!("<span class=\"img\" style=\"width:{ratio}%\">")),
+                    Some(format!(
+                        "<span class=\"img\" style=\"width:{ratio_text}%\">"
+                    )),
                     None,
                     Some("width:100%".to_owned()),
                     None,
@@ -1995,6 +2005,45 @@ fn normalize_relative_path(path: &str) -> Result<String, Box<dyn Error>> {
     Ok(parts.join("/"))
 }
 
+/// Java `FileNameComparator`: 画像のみ ZIP の並び替え。`_` を `/` として扱い、
+/// 漢数字と 上中下前後 を順序付けする (比較前に小文字化する)。
+fn compare_image_names(left: &str, right: &str) -> std::cmp::Ordering {
+    let left = left
+        .to_lowercase()
+        .chars()
+        .map(ordering_char)
+        .collect::<Vec<_>>();
+    let right = right
+        .to_lowercase()
+        .chars()
+        .map(ordering_char)
+        .collect::<Vec<_>>();
+    left.cmp(&right)
+}
+
+/// Java `FileNameComparator.replace`。
+fn ordering_char(character: char) -> u32 {
+    match character {
+        '_' => '/' as u32,
+        '一' => '一' as u32,
+        '二' => '一' as u32 + 1,
+        '三' => '一' as u32 + 2,
+        '四' => '一' as u32 + 3,
+        '五' => '一' as u32 + 4,
+        '六' => '一' as u32 + 5,
+        '七' => '一' as u32 + 6,
+        '八' => '一' as u32 + 7,
+        '九' => '一' as u32 + 8,
+        '十' => '一' as u32 + 9,
+        '上' => '上' as u32,
+        '前' => '上' as u32 + 1,
+        '中' => '上' as u32 + 2,
+        '下' => '上' as u32 + 3,
+        '後' => '上' as u32 + 4,
+        _ => character as u32,
+    }
+}
+
 fn media_type_for_extension(extension: &str) -> Option<&'static str> {
     match extension.to_ascii_lowercase().as_str() {
         "png" => Some("image/png"),
@@ -2156,11 +2205,24 @@ fn usage() -> &'static str {
 mod tests {
     use super::{
         AozoraConfig, CliOptions, CollectedAsset, EpubAsset, ImageDimensions, ImagePageType,
-        TitleType, apply_ini_defaults, decorate_image_tags, external_settings_path,
-        image_dimensions, image_page_type, java_name_uuid, output_path, parse_args,
-        reflow_image_sections, remove_metadata_lines, remove_missing_image_sources, should_rotate,
-        usage,
+        TitleType, apply_ini_defaults, compare_image_names, decorate_image_tags,
+        external_settings_path, image_dimensions, image_page_type, java_name_uuid, output_path,
+        parse_args, reflow_image_sections, remove_metadata_lines, remove_missing_image_sources,
+        should_rotate, usage,
     };
+
+    /// Java FileNameComparator: `_` は `/` として、漢数字と 上中下前後 は
+    /// 順序付けして比較する。
+    #[test]
+    fn sorts_image_names_like_java() {
+        let mut names = vec!["2.png", "10.png", "_cover.png", "第3話.png", "第1話.png"];
+        names.sort_by(|left, right| compare_image_names(left, right));
+        assert_eq!(
+            names,
+            vec!["_cover.png", "10.png", "2.png", "第1話.png", "第3話.png"]
+        );
+    }
+
     use aozora_epub3_lite::{IniSettings, decode_text, detect_meta};
     use std::path::Path;
 

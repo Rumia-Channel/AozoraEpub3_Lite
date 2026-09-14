@@ -109,11 +109,8 @@ impl ImageOptions {
             } else {
                 0
             },
-            auto_margin_white_level: if auto_margin_enabled {
-                get_u32(ini, "AutoMarginWhiteLevel", 100)
-            } else {
-                100
-            },
+            // Java: AutoMargin 無効時は使われない (既定も 80 で揃える)
+            auto_margin_white_level: get_u32(ini, "AutoMarginWhiteLevel", 80),
             auto_margin_padding: if auto_margin_enabled {
                 get_f32(ini, "AutoMarginPadding", 0.0) / 100.0
             } else {
@@ -456,9 +453,10 @@ fn scan_top(image: &DynamicImage, start: u32, limit: u32, ignore: u32, dust: u32
         }
         margin
     } else {
-        let margin = start;
+        let mut margin = start;
         for index in (start + 1)..=max.min(image.height().saturating_sub(1)) {
             if colored_h(image, index, limit, ignore, ignore, dust) == 0 {
+                margin = index;
             } else {
                 break;
             }
@@ -850,5 +848,34 @@ mod tests {
         let output = process(&source, "image/png", &ini, false).unwrap();
         let decoded = image::load_from_memory(&output).unwrap().to_rgba8();
         assert_eq!(decoded.get_pixel(0, 0).0, [181, 128, 0, 255]);
+    }
+
+    /// Java `ImageUtils.getPlainMargin`: 上辺も最初の非空白行まで切り取る
+    /// (scan_top の代入漏れで上だけ常に 1% のまま残っていた)。
+    #[test]
+    fn trims_top_margin_like_java() {
+        let mut image = image::RgbaImage::from_pixel(200, 300, image::Rgba([255, 255, 255, 255]));
+        for y in 40..260 {
+            for x in 40..160 {
+                image.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+            }
+        }
+        let ini = crate::config::IniSettings::parse(
+            "AutoMargin=1\nAutoMarginLimitH=15\nAutoMarginLimitV=30\n",
+        )
+        .unwrap();
+        let margins = plain_margin(
+            &DynamicImage::ImageRgba8(image),
+            ImageOptions::from_ini(&ini, false),
+        )
+        .unwrap();
+        // 上端は最初の非空白行 (40 行目) 付近まで詰まる。修正前は幅の 1% (2) のままだった。
+        assert!(
+            margins.top >= 30,
+            "top margin was not trimmed: {}",
+            margins.top
+        );
+        // 下端は修正前から正しく詰まっていた (比較対象)
+        assert!(margins.bottom >= 30, "bottom margin: {}", margins.bottom);
     }
 }
