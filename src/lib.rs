@@ -4,6 +4,7 @@ pub mod image;
 pub mod input;
 pub(crate) mod jis;
 pub mod metadata;
+pub mod pipeline;
 pub mod text;
 
 pub use config::{AozoraConfig, ConfigError, IniSettings, StyleSettings, SuffixNoteRule};
@@ -14,6 +15,13 @@ pub use input::{
 pub use metadata::{
     BookMeta, TitleType, detect_meta, detect_meta_with_gaiji, file_title_creator,
     remove_metadata_lines,
+};
+pub use pipeline::{
+    CollectedAsset, ImageDimensions, ImagePageFit, ImagePageType, append_gaiji_assets,
+    build_metadata, build_title_page_markup, collect_assets, decorate_image_tags, image_dimensions,
+    is_auto_cover, is_no_cover, is_same_name_cover, java_name_uuid, reflow_image_sections,
+    remove_image_sources, remove_missing_image_sources, rewrite_image_source,
+    split_image_page_sections, svg_image_fragment,
 };
 pub use text::{
     ChapterRecord, TextError, aozora_text_to_xhtml_sections,
