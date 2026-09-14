@@ -503,6 +503,9 @@ Java が対応する開きタグ無しに `</a>` を出す (Rust は捨てる)�
 - `bfb82ad`: 画像注記のファイル名抽出を Java 版に一致させる
 - `051ccb8`: 画像指定外字を外字画像として出力する
 
+- `7433b7d`: Narou.rb / Narou Bridge のカスタム注記 26 行を取り込む
+- `84b93c6`: README に Narou 注記の対応を追記する
+
 再開時は既存差分を破棄せず、まず `git status --short --branch` で状態を確認すること。
 
 ```text
