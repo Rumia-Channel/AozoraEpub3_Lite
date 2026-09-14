@@ -908,7 +908,9 @@ mod tests {
             .unwrap()
             .read_to_string(&mut section)
             .unwrap();
-        assert!(section.contains("\r\n class=\"hltr\"\r\n>"));
+        // 単ページ画像セクションは横書き固定レイアウト (Java: <html ... class="hltr">)。
+        // セクション xhtml の改行は Java と同じ LF。
+        assert!(section.contains("\n class=\"hltr\"\n>"), "{section}");
         assert!(section.contains("<body class=\"p-image\">"));
         assert!(section.contains("<img class=\"fit\" src=\"../image/fig.png\""));
     }

@@ -43,11 +43,63 @@ fn writes_epub3_layout_with_uncompressed_mimetype_first() {
         .unwrap()
         .read_to_string(&mut section)
         .unwrap();
-    assert!(
-        section.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!DOCTYPE html>\r\n")
-    );
-    assert!(section.contains("<html\r\n xmlns=\"http://www.w3.org/1999/xhtml\""));
+    // Java のセクション xhtml は LF (CRLF なのは nav.xhtml と OPF / NCX)。
+    assert!(section.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE html>\n"));
+    assert!(section.contains("<html\n xmlns=\"http://www.w3.org/1999/xhtml\""));
     assert!(section.contains("xmlns:epub=\"http://www.idpf.org/2007/ops\""));
+}
+
+/// Java 版の出力は「セクション xhtml と CSS が LF、nav.xhtml と
+/// standard.opf / toc.ncx が CRLF」。作業ツリーの改行 (Windows の
+/// core.autocrlf=true など) がそのまま EPUB に入らないことを固定する。
+#[test]
+fn writes_java_line_endings_for_each_entry() {
+    let book = EpubBook::new(
+        EpubMetadata::new("改行", "urn:test:newlines"),
+        "    <p>本文</p>\n",
+    )
+    .with_title_page();
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+
+    let mut entry = |path: &str| {
+        let mut text = String::new();
+        archive
+            .by_name(path)
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        text
+    };
+    // 期待値は Java 版の出力そのまま (LF / CRLF)。
+    for lf_path in [
+        "mimetype",
+        "item/xhtml/0001.xhtml",
+        "item/xhtml/title.xhtml",
+        "item/style/aozora.css",
+        "item/style/book-style.css",
+        "item/style/text.css",
+    ] {
+        let text = entry(lf_path);
+        assert!(
+            !text.trim_end_matches('\n').contains('\r'),
+            "{lf_path} must use LF"
+        );
+    }
+    for crlf_path in [
+        "META-INF/container.xml",
+        "item/nav.xhtml",
+        "item/standard.opf",
+        "item/toc.ncx",
+    ] {
+        let text = entry(crlf_path);
+        assert!(text.contains("\r\n"), "{crlf_path} must use CRLF");
+        assert_eq!(
+            text.matches('\n').count(),
+            text.matches("\r\n").count(),
+            "{crlf_path} must use CRLF on every line"
+        );
+    }
 }
 
 #[test]
@@ -121,7 +173,7 @@ fn title_page_uses_java_xhtml_head_and_spacing() {
         .unwrap();
     assert!(!title.contains("<meta charset=\"UTF-8\"/>"));
     assert!(title.contains(
-        "<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/book-style.css\"/>\r\n\r\n<title>"
+        "<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/book-style.css\"/>\n\n<title>"
     ));
     assert!(title.contains(
         "<div class=\"main vrtl block-align-center\">\n\n\t<br/>\n\n<div class=\"book-title start-2em\">"
@@ -432,9 +484,9 @@ fn renders_middle_and_bottom_pages_with_horizontal_document_class() {
             .read_to_string(&mut section)
             .unwrap();
         if marker.contains("middle") {
-            assert!(section.contains("xml:lang=\"ja\"\r\n class=\"hltr\""));
+            assert!(section.contains("xml:lang=\"ja\"\n class=\"hltr\""));
         } else {
-            assert!(section.contains("xml:lang=\"ja\"\r\n class=\"vrtl\""));
+            assert!(section.contains("xml:lang=\"ja\"\n class=\"vrtl\""));
         }
     }
 }
