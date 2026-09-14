@@ -723,7 +723,7 @@ fn remove_space(text: &str) -> String {
 
 /// Removes ruby markup `｜漢字《かんじ》` (respecting `※` escapes), matching
 /// `CharUtils.removeRuby`.
-fn remove_ruby(text: &str) -> String {
+pub(crate) fn remove_ruby(text: &str) -> String {
     let chars = text.chars().collect::<Vec<_>>();
     let mut out = String::with_capacity(text.len());
     let mut in_ruby = false;

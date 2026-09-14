@@ -312,6 +312,20 @@ pub struct AozoraConfig {
     pub no_illust: bool,
     /// `TocVertical` INI key: 目次ページを縦書きにする。
     pub toc_vertical: bool,
+    /// `ChapterExclude` INI key: 目次ページ内の自動抽出見出しを除外する。
+    pub chapter_exclude: bool,
+    /// `ChapterUseNextLine` INI key: 見出しの次の行を章名に繋げる。
+    pub chapter_use_next_line: bool,
+    /// `ChapterName` INI key: 数字を含まない章名 (プロローグ等) を抽出する。
+    pub chapter_name_auto: bool,
+    /// `ChapterNumOnly` INI key: 数字のみの行を抽出する。
+    pub chapter_num_only: bool,
+    /// `ChapterNumTitle` INI key: 数字+区切り+見出しを抽出する。
+    pub chapter_num_title: bool,
+    /// `ChapterNumParen` INI key: 括弧内数字のみの行を抽出する。
+    pub chapter_num_paren: bool,
+    /// `ChapterNumParenTitle` INI key: 括弧内数字+見出しを抽出する。
+    pub chapter_num_paren_title: bool,
     /// 章検出 `ChapterSection`: 改ページ後の先頭行を章にする (Java: キー無記載で true)。
     pub chapter_section: bool,
     /// 章検出 `ChapterH/H1/H2/H3`: 見出し注記を章にする (Java 既定 false)。
@@ -471,6 +485,13 @@ impl Default for AozoraConfig {
             cover_page_toc: false,
             no_illust: false,
             toc_vertical: false,
+            chapter_exclude: false,
+            chapter_use_next_line: false,
+            chapter_name_auto: false,
+            chapter_num_only: false,
+            chapter_num_title: false,
+            chapter_num_paren: false,
+            chapter_num_paren_title: false,
             chapter_section: true,
             chapter_h: false,
             chapter_h1: false,
@@ -556,6 +577,13 @@ impl AozoraConfig {
         let cover_page_toc = ini.get_bool("CoverPageToc").unwrap_or(false);
         let no_illust = ini.get_bool("NoIllust").unwrap_or(false);
         let toc_vertical = ini.get_bool("TocVertical").unwrap_or(false);
+        let chapter_exclude = ini.get_bool("ChapterExclude").unwrap_or(false);
+        let chapter_use_next_line = ini.get_bool("ChapterUseNextLine").unwrap_or(false);
+        let chapter_name_auto = ini.get_bool("ChapterName").unwrap_or(false);
+        let chapter_num_only = ini.get_bool("ChapterNumOnly").unwrap_or(false);
+        let chapter_num_title = ini.get_bool("ChapterNumTitle").unwrap_or(false);
+        let chapter_num_paren = ini.get_bool("ChapterNumParen").unwrap_or(false);
+        let chapter_num_paren_title = ini.get_bool("ChapterNumParenTitle").unwrap_or(false);
         // Java: ChapterSection はキー無記載で true、値があれば "1" のみ true。
         let chapter_section = match ini.get("ChapterSection") {
             None => true,
@@ -604,6 +632,13 @@ impl AozoraConfig {
             cover_page_toc,
             no_illust,
             toc_vertical,
+            chapter_exclude,
+            chapter_use_next_line,
+            chapter_name_auto,
+            chapter_num_only,
+            chapter_num_title,
+            chapter_num_paren,
+            chapter_num_paren_title,
             chapter_section,
             chapter_h,
             chapter_h1,

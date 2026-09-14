@@ -204,6 +204,34 @@ pub struct ChapterRecord {
     /// is rendered. Only non-`page_break_chapter` records get a TOC
     /// fragment.
     pub anchor: Option<String>,
+    /// Java `ChapterLineInfo.lineNum` 相当の通し行番号
+    /// (`ChapterExclude` の前後判定に使う)。
+    pub source_line: usize,
+    /// Java `ChapterLineInfo.type` 相当 (`ChapterExclude` の判定に使う)。
+    pub kind: ChapterKind,
+    /// Java `ChapterLineInfo.emptyNext`: 直前の行が空行だったか。
+    pub empty_next: bool,
+}
+
+/// Java `ChapterLineInfo.TYPE_*` 相当。`is_pattern` が真の種別だけが
+/// `ChapterExclude` の対象になる。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChapterKind {
+    Title,
+    PageBreak,
+    ChukiH1,
+    ChukiH2,
+    ChukiH3,
+    ChapterName,
+    ChapterNum,
+    Pattern,
+}
+
+impl ChapterKind {
+    /// Java `ChapterLineInfo.isPattern`: 章名・数字・パターンでマッチした行。
+    fn is_pattern(self) -> bool {
+        matches!(self, Self::ChapterName | Self::ChapterNum | Self::Pattern)
+    }
 }
 
 pub fn aozora_text_to_xhtml_sections(input: &str) -> Result<Vec<String>, TextError> {
@@ -299,9 +327,36 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
     // Java pre-read: a heading note with nothing after it takes its name
     // from the next visible line only. Holds (level, page_break_chapter).
     let mut pending_heading: Option<(u8, bool)> = None;
+    // Java `addNextChapterName`: 章名に繋げる次の行番号。
+    let mut add_next_chapter_name: Option<usize> = None;
+    // Java `lastEmptyLine`: 直近の空行番号 (`emptyNext` 判定に使う)。
+    let mut last_empty_line: Option<usize> = None;
 
-    for line in visible_lines(input, config).iter() {
+    for (line_index, line) in visible_lines(input, config).iter().enumerate() {
         let line_start_section = section_index;
+
+        if crate::metadata::remove_ruby(line)
+            .trim_matches([' ', '　'])
+            .is_empty()
+        {
+            last_empty_line = Some(line_index);
+        }
+
+        // 見出しの次の行を章名に繋げる (Java `addNextChapterName`)
+        if add_next_chapter_name == Some(line_index)
+            && !chapter_lines
+                .iter()
+                .any(|(index, _)| *index == current.len())
+            && let Some(record) = chapters.last_mut()
+        {
+            let name = chapter_name(line, config);
+            if !name.is_empty() {
+                // Java ChapterLineInfo.joinChapterName: 全角空白で連結する
+                record.label.push('　');
+                record.label.push_str(&name);
+            }
+            add_next_chapter_name = None;
+        }
 
         // Resolve a deferred heading name before anything else on this line;
         // an empty name drops the pending chapter (Java clears the slot).
@@ -316,6 +371,9 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
                     level,
                     page_break_chapter: pbc,
                     anchor: None,
+                    source_line: line_index,
+                    kind: chapter_kind_for_level(level),
+                    empty_next: last_empty_line == Some(line_index.wrapping_sub(1)),
                 });
                 add_section_chapter = false;
             }
@@ -351,8 +409,42 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
                         level,
                         page_break_chapter: pbc,
                         anchor: None,
+                        source_line: line_index,
+                        kind: chapter_kind_for_level(level),
+                        empty_next: last_empty_line == Some(line_index.wrapping_sub(1)),
                     });
                 }
+            }
+        }
+
+        // Java `getBookInfo`: 見出し行パターン抽出。すでに章がある行は対象外。
+        if auto_chapter_enabled(config)
+            && !chapter_lines
+                .iter()
+                .any(|(index, _)| *index == current.len())
+        {
+            let plain = chapter_plain_line(line, config);
+            for level in auto_chapter_levels(&plain, config) {
+                chapter_lines.push((current.len(), chapters.len()));
+                chapters.push(ChapterRecord {
+                    section_index: line_start_section,
+                    line_index: current.len(),
+                    label: chapter_name(line, config),
+                    level,
+                    page_break_chapter: add_section_chapter,
+                    anchor: None,
+                    source_line: line_index,
+                    kind: if level <= 2 {
+                        ChapterKind::ChapterName
+                    } else {
+                        ChapterKind::ChapterNum
+                    },
+                    empty_next: last_empty_line == Some(line_index.wrapping_sub(1)),
+                });
+                if config.chapter_use_next_line {
+                    add_next_chapter_name = Some(line_index + 1);
+                }
+                add_section_chapter = false;
             }
         }
 
@@ -369,6 +461,9 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
                     level: 1,
                     page_break_chapter: true,
                     anchor: None,
+                    source_line: line_index,
+                    kind: ChapterKind::PageBreak,
+                    empty_next: last_empty_line == Some(line_index.wrapping_sub(1)),
                 });
                 add_section_chapter = false;
             } else if is_colophon_line(line) {
@@ -452,7 +547,57 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
             config,
         );
     }
+    // Java `BookInfo.excludeTocChapter`: 目次ページの自動抽出見出しを除外する。
+    if config.chapter_exclude {
+        exclude_toc_chapters(&mut chapters);
+    }
     Ok((sections, chapters))
+}
+
+/// Java `BookInfo.excludeTocChapter`: 前後 2 行に自動抽出見出しが並ぶ行を
+/// 目次から除外する (間は空行のみ許可)。
+fn exclude_toc_chapters(chapters: &mut Vec<ChapterRecord>) {
+    let is_pattern = |line: usize| {
+        chapters
+            .iter()
+            .find(|record| record.source_line == line)
+            .is_some_and(|record| record.kind.is_pattern())
+    };
+    let mut first = std::collections::BTreeSet::new();
+    for record in chapters.iter() {
+        if !record.kind.is_pattern() {
+            continue;
+        }
+        let line = record.source_line;
+        let previous = line.checked_sub(1).is_some_and(is_pattern)
+            || (record.empty_next && line.checked_sub(2).is_some_and(is_pattern));
+        let next = is_pattern(line + 1) || is_pattern(line + 2);
+        if previous && next {
+            first.insert(line);
+        }
+    }
+    let mut second = std::collections::BTreeSet::new();
+    for record in chapters.iter() {
+        let line = record.source_line;
+        if first.contains(&line) || !record.kind.is_pattern() {
+            continue;
+        }
+        let adjacent = line
+            .checked_sub(1)
+            .is_some_and(|value| first.contains(&value))
+            || (record.empty_next
+                && line
+                    .checked_sub(2)
+                    .is_some_and(|value| first.contains(&value)))
+            || first.contains(&(line + 1))
+            || first.contains(&(line + 2));
+        if adjacent {
+            second.insert(line);
+        }
+    }
+    chapters.retain(|record| {
+        !first.contains(&record.source_line) && !second.contains(&record.source_line)
+    });
 }
 
 /// Java: chukiFlagNoBr (chuki_tag.txt 4列目=1) のブロック注記を含むか。
@@ -575,6 +720,195 @@ fn append_section_line(
 /// Normalizes a chapter label the way the reference pre-read does:
 /// suffix notes keep their target text, ruby readings and note markers are
 /// removed, symbol runs collapse, and the label is truncated at 64 chars.
+/// Java `autoChapter`: 章の自動抽出が有効か。
+fn auto_chapter_enabled(config: &AozoraConfig) -> bool {
+    config.chapter_name_auto
+        || config.chapter_num_only
+        || config.chapter_num_title
+        || config.chapter_num_paren
+        || config.chapter_num_paren_title
+}
+
+/// Java `ChapterLineInfo.getLevel` の見出し種別 → レベル。
+fn chapter_kind_for_level(level: u8) -> ChapterKind {
+    match level {
+        1 => ChapterKind::ChukiH1,
+        2 => ChapterKind::ChukiH2,
+        _ => ChapterKind::ChukiH3,
+    }
+}
+
+const CHAPTER_NUM_CHARS: &str =
+    "0123456789０１２３４５６７８９〇一二三四五六七八九十百壱弐参肆伍ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ";
+const CHAPTER_SEPARATORS: [char; 8] = [' ', '　', '-', '－', '「', '―', '『', '（'];
+const CHAPTER_NAMES: [&str; 14] = [
+    "プロローグ",
+    "エピローグ",
+    "モノローグ",
+    "序",
+    "序章",
+    "序　章",
+    "終章",
+    "終　章",
+    "間章",
+    "間　章",
+    "転章",
+    "転　章",
+    "幕間",
+    "幕　間",
+];
+const CHAPTER_NUM_PREFIXES: [&str; 3] = ["第", "その", ""];
+const CHAPTER_NUM_SUFFIXES: [&[&str]; 3] =
+    [&["話", "章", "篇", "部", "節", "幕", "編"], &[""], &["章"]];
+const CHAPTER_NUM_PAREN_PREFIXES: [&str; 4] = ["（", "〈", "〔", "【"];
+const CHAPTER_NUM_PAREN_SUFFIXES: [&str; 4] = ["）", "〉", "〕", "】"];
+
+fn is_chapter_num_char(character: char) -> bool {
+    CHAPTER_NUM_CHARS.contains(character)
+}
+
+fn is_chapter_separator(character: char) -> bool {
+    CHAPTER_SEPARATORS.contains(&character)
+}
+
+/// Java `removeSpace(removeTag(noRubyLine))`: ルビ・注記・タグを落として
+/// 前後の空白を除去した行。
+fn chapter_plain_line(line: &str, _config: &AozoraConfig) -> String {
+    let no_ruby = crate::metadata::remove_ruby(line);
+    let mut out = String::with_capacity(no_ruby.len());
+    let chars = no_ruby.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '［' && chars.get(index + 1) == Some(&'＃') {
+            // ［＃…］ 注記を除去
+            let mut end = index + 2;
+            while end < chars.len() && chars[end] != '］' {
+                end += 1;
+            }
+            index = (end + 1).min(chars.len());
+            continue;
+        }
+        if chars[index] == '<' {
+            let mut end = index + 1;
+            while end < chars.len() && chars[end] != '>' {
+                end += 1;
+            }
+            index = (end + 1).min(chars.len());
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out.trim_matches([' ', '　']).to_owned()
+}
+
+/// Java `getBookInfo` の章自動抽出。ヒットした種別のレベルを返す
+/// (Java は 4 つの判定が独立なので 1 行で複数ヒットしうる)。
+fn auto_chapter_levels(line: &str, config: &AozoraConfig) -> Vec<u8> {
+    let chars = line.chars().collect::<Vec<_>>();
+    let length = chars.len();
+    let mut levels = Vec::new();
+
+    if config.chapter_name_auto {
+        for prefix in CHAPTER_NAMES {
+            let prefix_chars = prefix.chars().count();
+            if line.starts_with(prefix)
+                && (length == prefix_chars || is_chapter_separator(chars[prefix_chars]))
+            {
+                levels.push(1);
+                break;
+            }
+        }
+    }
+
+    if config.chapter_num_only || config.chapter_num_title {
+        for (index, prefix) in CHAPTER_NUM_PREFIXES.iter().enumerate() {
+            let prefix_chars = prefix.chars().count();
+            if !line.starts_with(prefix) {
+                continue;
+            }
+            let mut idx = prefix_chars;
+            while idx < length && is_chapter_num_char(chars[idx]) {
+                idx += 1;
+            }
+            if idx <= prefix_chars {
+                break;
+            }
+            for suffix in CHAPTER_NUM_SUFFIXES[index] {
+                let suffix_chars = suffix.chars().count();
+                if idx + suffix_chars > length {
+                    continue;
+                }
+                let after = idx + suffix_chars;
+                let matches = if suffix_chars == 0 {
+                    true
+                } else {
+                    chars[idx..after].iter().collect::<String>() == *suffix
+                };
+                if !matches {
+                    continue;
+                }
+                if config.chapter_num_only && length == after
+                    || config.chapter_num_title
+                        && length > after
+                        && is_chapter_separator(chars[after])
+                {
+                    levels.push(2);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Java: prefix 無しの数字のみ / 数字+区切り も別途判定する
+    if config.chapter_num_only || config.chapter_num_title {
+        let mut idx = 0;
+        while idx < length && is_chapter_num_char(chars[idx]) {
+            idx += 1;
+        }
+        if idx > 0
+            && (config.chapter_num_only && length == idx
+                || config.chapter_num_title && length > idx && is_chapter_separator(chars[idx]))
+        {
+            levels.push(2);
+        }
+    }
+
+    if config.chapter_num_paren || config.chapter_num_paren_title {
+        for (index, prefix) in CHAPTER_NUM_PAREN_PREFIXES.iter().enumerate() {
+            let prefix_chars = prefix.chars().count();
+            if !line.starts_with(prefix) {
+                continue;
+            }
+            let mut idx = prefix_chars;
+            while idx < length && is_chapter_num_char(chars[idx]) {
+                idx += 1;
+            }
+            if idx <= prefix_chars {
+                break;
+            }
+            let suffix = CHAPTER_NUM_PAREN_SUFFIXES[index];
+            let suffix_chars = suffix.chars().count();
+            if idx + suffix_chars > length
+                || chars[idx..idx + suffix_chars].iter().collect::<String>() != suffix
+            {
+                continue;
+            }
+            let after = idx + suffix_chars;
+            if config.chapter_num_paren && length == after
+                || config.chapter_num_paren_title
+                    && length > after
+                    && is_chapter_separator(chars[after])
+            {
+                levels.push(13);
+                break;
+            }
+        }
+    }
+
+    levels
+}
+
 fn chapter_name(line: &str, config: &AozoraConfig) -> String {
     let mut name = line.to_owned();
     // Suffix notes (［＃「X」…］) keep their target text.
