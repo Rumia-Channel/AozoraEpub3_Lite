@@ -264,12 +264,15 @@ pub fn collect_assets(
             continue;
         }
         image_index += 1;
-        let original_available = if input.is_archive() {
+        // 画像の解決はアーカイブ (ZIP/TXTZ/CBZ) と FileSource 入力では Input
+        // 経由、素の TXT 入力では入力ファイルの隣のファイルシステム経由。
+        let from_input = input.is_archive() || input.has_source();
+        let original_available = if from_input {
             input.resolve_image_path(entry, &reference).is_some()
         } else {
             base.join(reference.replace('\\', "/")).is_file()
         };
-        let source_path = if input.is_archive() {
+        let source_path = if from_input {
             input.resolve_image_path(entry, &reference)
         } else {
             resolve_fs_image_path(base, &reference)?
@@ -294,7 +297,7 @@ pub fn collect_assets(
             )
         })?;
         // 寸法と表紙判定のためだけに1枚だけ読み、バイトは保持しない
-        let data = if input.is_archive() {
+        let data = if from_input {
             input.read_image(&source_path)?.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,

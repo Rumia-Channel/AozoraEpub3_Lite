@@ -206,6 +206,13 @@ impl Input {
         self.archive
     }
 
+    /// True when the input was built from a streaming [`FileSource`]
+    /// ([`Input::from_source`]). Images and text are resolved through the
+    /// source instead of the filesystem, like an archive.
+    pub fn has_source(&self) -> bool {
+        self.source.is_some()
+    }
+
     /// Text entries in archive order (a single entry for plain TXT files).
     pub fn text_entries(&self) -> &[TextEntry] {
         &self.entries
