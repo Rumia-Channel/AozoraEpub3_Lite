@@ -1443,6 +1443,10 @@ fn parse_image_note(
     config: &AozoraConfig,
 ) -> Option<(usize, String)> {
     let (end, path, description, is_gaiji) = image_note_parts(chars, start)?;
+    // Java: NoIllust は挿絵を出力しない。外字画像と表紙は残る。
+    if config.no_illust && !is_gaiji {
+        return Some((end, String::new()));
+    }
     let source = format!("../image/{}", escape_html(&path));
     if is_gaiji {
         let replacement = config
@@ -1535,6 +1539,10 @@ fn parse_raw_image(chars: &[char], start: usize, config: &AozoraConfig) -> Optio
         return None;
     }
     let source = raw_tag_attribute(&raw, "src")?;
+    // Java: NoIllust は <img> 注記も出力しない。
+    if config.no_illust && !source.contains("#GAIJI#") {
+        return Some((end + 1, String::new()));
+    }
     if source.trim().is_empty() {
         // Java: src 空の img は画像取得失敗で出力されない
         return Some((end + 1, String::new()));

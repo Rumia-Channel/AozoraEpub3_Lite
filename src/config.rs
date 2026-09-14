@@ -308,6 +308,8 @@ pub struct AozoraConfig {
     pub cover_page: bool,
     /// `CoverPageToc` INI key: 目次に表紙への項目を追加する。
     pub cover_page_toc: bool,
+    /// `NoIllust` INI key: 挿絵を出力しない (表紙と外字画像は残る)。
+    pub no_illust: bool,
     /// 章検出 `ChapterSection`: 改ページ後の先頭行を章にする (Java: キー無記載で true)。
     pub chapter_section: bool,
     /// 章検出 `ChapterH/H1/H2/H3`: 見出し注記を章にする (Java 既定 false)。
@@ -465,6 +467,7 @@ impl Default for AozoraConfig {
             title_toc: true,
             cover_page: false,
             cover_page_toc: false,
+            no_illust: false,
             chapter_section: true,
             chapter_h: false,
             chapter_h1: false,
@@ -548,6 +551,7 @@ impl AozoraConfig {
         let title_toc = ini.get_bool("TitleToc").unwrap_or(false);
         let cover_page = ini.get_bool("CoverPage").unwrap_or(false);
         let cover_page_toc = ini.get_bool("CoverPageToc").unwrap_or(false);
+        let no_illust = ini.get_bool("NoIllust").unwrap_or(false);
         // Java: ChapterSection はキー無記載で true、値があれば "1" のみ true。
         let chapter_section = match ini.get("ChapterSection") {
             None => true,
@@ -594,6 +598,7 @@ impl AozoraConfig {
             title_toc,
             cover_page,
             cover_page_toc,
+            no_illust,
             chapter_section,
             chapter_h,
             chapter_h1,

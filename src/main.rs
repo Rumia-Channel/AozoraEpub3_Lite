@@ -233,7 +233,10 @@ fn convert_input(
         let title_page_selected =
             config.title_page_write && matches!(config.title_page_type, 1 | 2);
         let cover_setting = options.cover.as_deref();
-        let (assets, cover) = collect_assets(&input, entry, &text, cover_setting)?;
+        // NoIllust では本文から消えた挿絵を EPUB に格納しない
+        let body_filter = config.no_illust.then(|| sections.concat());
+        let (assets, cover) =
+            collect_assets(&input, entry, &text, cover_setting, body_filter.as_deref())?;
         // 装飾を書き換え前に実行: 書き換え前の src（../image/{参照名}）から
         // 参照単位の available（拡張子違いの解決有無）を判定する。Java の
         // getImageWidthRatio(srcFilePath) は元の参照名で引けなければ ratio=0 → fit。
@@ -727,11 +730,14 @@ struct CollectedAsset {
 /// bytes are read again, one image at a time, when the EPUB is written via
 /// [`EpubBook::write_to_with`]. Returns the assets and the EPUB asset path
 /// of the cover, if any.
+/// `body` が `Some` のときは、変換後の本文に残っている参照だけを集める
+/// (Java `NoIllust` は挿絵を出力しないため、EPUB にも格納されない)。
 fn collect_assets(
     input: &Input,
     entry: &TextEntry,
     text: &str,
     cover: Option<&str>,
+    body: Option<&str>,
 ) -> Result<(Vec<CollectedAsset>, Option<String>), Box<dyn Error>> {
     let base = input.path().parent().unwrap_or_else(|| Path::new("."));
     let mut assets: Vec<CollectedAsset> = Vec::new();
@@ -739,6 +745,11 @@ fn collect_assets(
     let mut image_index = 0usize;
 
     for reference in image_reference_occurrences(text) {
+        if let Some(body) = body
+            && !body.contains(&format!("../image/{}", escape_html(&reference)))
+        {
+            continue;
+        }
         image_index += 1;
         let original_available = if input.is_archive() {
             input.resolve_image_path(entry, &reference).is_some()
