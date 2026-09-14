@@ -300,7 +300,7 @@ book.write_to_stream_with(response_body, |epub_path| {
 - [hmdev/AozoraEpub3](https://github.com/hmdev/AozoraEpub3)
 - [kyukyunyorituryo/AozoraEpub3](https://github.com/kyukyunyorituryo/AozoraEpub3)
 
-ローカル変換の出力について、21 件のテストフィクスチャのうち 17 件が Java 版と byte 一致しています。残る 4 件は、表題前の表紙画像のバッファ処理、タイトル抽出時の記号の扱い、画像のみ EPUB の OPF です。
+ローカル変換の出力について、21 件のテストフィクスチャのうち 18 件が Java 版と byte 一致しています。残る 3 件は、表題前の表紙画像のバッファ処理、注記を含む行のエスケープ挙動（Java 側の退行）、画像のみ EPUB の OPF です。
 
 Java 版で、章名中の `※` の並びによって行が欠落するケースがあります。また `＜＜` / `＞＞` がルビとして解釈され行が欠落するケースがあります。これらの挙動は AozoraEpub3_Lite では意図的に再現していません。前者の詳細は [kyukyunyorituryo/AozoraEpub3#34](https://github.com/kyukyunyorituryo/AozoraEpub3/issues/34) を参照してください。
 
