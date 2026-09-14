@@ -56,7 +56,7 @@ struct ImageOptions {
 }
 
 impl ImageOptions {
-    fn from_ini(ini: &IniSettings, cover: bool) -> Self {
+    fn from_ini(ini: &IniSettings, cover: bool, rotate: i32) -> Self {
         let display_width = get_u32(ini, "DispW", 600);
         let display_height = get_u32(ini, "DispH", 800);
         let max_width = if cover {
@@ -73,15 +73,9 @@ impl ImageOptions {
         } else {
             0
         };
-        let rotate = if cover {
-            0
-        } else {
-            match ini.get("RotateImage").map(str::trim) {
-                Some("1") => 90,
-                Some("2") => -90,
-                _ => 0,
-            }
-        };
+        // Java は表紙の rotateAngle を常に 0 にする。適用条件は呼び出し側
+        // (main.rs) が Java と同じ判定で決める。
+        let rotate = if cover { 0 } else { rotate };
         let jpeg_quality = get_u32(ini, "JpegQuality", 80).clamp(1, 100) as u8;
         let gamma = if ini.get_bool("Gamma").unwrap_or(false) {
             ini.get("GammaValue")
@@ -169,15 +163,19 @@ pub fn dimensions(data: &[u8], media_type: &str) -> Option<(u32, u32)> {
     reader.into_dimensions().ok()
 }
 
+/// `rotate` は Java の `imageInfo.rotateAngle` 相当。呼び出し側が
+/// `RotateImage` と画像の向き・画面の向きから決める (Java も同じ条件でしか
+/// 設定しない)。
 pub fn process(
     data: &[u8],
     media_type: &str,
     ini: &IniSettings,
     cover: bool,
+    rotate: i32,
 ) -> Result<Vec<u8>, ImageError> {
     let format = image_format(media_type)
         .ok_or_else(|| ImageError::UnsupportedFormat(media_type.to_owned()))?;
-    let options = ImageOptions::from_ini(ini, cover);
+    let options = ImageOptions::from_ini(ini, cover, rotate);
     if !options.changes_pixels() {
         return Ok(data.to_vec());
     }
@@ -830,14 +828,18 @@ mod tests {
         let source = png(8, 6, [255, 255, 255, 255]);
         let ini =
             IniSettings::parse("ResizeW=\nResizeH=\nRotateImage=0\nGamma=\nAutoMargin=\n").unwrap();
-        assert_eq!(process(&source, "image/png", &ini, false).unwrap(), source);
+        assert_eq!(
+            process(&source, "image/png", &ini, false, 0).unwrap(),
+            source
+        );
     }
 
     #[test]
     fn resizes_and_rotates_using_java_dimensions() {
         let source = png(8, 4, [0, 0, 0, 255]);
         let ini = IniSettings::parse("ResizeW=1\nResizeNumW=4\nRotateImage=1\n").unwrap();
-        let output = process(&source, "image/png", &ini, false).unwrap();
+        // 回転は呼び出し側が Java と同じ条件で決める
+        let output = process(&source, "image/png", &ini, false, 90).unwrap();
         assert_eq!(dimensions(&output, "image/png"), Some((2, 4)));
     }
 
@@ -845,7 +847,7 @@ mod tests {
     fn applies_java_gamma_table() {
         let source = png(1, 1, [128, 64, 0, 255]);
         let ini = IniSettings::parse("Gamma=1\nGammaValue=2\n").unwrap();
-        let output = process(&source, "image/png", &ini, false).unwrap();
+        let output = process(&source, "image/png", &ini, false, 0).unwrap();
         let decoded = image::load_from_memory(&output).unwrap().to_rgba8();
         assert_eq!(decoded.get_pixel(0, 0).0, [181, 128, 0, 255]);
     }
@@ -866,7 +868,7 @@ mod tests {
         .unwrap();
         let margins = plain_margin(
             &DynamicImage::ImageRgba8(image),
-            ImageOptions::from_ini(&ini, false),
+            ImageOptions::from_ini(&ini, false, 0),
         )
         .unwrap();
         // 上端は最初の非空白行 (40 行目) 付近まで詰まる。修正前は幅の 1% (2) のままだった。

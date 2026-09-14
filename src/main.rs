@@ -235,12 +235,12 @@ fn convert_input(
         let cover_setting = options.cover.as_deref();
         // NoIllust では本文から消えた挿絵を EPUB に格納しない
         let body_filter = config.no_illust.then(|| sections.concat());
-        let (assets, cover) =
+        let (mut assets, cover) =
             collect_assets(&input, entry, &text, cover_setting, body_filter.as_deref())?;
         // 装飾を書き換え前に実行: 書き換え前の src（../image/{参照名}）から
         // 参照単位の available（拡張子違いの解決有無）を判定する。Java の
         // getImageWidthRatio(srcFilePath) は元の参照名で引けなければ ratio=0 → fit。
-        decorate_image_tags(&mut sections, &assets, config);
+        decorate_image_tags(&mut sections, &mut assets, config, input.is_archive());
         for collected in &assets {
             for reference in &collected.references {
                 if collected.resolved != *reference {
@@ -404,6 +404,7 @@ fn convert_input(
                 &collected.asset.media_type,
                 &config.ini,
                 collected.is_cover,
+                collected.rotate,
             )
             .ok()
         };
@@ -526,7 +527,13 @@ fn convert_image_only(
         })?;
         // Java: 出力拡張子は常に .jpg (.jpeg の jpeg を jpg に置換)
         let output_name = format!("{:04}.{}", index + 1, extension.replace("jpeg", "jpg"));
-        let processed_data = process_image(&data, media_type, &config.ini, index == 0)?;
+        // Java Epub3ImageWriter: 画像のみの EPUB は全ページが単ページ扱いなので
+        // 単ページ画像の条件で回転を決める。
+        let source_dimensions = image_dimensions(&data, media_type);
+        let rotate = source_dimensions
+            .map(|dimensions| rotate_for_image(config, dimensions, ImagePageType::Page, true))
+            .unwrap_or(0);
+        let processed_data = process_image(&data, media_type, &config.ini, index == 0, rotate)?;
         let dimensions = image_dimensions(&processed_data, media_type);
         let fragment = dimensions
             .map(|dimensions| svg_image_fragment(&output_name, dimensions))
@@ -545,6 +552,7 @@ fn convert_image_only(
             resolved: output_name,
             dimensions,
             is_cover: index == 0,
+            rotate,
         });
     }
     if assets.is_empty() {
@@ -561,7 +569,7 @@ fn convert_image_only(
         None,
         options.language.as_deref(),
     );
-    decorate_image_tags(&mut sections, &assets, config);
+    decorate_image_tags(&mut sections, &mut assets, config, false);
     let output = output_path(
         input_path,
         options.dst.as_deref().map(Path::new),
@@ -735,6 +743,9 @@ struct CollectedAsset {
     /// Whether this image is used as the cover; cover images are processed
     /// with the cover flag when the bytes are read at write time.
     is_cover: bool,
+    /// Java `imageInfo.rotateAngle`: 回転角 (度)。Java は単ページ画像と
+    /// 本文中の挿絵で条件を分けて設定する。
+    rotate: i32,
 }
 
 /// Collects EPUB assets for all image references in the text (plus the
@@ -821,6 +832,7 @@ fn collect_assets(
             resolved: output_name,
             dimensions,
             is_cover,
+            rotate: 0,
         });
     }
 
@@ -843,7 +855,11 @@ fn collect_assets(
             })?;
             let data = fs::read(&source)?;
             let dimensions = image_dimensions(&data, media_type);
-            let output_name = format!("{:04}.{extension}", image_index + 1);
+            let output_name = format!(
+                "{:04}.{}",
+                image_index + 1,
+                extension.replace("jpeg", "jpg")
+            );
             let epub_path = format!("image/{output_name}");
             assets.push(CollectedAsset {
                 asset: EpubAsset::lazy(epub_path.clone(), media_type),
@@ -853,6 +869,7 @@ fn collect_assets(
                 resolved: output_name,
                 dimensions,
                 is_cover: true,
+                rotate: 0,
             });
             cover_asset = Some(epub_path);
         }
@@ -873,7 +890,11 @@ fn collect_assets(
                 })?;
                 let data = fs::read(&source)?;
                 let dimensions = image_dimensions(&data, media_type);
-                let output_name = format!("{:04}.{extension}", image_index + 1);
+                let output_name = format!(
+                    "{:04}.{}",
+                    image_index + 1,
+                    extension.replace("jpeg", "jpg")
+                );
                 let epub_path = format!("image/{output_name}");
                 assets.push(CollectedAsset {
                     asset: EpubAsset::lazy(epub_path.clone(), media_type),
@@ -883,6 +904,7 @@ fn collect_assets(
                     resolved: output_name,
                     dimensions,
                     is_cover: true,
+                    rotate: 0,
                 });
                 cover_asset = Some(epub_path);
             } else {
@@ -1229,6 +1251,63 @@ fn image_setting_bool(config: &AozoraConfig, key: &str, default: bool) -> bool {
     config.ini.get_bool(key).unwrap_or(default)
 }
 
+/// Java `Epub3Writer.getImagePageType` (単ページ画像) と `writeArchiveImage`
+/// (本文中の挿絵) の条件で回転角を決める。表紙は Java が常に 0 にする。
+fn rotate_for_image(
+    config: &AozoraConfig,
+    dimensions: ImageDimensions,
+    page_type: ImagePageType,
+    archive_images: bool,
+) -> i32 {
+    let Some(angle) = image_rotation(config) else {
+        return 0;
+    };
+    let display_width = image_setting_f32(config, "DispW", 600.0);
+    let display_height = image_setting_f32(config, "DispH", 800.0);
+    if display_width <= 0.0
+        || display_height <= 0.0
+        || dimensions.width == 0
+        || dimensions.height == 0
+    {
+        return 0;
+    }
+    let scale = image_setting_f32(config, "ImageScale", 1.0);
+    let scaled_width = dimensions.width as f32 * scale;
+    let scaled_height = dimensions.height as f32 * scale;
+    // 単ページ画像: 画面より横長で 110% 以上 / 画面より縦長で 110% 以上
+    if page_type.is_page() {
+        if scaled_width / scaled_height > display_width / display_height {
+            return if display_width < display_height && scaled_width > scaled_height * 1.1 {
+                angle
+            } else {
+                0
+            };
+        }
+        return if display_width > display_height && scaled_width * 1.1 < scaled_height {
+            angle
+        } else {
+            0
+        };
+    }
+    // 本文中の挿絵: Java writeArchiveImage はアーカイブ入力のときだけ回転する
+    if !archive_images {
+        return 0;
+    }
+    let ratio = f64::from(dimensions.width) / f64::from(dimensions.height);
+    let display = f64::from(display_width) / f64::from(display_height);
+    if ratio >= display {
+        if display_width < display_height && 1.0 / ratio < display {
+            angle
+        } else {
+            0
+        }
+    } else if display_width > display_height && 1.0 / ratio > display {
+        angle
+    } else {
+        0
+    }
+}
+
 fn image_rotation(config: &AozoraConfig) -> Option<i32> {
     match config.ini.get("RotateImage").map(str::trim) {
         Some("1") => Some(90),
@@ -1456,7 +1535,10 @@ fn split_image_page_sections(
                 output.push(prefix);
                 output.push(unwrap_image_paragraph(line));
             } else {
-                output.push(format!("{prefix}{}", unwrap_image_paragraph(line)));
+                // 直前が空段落だけなら単ページ画像セクションに持ち込まない。
+                // Java は改ページ前の空行を出力しないため、ここで混ぜると
+                // <body class="p-image"> の判定が崩れる。
+                output.push(unwrap_image_paragraph(line));
             }
             current.clear();
         } else {
@@ -1576,38 +1658,35 @@ fn escape_image_alt(value: &str) -> String {
     escape_html(&decoded).replace('×', "&times;")
 }
 
+/// Java の画像タグ (`chuki_tag.txt` の 画像 / 画像幅 / 画像浮 等) は
+/// width / height 属性を持たないため、ここでも出力しない。
 fn render_image_tag(
     source: &str,
     alt: &str,
     class_name: Option<&str>,
     style: Option<&str>,
-    dimensions: Option<ImageDimensions>,
 ) -> String {
     let class = class_name
         .map(|value| format!(" class=\"{value}\""))
-        .unwrap_or_default();
-    let dimensions = dimensions
-        .map(|value| format!(" width=\"{}\" height=\"{}\"", value.width, value.height))
         .unwrap_or_default();
     let style = style
         .filter(|value| !value.is_empty())
         .map(|value| format!(" style=\"{value}\""))
         .unwrap_or_default();
     format!(
-        "<img{class}{dimensions}{style} src=\"{}\" alt=\"{alt}\"/>",
+        "<img{class}{style} src=\"{}\" alt=\"{alt}\"/>",
         escape_html(source)
     )
 }
 
 fn decorate_image_tags(
     sections: &mut [String],
-    collected_assets: &[CollectedAsset],
+    assets: &mut [CollectedAsset],
     config: &AozoraConfig,
+    // アーカイブ入力か。Java は writeArchiveImage でしか本文中の挿絵を
+    // 回転させない (.txt 入力の画像はファイルシステムから無回転で書かれる)。
+    archive_images: bool,
 ) {
-    let display_width = image_setting_f32(config, "DispW", 600.0);
-    let display_height = image_setting_f32(config, "DispH", 800.0);
-    let rotation = image_rotation(config);
-
     for section in sections.iter_mut() {
         let original = section.clone();
         let mut replacements: Vec<(usize, usize, String)> = Vec::new();
@@ -1624,7 +1703,7 @@ fn decorate_image_tags(
                 continue;
             };
             let reference_name = source.strip_prefix("../image/").unwrap_or(source);
-            let Some(collected) = collected_assets
+            let Some(collected) = assets
                 .iter()
                 .find(|collected| collected.references.iter().any(|r| r == reference_name))
             else {
@@ -1654,13 +1733,26 @@ fn decorate_image_tags(
             let has_open_block = has_open_block_container(&original[..start]);
             let page_type =
                 image_page_type(dimensions, config, has_caption, usize::from(has_open_block));
+            let rotate = if source_missing {
+                0
+            } else {
+                rotate_for_image(config, dimensions, page_type, archive_images)
+            };
+            // Java は ImageInfo 単位で rotateAngle を持つ。同じ画像が複数回
+            // 参照されていれば最後の判定が使われる。
+            if let Some(asset) = assets
+                .iter_mut()
+                .find(|asset| asset.references.iter().any(|r| r == reference_name))
+            {
+                asset.rotate = rotate;
+            }
             let ratio = if page_type.is_page() {
                 0.0
             } else if source_missing {
                 // Java: 元参照が無い/未知拡張子なら getImageInfo が null → ratio 0 → fit
                 0.0
             } else {
-                image_width_ratio(dimensions, config, has_caption)
+                image_width_ratio(dimensions, config, has_caption, rotate)
             };
             // Java は `style="width:%s%%"` に double を渡すため Double.toString と同じ
             // 表記 (70 → "70.0") になる。Rust の `{:?}` が同じ書式。
@@ -1686,7 +1778,7 @@ fn decorate_image_tags(
                 replacements.push((
                     start,
                     end,
-                    render_image_tag(source, &alt, Some(class_name), None, None),
+                    render_image_tag(source, &alt, Some(class_name), None),
                 ));
                 cursor = end;
                 continue;
@@ -1699,19 +1791,10 @@ fn decorate_image_tags(
                 page_type.is_page() && image_setting_bool(config, "ImageFloatPage", false);
             let block_float =
                 !page_type.is_page() && image_setting_bool(config, "ImageFloatBlock", false);
-            let (wrapper_replacement, image_class, image_style, image_dimensions) = if page_float {
-                (
-                    Some("<span class=\"img fpage\">".to_owned()),
-                    None,
-                    None,
-                    None,
-                )
+            let (wrapper_replacement, image_class, image_style) = if page_float {
+                (Some("<span class=\"img fpage\">".to_owned()), None, None)
             } else if page_type.is_page() {
-                let style = None;
-                let dimensions = rotation
-                    .filter(|_| should_rotate(dimensions, display_width, display_height))
-                    .map(|_| dimensions);
-                (Some("<span>".to_owned()), Some("fit"), style, dimensions)
+                (Some("<span>".to_owned()), Some("fit"), None)
             } else if let Some((float_type, _)) = float_type {
                 let class = if float_type == 1 { "ft" } else { "fb" };
                 if ratio > 0.0 {
@@ -1721,7 +1804,6 @@ fn decorate_image_tags(
                         )),
                         None,
                         Some("width:100%".to_owned()),
-                        None,
                     )
                 } else {
                     let class = if float_type == 1 {
@@ -1729,12 +1811,7 @@ fn decorate_image_tags(
                     } else {
                         "float-end m-start-1em"
                     };
-                    (
-                        Some(format!("<span class=\"{class}\">")),
-                        Some("fit"),
-                        None,
-                        None,
-                    )
+                    (Some(format!("<span class=\"{class}\">")), Some("fit"), None)
                 }
             } else if block_float {
                 if ratio > 0.0 {
@@ -1744,13 +1821,11 @@ fn decorate_image_tags(
                         )),
                         None,
                         Some("width:100%".to_owned()),
-                        None,
                     )
                 } else {
                     (
                         Some("<span class=\"img fblk\">".to_owned()),
                         Some("fit"),
-                        None,
                         None,
                     )
                 }
@@ -1761,22 +1836,11 @@ fn decorate_image_tags(
                     )),
                     None,
                     Some("width:100%".to_owned()),
-                    None,
                 )
             } else {
-                (None, Some("fit"), None, None)
+                (None, Some("fit"), None)
             };
-            let angle = rotation
-                .filter(|_| page_type.is_page())
-                .filter(|_| should_rotate(dimensions, display_width, display_height));
-            let image_style = if let Some(angle) = angle {
-                Some(format!(
-                    "{}transform: rotate({angle}deg); transform-origin: center;",
-                    image_style.as_deref().unwrap_or_default()
-                ))
-            } else {
-                image_style
-            };
+
             if let Some((span_start, span_end)) = wrapper
                 && let Some(wrapper_replacement) = wrapper_replacement
             {
@@ -1785,13 +1849,7 @@ fn decorate_image_tags(
             replacements.push((
                 start,
                 end,
-                render_image_tag(
-                    source,
-                    &alt,
-                    image_class,
-                    image_style.as_deref(),
-                    image_dimensions,
-                ),
+                render_image_tag(source, &alt, image_class, image_style.as_deref()),
             ));
             cursor = end;
         }
@@ -1830,7 +1888,12 @@ fn image_orientation(dimensions: ImageDimensions, config: &AozoraConfig) -> i32 
     }
 }
 
-fn image_width_ratio(dimensions: ImageDimensions, config: &AozoraConfig, has_caption: bool) -> f64 {
+fn image_width_ratio(
+    dimensions: ImageDimensions,
+    config: &AozoraConfig,
+    has_caption: bool,
+    rotate: i32,
+) -> f64 {
     let scale = image_setting_f32(config, "ImageScale", 1.0);
     if scale == 0.0 {
         return 0.0;
@@ -1843,9 +1906,15 @@ fn image_width_ratio(dimensions: ImageDimensions, config: &AozoraConfig, has_cap
     if display_width <= 0.0 || display_height <= 0.0 {
         return 0.0;
     }
+    // Java getImageWidthRatio: 回転時は縦横を入れ替えて計算する
+    let (image_width, image_height) = if rotate == 90 || rotate == -90 {
+        (dimensions.height, dimensions.width)
+    } else {
+        (dimensions.width, dimensions.height)
+    };
     // Java は double で (double)imgW/dispW*scale*100 の順に計算する
-    let mut width_ratio = dimensions.width as f64 / display_width as f64 * scale as f64 * 100.0;
-    let height_ratio = dimensions.height as f64 / display_height as f64 * scale as f64 * 100.0;
+    let mut width_ratio = image_width as f64 / display_width as f64 * scale as f64 * 100.0;
+    let height_ratio = image_height as f64 / display_height as f64 * scale as f64 * 100.0;
     if has_caption && height_ratio >= 90.0 {
         width_ratio *= 100.0 / height_ratio * 0.9;
     } else if height_ratio >= 100.0 {
@@ -2249,6 +2318,7 @@ mod tests {
             resolved: reference,
             dimensions,
             is_cover: false,
+            rotate: 0,
         }
     }
 
@@ -2575,10 +2645,13 @@ mod tests {
         );
         let mut sections =
             vec!["<p><img class=\"fit\" src=\"../image/fig.png\" alt=\"図\"/></p>".to_owned()];
-        decorate_image_tags(&mut sections, &[collected(asset)], &config);
-        assert!(sections[0].contains("width=\"1600\" height=\"900\""));
-
-        assert!(sections[0].contains("transform: rotate(90deg)"));
+        let mut assets = vec![collected(asset)];
+        decorate_image_tags(&mut sections, &mut assets, &config, false);
+        // Java の画像タグは width/height 属性も CSS 回転も持たない
+        assert!(!sections[0].contains("width=\"1600\""));
+        assert!(!sections[0].contains("transform:"));
+        // 回転は画素に対して行われる (Java imageInfo.rotateAngle)
+        assert_eq!(assets[0].rotate, 90);
     }
 
     #[test]
@@ -2596,7 +2669,7 @@ mod tests {
             "<p><span><img class=\"fit\" src=\"../image/fig.png\" alt=\"図\"/></span></p>"
                 .to_owned(),
         ];
-        decorate_image_tags(&mut sections, &[collected(asset)], &config);
+        decorate_image_tags(&mut sections, &mut [collected(asset)], &config, false);
         assert!(sections[0].contains("<span class=\"img\" style=\"width:76.5%\">"));
         assert!(sections[0].contains("<img style=\"width:100%\""));
         assert!(!sections[0].contains("width=\"459\""));
@@ -2623,6 +2696,7 @@ mod tests {
             available: vec![false],
             source: "img/fig.jpg".to_owned(),
             resolved: "fig.png".to_owned(),
+            rotate: 0,
         };
         let config = AozoraConfig::from_ini(
             IniSettings::parse("DispW=600\nDispH=800\nSinglePageWidth=1000\nImageScale=1\n")
@@ -2632,7 +2706,7 @@ mod tests {
             "<p><span><img class=\"fit\" src=\"../image/img/fig.jpg\" alt=\"図\"/></span></p>"
                 .to_owned(),
         ];
-        decorate_image_tags(&mut sections, &[collected], &config);
+        decorate_image_tags(&mut sections, &mut [collected], &config, false);
         assert!(sections[0].contains("class=\"fit\""));
         assert!(!sections[0].contains("width:"));
     }
@@ -2654,7 +2728,7 @@ mod tests {
             "<p><span><img class=\"fit\" src=\"../image/float.png\" alt=\"\"/></span></p>"
                 .to_owned(),
         ];
-        decorate_image_tags(&mut sections, &[collected(asset)], &config);
+        decorate_image_tags(&mut sections, &mut [collected(asset)], &config, false);
         assert!(sections[0].contains("<span class=\"img ft\""));
         assert!(sections[0].contains("style=\"width:83.33333333333334%\""));
     }
@@ -2676,7 +2750,7 @@ mod tests {
             "<p><span><img class=\"fit\" src=\"../image/page.png\" alt=\"\"/></span></p>"
                 .to_owned(),
         ];
-        decorate_image_tags(&mut sections, &[collected(asset)], &config);
+        decorate_image_tags(&mut sections, &mut [collected(asset)], &config, false);
         assert!(sections[0].contains("<img class=\"fit\""));
         assert!(!sections[0].contains("height:"));
     }
