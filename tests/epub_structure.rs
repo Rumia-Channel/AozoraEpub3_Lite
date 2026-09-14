@@ -234,13 +234,37 @@ fn writes_cover_document_and_cover_manifest_property() {
     assert!(package.contains("id=\"cover-page\" href=\"xhtml/cover.xhtml\""));
     assert!(package.contains("<itemref linear=\"yes\" idref=\"cover-page\""));
 
+    // manifest の href は実在する ZIP エントリでなければならない。
+    let names = archive.file_names().map(str::to_owned).collect::<Vec<_>>();
+    for href in manifest_hrefs(&package) {
+        assert!(
+            names.iter().any(|name| *name == format!("item/{href}")),
+            "manifest href {href} has no archive entry"
+        );
+    }
+
     let mut cover = String::new();
     archive
-        .by_name("item/cover.xhtml")
+        .by_name("item/xhtml/cover.xhtml")
         .unwrap()
         .read_to_string(&mut cover)
         .unwrap();
-    assert!(cover.contains("<img src=\"image/cover.jpg\""));
+    assert!(cover.contains("href=\"../style/fixed-layout-jp.css\""));
+    assert!(cover.contains("<body epub:type=\"cover\">"));
+    assert!(cover.contains("xlink:href=\"../image/cover.jpg\""));
+}
+
+/// `<item ... href="..."/>` として宣言されたリソースパスを取り出す。
+fn manifest_hrefs(package: &str) -> Vec<String> {
+    package
+        .match_indices("href=\"")
+        .filter_map(|(index, _)| {
+            let rest = &package[index + "href=\"".len()..];
+            let end = rest.find('"')?;
+            let href = &rest[..end];
+            (!href.starts_with("http")).then(|| href.to_owned())
+        })
+        .collect()
 }
 
 #[test]

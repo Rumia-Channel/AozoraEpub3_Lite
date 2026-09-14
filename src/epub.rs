@@ -303,6 +303,8 @@ pub struct EpubBook {
     pub sections: Vec<EpubSection>,
     pub assets: Vec<EpubAsset>,
     pub cover_asset: Option<String>,
+    /// 表紙画像の元寸法。Java `cover.vm` の viewport / viewBox に使う。
+    pub cover_dimensions: Option<(u32, u32)>,
     pub chapters: Vec<NavChapter>,
     vertical: bool,
     toc_vertical: bool,
@@ -347,6 +349,7 @@ impl EpubBook {
             sections,
             assets: Vec::new(),
             cover_asset: None,
+            cover_dimensions: None,
             chapters: Vec::new(),
             vertical: true,
             toc_vertical: false,
@@ -372,6 +375,13 @@ impl EpubBook {
 
     pub fn with_cover_asset(mut self, path: impl Into<String>) -> Self {
         self.cover_asset = Some(path.into());
+        self
+    }
+
+    /// 表紙画像の元寸法。Java `cover.vm` の `<meta name="viewport">` と
+    /// `<svg viewBox>` に出力される。
+    pub fn with_cover_dimensions(mut self, dimensions: Option<(u32, u32)>) -> Self {
+        self.cover_dimensions = dimensions;
         self
     }
 
@@ -578,8 +588,14 @@ fn write_epub_body<W: Write + Seek>(
     {
         write_entry(
             archive,
-            "item/cover.xhtml",
-            render_cover(&book.metadata, cover_asset, book.kindle).as_bytes(),
+            "item/xhtml/cover.xhtml",
+            render_cover(
+                &book.metadata,
+                cover_asset,
+                book.cover_dimensions,
+                book.kindle,
+            )
+            .as_bytes(),
             CompressionMethod::Deflated,
         )?;
     }
