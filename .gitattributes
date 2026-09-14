@@ -1,0 +1,23 @@
+# 改行コードはリポジトリ側で LF に固定する。
+#
+# Java 版 AozoraEpub3 の出力は「セクション xhtml と CSS が LF、nav.xhtml と
+# standard.opf / toc.ncx が CRLF」で、Lite は raw 文字列リテラル
+# (src/epub_render.rs ほか) と include_str! した資産をそのまま EPUB に入れる。
+# Windows で core.autocrlf=true のまま作業すると作業ツリーが CRLF になり、
+# 同じコミットでも Windows ビルドと Linux ビルドで EPUB のバイト列が変わる。
+# CRLF が必要な出力はコード側で \r\n を明示する。
+* text=auto eol=lf
+
+# 画像・フォントはバイナリ扱い
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.epub binary
+*.mobi binary
+*.zip binary

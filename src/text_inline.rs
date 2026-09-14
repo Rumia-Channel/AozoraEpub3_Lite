@@ -2,8 +2,99 @@ use super::{AozoraConfig, heading_spec};
 const WRC_BREAK_MARKER: char = '\u{0001}';
 const EMPTY_NOTE_KIND: u8 = 0xFF;
 
+/// Java `convertEscapedText` がフェーズ1バッファに出力する 1 文字の長さ。
+/// `&` `&amp;` / `<` `&lt;` / `>` `&gt;` は実体参照に展開され、BMP 外の文字は
+/// Java の char[] ではサロゲートペアの 2 になる。
+fn phase1_char_len(character: char) -> usize {
+    match character {
+        '&' => 5,
+        '<' | '>' => 4,
+        _ => character.len_utf16(),
+    }
+}
+
+/// 素の本文（エスケープ対象）のフェーズ1バッファ上の長さ。
+pub(super) fn phase1_text_len(text: &str) -> usize {
+    text.chars().map(phase1_char_len).sum()
+}
+
+/// `phase1_text_len` の文字スライス版（アロケーションなし）。
+fn phase1_slice_len(chars: &[char]) -> usize {
+    chars.iter().copied().map(phase1_char_len).sum()
+}
+
+/// タグ・置換文字列（すでにエスケープ済み）のフェーズ1バッファ上の長さ。
+pub(super) fn phase1_markup_len(text: &str) -> usize {
+    text.chars().map(char::len_utf16).sum()
+}
+
+/// Java `convertReplacedChar` を呼ぶときの文脈。Java は行全体を 1 つの
+/// フェーズ1バッファで処理するため、行内の一部だけを変換する入れ子呼び出し
+/// （見出し・字下げブロック・ルビ基底）でも「バッファ上の位置」と「直前の
+/// 文字」を引き継ぐ必要がある。
+#[derive(Clone, Copy, Default)]
+struct InlineContext {
+    /// 入力先頭のフェーズ1バッファ位置 (Java の `idx`)。
+    offset: usize,
+    /// Java `noTcy`: 縦中横内とルビ読み。禁則調整と正立タグを抑止する。
+    no_tcy: bool,
+    /// 入力の直前 (フェーズ1バッファ上) の 1 文字。None はバッファが空
+    /// (= 行頭) を意味し、Java の `!buf.isEmpty()` 判定に対応する。
+    preceding: Option<char>,
+    /// 入力の直後 (フェーズ1バッファ上) の 1 文字。入力末尾が行末なら None。
+    /// Java の `ch[idx+1]` 判定 (連続する全角スペースの手前側を除外する) に
+    /// 対応し、入れ子の変換では閉じタグ (<) やルビ開始 (《) が入る。
+    following: Option<char>,
+}
+
 pub(super) fn convert_inline(input: &str, config: &AozoraConfig) -> String {
-    convert_inline_with_options(input, config, true, true, false)
+    convert_inline_with_options(input, config, true, true, false, InlineContext::default()).0
+}
+
+/// 行内の一部を、行頭からのフェーズ1バッファ位置 `offset` 付きで変換する。
+/// Java は行全体を 1 つのバッファで処理するため、先行して出力された
+/// 見出し・字下げ等のタグも SpaceHyphenation の `idx` に数える必要がある。
+pub(super) fn convert_inline_at(
+    input: &str,
+    config: &AozoraConfig,
+    in_yoko: bool,
+    offset: usize,
+) -> String {
+    convert_inline_with_options(
+        input,
+        config,
+        true,
+        true,
+        in_yoko,
+        InlineContext {
+            offset,
+            preceding: Some('>'),
+            ..InlineContext::default()
+        },
+    )
+    .0
+}
+
+/// `convert_inline_at` の戻り値つき版。返る `usize` は入力が消費した
+/// フェーズ1文字数で、同じ行の後続片の位置に足し込む。
+pub(super) fn convert_inline_span(
+    input: &str,
+    config: &AozoraConfig,
+    in_yoko: bool,
+    offset: usize,
+) -> (String, usize) {
+    convert_inline_with_options(
+        input,
+        config,
+        true,
+        true,
+        in_yoko,
+        InlineContext {
+            offset,
+            preceding: Some('>'),
+            ..InlineContext::default()
+        },
+    )
 }
 
 /// ブロック横組み（ここから横組み…ここで横組み終わり）内の行変換。
@@ -13,20 +104,19 @@ pub(super) fn convert_inline_with_yoko(
     config: &AozoraConfig,
     in_yoko: bool,
 ) -> String {
-    convert_inline_with_options(input, config, true, true, in_yoko)
+    convert_inline_with_options(input, config, true, true, in_yoko, InlineContext::default()).0
 }
 
-fn convert_inline_without_auto_yoko(input: &str, config: &AozoraConfig) -> String {
-    convert_inline_with_options(input, config, false, true, false)
-}
-
+/// 戻り値の `usize` は入力が消費したフェーズ1文字数で、同じ行の後続片を
+/// 変換するときに足し込む。
 fn convert_inline_with_options(
     input: &str,
     config: &AozoraConfig,
     auto_yoko: bool,
     allow_upright: bool,
     in_yoko: bool,
-) -> String {
+    context: InlineContext,
+) -> (String, usize) {
     // Java convertReplacedChar: 正立 (<span class="upr">) は縦書き時のみ。
     // 外字・IVS も同じく this.vertical で gate される。
     let allow_upright = allow_upright && config.vertical;
@@ -48,15 +138,16 @@ fn convert_inline_with_options(
     let chars = input.chars().collect::<Vec<_>>();
     let mut output = String::new();
     let mut index = 0;
-    let mut tcy_depth = 0usize;
+    let mut tcy_depth = usize::from(context.no_tcy);
     let mut yoko_depth = usize::from(in_yoko);
     let mut in_mado = false;
     let mut link_started = false;
     let mut implicit_ruby_open = false;
-    // Java convertReplacedChar の idx 相当: 注記→タグ変換後 (phase-1) 文字列上の
-    // 文字位置。SpaceHyphenation の `idx > 20` 判定に使う。注記はタグ長、
-    // ルビ・生タグ・〔〕は raw 文字数、※エスケープは 2 として数える。
-    let mut java_pos = 0usize;
+    // Java convertReplacedChar の idx 相当: フェーズ1バッファ (外字変換と
+    // 注記→タグ置換を済ませた文字列) 上の UTF-16 位置。SpaceHyphenation の
+    // `idx > 20` 判定に使う。注記はタグ長、ルビ・生タグ・〔〕は raw 文字数
+    // (エスケープ後)、※エスケープは 2 として数える。
+    let mut java_pos = context.offset;
     // Java convertReplacedChar は使用済みのエスケープ対象文字を `ch[idx] = '　'`
     // で潰すため、同じ文字が続けてマーカーとして使われることはない。
     let mut escaped_at: Option<usize> = None;
@@ -73,14 +164,14 @@ fn convert_inline_with_options(
             implicit_ruby_open = false;
         }
         if chars[index] == WRC_BREAK_MARKER {
-            output.push_str(
-                config
-                    .inline_notes
-                    .get("改行")
-                    .map(String::as_str)
-                    .unwrap_or("<br/>"),
-            );
+            let tag = config
+                .inline_notes
+                .get("改行")
+                .map(String::as_str)
+                .unwrap_or("<br/>");
+            output.push_str(tag);
             index += 1;
+            java_pos += phase1_markup_len(tag);
             continue;
         }
         // エスケープ文字: ※の直後の《》｜＃※ はルビ/注記処理しない
@@ -112,7 +203,7 @@ fn convert_inline_with_options(
         {
             output.push_str(&replacement);
             index = end;
-            java_pos += replacement.chars().count();
+            java_pos += phase1_markup_len(&replacement);
             continue;
         }
         if chars[index] == '※'
@@ -120,31 +211,47 @@ fn convert_inline_with_options(
         {
             output.push_str(&replacement);
             index = end;
-            java_pos += 1 + replacement.chars().count();
+            java_pos += 1 + phase1_markup_len(&replacement);
             continue;
         }
         if let Some((end, replacement)) = parse_unicode_note(&chars, index, config) {
             output.push_str(&replacement);
             index = end;
-            java_pos += replacement.chars().count();
+            java_pos += phase1_markup_len(&replacement);
             continue;
         }
         if let Some((end, replacement)) = parse_image_note(&chars, index, config) {
             output.push_str(&replacement);
             index = end;
-            java_pos += replacement.chars().count();
+            java_pos += phase1_markup_len(&replacement);
             continue;
         }
-        if let Some((end, replacement)) = parse_inline_heading(&chars, index, config) {
+        if let Some((end, replacement)) = parse_inline_heading(
+            &chars,
+            index,
+            config,
+            auto_yoko,
+            allow_upright,
+            in_yoko,
+            java_pos,
+        ) {
             output.push_str(&replacement);
             index = end;
-            java_pos += replacement.chars().count();
+            java_pos += phase1_markup_len(&replacement);
             continue;
         }
-        if let Some((end, replacement)) = parse_configured_inline_block(&chars, index, config) {
+        if let Some((end, replacement)) = parse_configured_inline_block(
+            &chars,
+            index,
+            config,
+            auto_yoko,
+            allow_upright,
+            in_yoko,
+            java_pos,
+        ) {
             output.push_str(&replacement);
             index = end;
-            java_pos += replacement.chars().count();
+            java_pos += phase1_markup_len(&replacement);
             continue;
         }
         // Java: 窓*見出しは行頭のみ対応。行単位の inMado 状態で、行頭でない
@@ -171,7 +278,7 @@ fn convert_inline_with_options(
                     config
                         .inline_notes
                         .get(&note)
-                        .map_or(0, |tag| tag.chars().count())
+                        .map_or(0, |tag| phase1_markup_len(tag))
                 };
                 continue;
             }
@@ -197,7 +304,7 @@ fn convert_inline_with_options(
                 deferred_close.push_str(close_tag);
             }
             index = end;
-            java_pos += replacement.chars().count();
+            java_pos += phase1_markup_len(&replacement);
             continue;
         }
         if chars[index] == '<'
@@ -210,7 +317,7 @@ fn convert_inline_with_options(
             }
             output.push_str(&markup);
             index = end;
-            java_pos += markup.chars().count();
+            java_pos += phase1_markup_len(&markup);
             continue;
         }
         if chars[index] == '<'
@@ -218,7 +325,7 @@ fn convert_inline_with_options(
         {
             output.push_str(&replacement);
             index = end;
-            java_pos += replacement.chars().count();
+            java_pos += phase1_markup_len(&replacement);
             continue;
         }
         if chars[index] == '<'
@@ -236,7 +343,7 @@ fn convert_inline_with_options(
                 link_started = true;
                 output.push_str(&replacement);
             }
-            java_pos += end - index;
+            java_pos += phase1_slice_len(&chars[index..end]);
             index = end;
             continue;
         }
@@ -248,7 +355,7 @@ fn convert_inline_with_options(
                 let separated = inner.iter().collect::<String>();
                 let replacement = convert_latin(&separated, config);
                 output.push_str(&escape_text(&replacement));
-                java_pos += close + 1 - index;
+                java_pos += phase1_slice_len(&chars[index..close + 1]);
                 index = close + 1;
                 continue;
             }
@@ -266,6 +373,9 @@ fn convert_inline_with_options(
             // (前方参照注記の対象が行頭に無い場合にこの形になる)。
             let base = chars[index + 1..open].iter().collect::<String>();
             let reading = chars[open + 1..close].iter().collect::<String>();
+            // 基底は ｜ の直後から始まる（フェーズ1バッファ上の位置は ｜ の +1）。
+            let base_offset = java_pos + phase1_char_len(chars[index]);
+            let base_preceding = Some(chars[index]);
             let continues = has_following_implicit_ruby(&chars, close + 1);
             if continues {
                 output.push_str("<ruby>");
@@ -275,6 +385,8 @@ fn convert_inline_with_options(
                     &reading,
                     config,
                     auto_yoko && tcy_depth == 0,
+                    base_offset,
+                    base_preceding,
                 );
                 implicit_ruby_open = true;
             } else {
@@ -284,9 +396,11 @@ fn convert_inline_with_options(
                     &reading,
                     config,
                     auto_yoko && tcy_depth == 0,
+                    base_offset,
+                    base_preceding,
                 );
             }
-            java_pos += close + 1 - index;
+            java_pos += phase1_slice_len(&chars[index..close + 1]);
             index = close + 1;
             continue;
         }
@@ -393,11 +507,27 @@ fn convert_inline_with_options(
                 base_start -= 1;
             }
             let base = chars[base_start..index].iter().collect::<String>();
-            let rendered_base = if auto_yoko && tcy_depth == 0 {
-                convert_inline(&base, config)
-            } else {
-                convert_inline_without_auto_yoko(&base, config)
+            // 基底先頭のフェーズ1バッファ位置。基底は素の本文ランなので、
+            // 現在位置から基底の分を引いて求まる（Java は行全体が1バッファ）。
+            let base_offset = java_pos - phase1_slice_len(&chars[base_start..index]);
+            let base_preceding = base_start
+                .checked_sub(1)
+                .and_then(|previous| chars.get(previous).copied());
+            let base_context = InlineContext {
+                offset: base_offset,
+                preceding: base_preceding,
+                following: Some('《'),
+                ..InlineContext::default()
             };
+            let rendered_base = convert_inline_with_options(
+                &base,
+                config,
+                auto_yoko && tcy_depth == 0,
+                true,
+                false,
+                base_context,
+            )
+            .0;
             if output.ends_with(&rendered_base) {
                 output.truncate(output.len() - rendered_base.len());
             }
@@ -412,12 +542,14 @@ fn convert_inline_with_options(
                 &reading,
                 config,
                 auto_yoko && tcy_depth == 0,
+                base_offset,
+                base_preceding,
             );
             implicit_ruby_open = continues;
             if !continues {
                 output.push_str("</ruby>");
             }
-            java_pos += close + 1 - index;
+            java_pos += phase1_slice_len(&chars[index..close + 1]);
             index = close + 1;
             continue;
         }
@@ -425,7 +557,7 @@ fn convert_inline_with_options(
             && let Some(close) = find_closing_ruby(&chars, index)
         {
             // Java: ルビ開始文字無しの《》は警告して破棄する
-            java_pos += close + 1 - index;
+            java_pos += phase1_slice_len(&chars[index..close + 1]);
             index = close + 1;
             continue;
         }
@@ -438,15 +570,17 @@ fn convert_inline_with_options(
             yoko_depth > 0,
             tcy_depth > 0,
             java_pos,
+            context.preceding,
+            context.following,
         );
         index += consumed;
-        java_pos += consumed;
+        java_pos += phase1_slice_len(&chars[index - consumed..index]);
     }
     if implicit_ruby_open {
         output.push_str("</ruby>");
     }
     output.push_str(&deferred_close);
-    output
+    (output, java_pos - context.offset)
 }
 
 /// Java: 行頭プレフィクスから ［＃…］ 注記を除去し、半角/全角空白のみなら空文字列。
@@ -832,7 +966,20 @@ fn contains_literal_gaiji_note(input: &str) -> bool {
 }
 
 fn convert_ruby_reading(reading: &str, config: &AozoraConfig) -> String {
-    convert_inline_with_options(reading, config, false, false, false)
+    // Java はルビ読みを `convertTcyText(..., noTcy=true)` で変換する。
+    // noTcy 中は全角スペースの禁則調整 (SpaceHyphenation) と正立タグを付けない。
+    convert_inline_with_options(
+        reading,
+        config,
+        false,
+        false,
+        false,
+        InlineContext {
+            no_tcy: true,
+            ..InlineContext::default()
+        },
+    )
+    .0
 }
 /// Java `Epub3Writer` の目次ラベル変換: `converter.vertical = tocVertical` の
 /// 状態で `convertTcyText` を適用する。呼び出し側でエスケープ済みの文字列を渡す。
@@ -1243,6 +1390,8 @@ fn render_gaiji_replacement(input: &str, config: &AozoraConfig, allow_upright: b
             false,
             false,
             0,
+            None,
+            None,
         );
     }
     output
@@ -1503,36 +1652,84 @@ fn format_image_template(template: &str, source: &str, alt: &str) -> String {
     output
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_inline_heading(
     chars: &[char],
     start: usize,
     config: &AozoraConfig,
+    auto_yoko: bool,
+    allow_upright: bool,
+    in_yoko: bool,
+    java_pos: usize,
 ) -> Option<(usize, String)> {
     let (note_end, note) = note_range(chars, start)?;
     let spec = heading_spec(&note)?;
     let close_note = format!("{note}終わり");
     let (close_start, close_end) = find_note(chars, note_end, &close_note)?;
     let inner = chars[note_end..close_start].iter().collect::<String>();
-    let mut replacement = format!("<{} class=\"{}\">", spec.element, spec.class_name);
-    replacement.push_str(&convert_inline(&inner, config));
+    let open_tag = format!("<{} class=\"{}\">", spec.element, spec.class_name);
+    // Java は行全体を 1 バッファで処理するため、見出しの開きタグも
+    // convertReplacedChar の idx に数える。見出しタグは 21 文字以上あるので
+    // 短い見出しでも閾値 (idx > 20) を越え、見出し内の全角スペースは
+    // 位置に関係なく変換される。
+    let inner_offset = java_pos + phase1_markup_len(&open_tag);
+    let mut replacement = open_tag;
+    replacement.push_str(
+        &convert_inline_with_options(
+            &inner,
+            config,
+            auto_yoko,
+            allow_upright,
+            in_yoko,
+            InlineContext {
+                offset: inner_offset,
+                preceding: Some('>'),
+                following: Some('<'),
+                ..InlineContext::default()
+            },
+        )
+        .0,
+    );
     replacement.push_str("</");
     replacement.push_str(spec.element);
     replacement.push('>');
     Some((close_end, replacement))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_configured_inline_block(
     chars: &[char],
     start: usize,
     config: &AozoraConfig,
+    auto_yoko: bool,
+    allow_upright: bool,
+    in_yoko: bool,
+    java_pos: usize,
 ) -> Option<(usize, String)> {
     let (note_end, note) = note_range(chars, start)?;
     let (open_tag, close_tag) = config.block_inline_tags.get(&note)?;
     let close_note = format!("{note}終わり");
     let (close_start, close_end) = find_note(chars, note_end, &close_note)?;
     let inner = chars[note_end..close_start].iter().collect::<String>();
+    // 見出しと同じく、開きタグの分をフェーズ1位置に足してから内側を変換する。
+    let inner_offset = java_pos + phase1_markup_len(open_tag);
     let mut replacement = open_tag.clone();
-    replacement.push_str(&convert_inline(&inner, config));
+    replacement.push_str(
+        &convert_inline_with_options(
+            &inner,
+            config,
+            auto_yoko,
+            allow_upright,
+            in_yoko,
+            InlineContext {
+                offset: inner_offset,
+                preceding: Some('>'),
+                following: Some('<'),
+                ..InlineContext::default()
+            },
+        )
+        .0,
+    );
     replacement.push_str(close_tag);
     Some((close_end, replacement))
 }
@@ -2014,6 +2211,8 @@ fn push_text_char(
     in_yoko: bool,
     in_tcy: bool,
     java_pos: usize,
+    preceding: Option<char>,
+    following: Option<char>,
 ) -> usize {
     // Single-character replacement (replace.txt): the result is emitted raw,
     // exactly like the reference replaceMap, so it is not re-normalized.
@@ -2025,14 +2224,20 @@ fn push_text_char(
     // Java convertReplacedChar: 文字の間の全角スペースを禁則調整
     // (SpaceHyphenation)。横組み・縦中横内では抑止。idx は注記→タグ変換後の
     // 文字位置で、行末の全角スペースと連続全角スペースの先頭側は対象外。
+    // Java が見るのは行全体の出力バッファの末尾 1 文字。行内の一部だけを
+    // 変換する入れ子呼び出しでは、その直前の文字を `preceding` で受け取る。
+    let previous = output.chars().next_back().or(preceding);
     if config.space_hyphenation > 0
         && !in_yoko
         && !in_tcy
         && chars[index] == '\u{3000}'
         && java_pos > 20
-        && !output.is_empty()
-        && !output.ends_with('\u{3000}')
-        && chars.get(index + 1).is_some_and(|next| *next != '\u{3000}')
+        && previous.is_some_and(|character| character != '\u{3000}')
+        && chars
+            .get(index + 1)
+            .copied()
+            .or(following)
+            .is_some_and(|next| next != '\u{3000}')
     {
         match config.space_hyphenation {
             1 => output.push_str("<span class=\"fullsp\"> </span>"),
@@ -2305,28 +2510,42 @@ fn has_following_implicit_ruby(chars: &[char], mut index: usize) -> bool {
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_ruby(
     output: &mut String,
     base: &str,
     reading: &str,
     config: &AozoraConfig,
     allow_auto_yoko: bool,
+    base_offset: usize,
+    base_preceding: Option<char>,
 ) {
     if output.ends_with("</ruby>") {
         output.truncate(output.len() - "</ruby>".len());
     } else {
         output.push_str("<ruby>");
     }
-    push_ruby_part(output, base, reading, config, allow_auto_yoko);
+    push_ruby_part(
+        output,
+        base,
+        reading,
+        config,
+        allow_auto_yoko,
+        base_offset,
+        base_preceding,
+    );
     output.push_str("</ruby>");
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_ruby_part(
     output: &mut String,
     base: &str,
     reading: &str,
     config: &AozoraConfig,
     allow_auto_yoko: bool,
+    base_offset: usize,
+    base_preceding: Option<char>,
 ) {
     let base_chars = base.chars().collect::<Vec<_>>();
     let reading_chars = reading.chars().collect::<Vec<_>>();
@@ -2337,26 +2556,48 @@ fn push_ruby_part(
             .iter()
             .all(|character| *character == reading_chars[0])
     {
+        let mut offset = base_offset;
         for (base_char, reading_char) in base_chars.iter().zip(reading_chars.iter()) {
-            if allow_auto_yoko {
-                output.push_str(&convert_inline(&base_char.to_string(), config));
-            } else {
-                output.push_str(&convert_inline_without_auto_yoko(
+            output.push_str(
+                &convert_inline_with_options(
                     &base_char.to_string(),
                     config,
-                ));
-            }
+                    allow_auto_yoko,
+                    true,
+                    false,
+                    InlineContext {
+                        offset,
+                        preceding: base_preceding,
+                        following: Some('《'),
+                        ..InlineContext::default()
+                    },
+                )
+                .0,
+            );
+            offset += phase1_char_len(*base_char);
             output.push_str("<rt>");
             output.push_str(&convert_ruby_reading(&reading_char.to_string(), config));
             output.push_str("</rt>");
         }
         return;
     }
-    if allow_auto_yoko && !contains_literal_gaiji_note(base) {
-        output.push_str(&convert_inline(base, config));
-    } else {
-        output.push_str(&convert_inline_without_auto_yoko(base, config));
-    }
+    let auto_yoko = allow_auto_yoko && !contains_literal_gaiji_note(base);
+    output.push_str(
+        &convert_inline_with_options(
+            base,
+            config,
+            auto_yoko,
+            true,
+            false,
+            InlineContext {
+                offset: base_offset,
+                preceding: base_preceding,
+                following: Some('《'),
+                ..InlineContext::default()
+            },
+        )
+        .0,
+    );
     output.push_str("<rt>");
     output.push_str(&convert_ruby_reading(reading, config));
     output.push_str("</rt>");
