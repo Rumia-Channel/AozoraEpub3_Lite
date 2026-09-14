@@ -43,6 +43,21 @@ def sync_tables() -> None:
             shutil.copyfile(source, JAVABIN / name)
 
 
+def sync_templates() -> None:
+    """Java 実行ディレクトリの template を配布物のものへ揃える。
+
+    Java 版はテンプレートファイルをそのまま EPUB に格納するため、配布物の
+    改行がそのまま出力の改行になる (`style/*.css` と xhtml 断片は LF、
+    `package.vm` / `toc.ncx.vm` / `xhtml_nav.vm` は CRLF)。Lite 側の資産は
+    改行を LF に正規化しているので、参照 (Java) は配布物から取り直す。
+    """
+    source = DIST / "template"
+    if not source.is_dir():
+        return
+    shutil.rmtree(JAVABIN / "template", ignore_errors=True)
+    shutil.copytree(source, JAVABIN / "template")
+
+
 def tag_table_text() -> str:
     """参照側 (Java) が使う注記表。"""
     return (JAVABIN / "chuki_tag.txt").read_text("utf-8", errors="replace")

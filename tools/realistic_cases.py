@@ -28,6 +28,7 @@ from java_reference import (
     RUSTBIN,
     run,
     sync_tables,
+    sync_templates,
 )
 
 WORK = RUST / "target" / "realistic"
@@ -164,6 +165,7 @@ def compare(
 
 def main() -> None:
     sync_tables()
+    sync_templates()
     shutil.rmtree(WORK, ignore_errors=True)
     (WORK / "src").mkdir(parents=True)
 

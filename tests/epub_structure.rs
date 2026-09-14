@@ -43,11 +43,63 @@ fn writes_epub3_layout_with_uncompressed_mimetype_first() {
         .unwrap()
         .read_to_string(&mut section)
         .unwrap();
-    assert!(
-        section.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!DOCTYPE html>\r\n")
-    );
-    assert!(section.contains("<html\r\n xmlns=\"http://www.w3.org/1999/xhtml\""));
+    // Java のセクション xhtml は LF (CRLF なのは nav.xhtml と OPF / NCX)。
+    assert!(section.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE html>\n"));
+    assert!(section.contains("<html\n xmlns=\"http://www.w3.org/1999/xhtml\""));
     assert!(section.contains("xmlns:epub=\"http://www.idpf.org/2007/ops\""));
+}
+
+/// Java 版の出力は「セクション xhtml と CSS が LF、nav.xhtml と
+/// standard.opf / toc.ncx が CRLF」。作業ツリーの改行 (Windows の
+/// core.autocrlf=true など) がそのまま EPUB に入らないことを固定する。
+#[test]
+fn writes_java_line_endings_for_each_entry() {
+    let book = EpubBook::new(
+        EpubMetadata::new("改行", "urn:test:newlines"),
+        "    <p>本文</p>\n",
+    )
+    .with_title_page();
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+
+    let mut entry = |path: &str| {
+        let mut text = String::new();
+        archive
+            .by_name(path)
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        text
+    };
+    // 期待値は Java 版の出力そのまま (LF / CRLF)。
+    for lf_path in [
+        "mimetype",
+        "item/xhtml/0001.xhtml",
+        "item/xhtml/title.xhtml",
+        "item/style/aozora.css",
+        "item/style/book-style.css",
+        "item/style/text.css",
+    ] {
+        let text = entry(lf_path);
+        assert!(
+            !text.trim_end_matches('\n').contains('\r'),
+            "{lf_path} must use LF"
+        );
+    }
+    for crlf_path in [
+        "META-INF/container.xml",
+        "item/nav.xhtml",
+        "item/standard.opf",
+        "item/toc.ncx",
+    ] {
+        let text = entry(crlf_path);
+        assert!(text.contains("\r\n"), "{crlf_path} must use CRLF");
+        assert_eq!(
+            text.matches('\n').count(),
+            text.matches("\r\n").count(),
+            "{crlf_path} must use CRLF on every line"
+        );
+    }
 }
 
 #[test]
@@ -83,7 +135,9 @@ fn writes_all_sections_to_manifest_spine_and_navigation() {
 }
 
 #[test]
-fn title_page_navigation_includes_unheaded_body_entries() {
+fn title_page_navigation_lists_the_title_entry() {
+    // Java: 表題ページを目次に出すとき (TitleToc) は表題項目だけが出て、
+    // 章が無くても「本文」フォールバックは使わない (`$hasNcxItem` が真)。
     let book = EpubBook::new(
         EpubMetadata::new("題名", "urn:test:title-navigation"),
         "<p>本文だけ</p>\n",
@@ -99,8 +153,52 @@ fn title_page_navigation_includes_unheaded_body_entries() {
         .read_to_string(&mut nav)
         .unwrap();
     let toc = nav.split("<nav epub:type=\"toc\"").nth(1).unwrap();
-    assert!(toc.contains("xhtml/title.xhtml"));
-    assert!(toc.contains("xhtml/0001.xhtml"));
+    assert!(
+        toc.contains("<a href=\"xhtml/title.xhtml\">題名</a>"),
+        "{toc}"
+    );
+    assert!(!toc.contains(">本文</a>"), "{toc}");
+    let mut ncx = String::new();
+    archive
+        .by_name("item/toc.ncx")
+        .unwrap()
+        .read_to_string(&mut ncx)
+        .unwrap();
+    assert!(
+        ncx.contains("<content src=\"xhtml/title.xhtml\"/>"),
+        "{ncx}"
+    );
+    assert!(!ncx.contains("<text>本文</text>"), "{ncx}");
+}
+
+#[test]
+fn navigation_falls_back_to_the_first_body_section() {
+    // Java toc.ncx.vm / xhtml_nav.vm の `#if (!$hasNcxItem)`: 章も表題項目も
+    // 無いときだけ最初の本文セクションを「本文」で出力する。
+    let book = EpubBook::new(
+        EpubMetadata::new("題名", "urn:test:nav-fallback"),
+        "<p>本文だけ</p>\n",
+    );
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let mut nav = String::new();
+    archive
+        .by_name("item/nav.xhtml")
+        .unwrap()
+        .read_to_string(&mut nav)
+        .unwrap();
+    let toc = nav.split("<nav epub:type=\"toc\"").nth(1).unwrap();
+    assert!(
+        toc.contains("<a href=\"xhtml/0001.xhtml\">本文</a>"),
+        "{toc}"
+    );
+    let mut ncx = String::new();
+    archive
+        .by_name("item/toc.ncx")
+        .unwrap()
+        .read_to_string(&mut ncx)
+        .unwrap();
+    assert!(ncx.contains("<text>本文</text>"), "{ncx}");
 }
 
 #[test]
@@ -121,7 +219,7 @@ fn title_page_uses_java_xhtml_head_and_spacing() {
         .unwrap();
     assert!(!title.contains("<meta charset=\"UTF-8\"/>"));
     assert!(title.contains(
-        "<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/book-style.css\"/>\r\n\r\n<title>"
+        "<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/book-style.css\"/>\n\n<title>"
     ));
     assert!(title.contains(
         "<div class=\"main vrtl block-align-center\">\n\n\t<br/>\n\n<div class=\"book-title start-2em\">"
@@ -432,9 +530,9 @@ fn renders_middle_and_bottom_pages_with_horizontal_document_class() {
             .read_to_string(&mut section)
             .unwrap();
         if marker.contains("middle") {
-            assert!(section.contains("xml:lang=\"ja\"\r\n class=\"hltr\""));
+            assert!(section.contains("xml:lang=\"ja\"\n class=\"hltr\""));
         } else {
-            assert!(section.contains("xml:lang=\"ja\"\r\n class=\"vrtl\""));
+            assert!(section.contains("xml:lang=\"ja\"\n class=\"vrtl\""));
         }
     }
 }

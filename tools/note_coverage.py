@@ -22,6 +22,7 @@ from java_reference import (
     run,
     suffix_table_text,
     sync_tables,
+    sync_templates,
     tag_table_text,
 )
 
@@ -187,6 +188,7 @@ def main():
     args = parser.parse_args()
 
     sync_tables()
+    sync_templates()
     rows = tag_rows() + suffix_rows()
     if args.only:
         rows = [r for r in rows if args.only in r[2]]

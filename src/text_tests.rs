@@ -920,6 +920,99 @@ fn applies_space_hyphenation_for_late_full_width_spaces() {
     assert!(!early.contains("fullsp"));
 }
 
+/// Java は行全体を 1 つのフェーズ1バッファで処理するため、見出し・字下げの
+/// 開きタグの分も `convertReplacedChar` の idx に数えられる。見出しタグは
+/// 21 文字以上あるので、短い見出しでも閾値 (idx > 20) を越えて変換される。
+#[test]
+fn applies_space_hyphenation_inside_inline_headings() {
+    let config =
+        AozoraConfig::from_ini(IniSettings::parse("SpaceHyphenation=1\n").expect("ini parses"));
+    // 見出し注記を含む行は Java では noBr 行として行全体が 1 バッファで
+    // 変換される。CLI と同じ経路 (セクション変換) で確認する。
+    let render = |input: &str| {
+        super::aozora_text_to_xhtml_sections_with_config(input, &config)
+            .unwrap()
+            .join("")
+    };
+    for input in [
+        "［＃中見出し］見出しＡ　見出しＢ［＃中見出し終わり］",
+        "［＃大見出し］見出しＡ　見出しＢ［＃大見出し終わり］",
+        "［＃小見出し］見出しＡ　見出しＢ［＃小見出し終わり］",
+        "［＃３字下げ］［＃中見出し］第１話　はじまりの章［＃中見出し終わり］",
+    ] {
+        let output = render(input);
+        assert!(
+            output.contains("見出しＡ<span class=\"fullsp\"> </span>見出しＢ")
+                || output.contains("第１話<span class=\"fullsp\"> </span>はじまりの章"),
+            "heading spaces must become fullsp: {input} -> {output}"
+        );
+    }
+
+    // 見出しテキストの末尾でも、閉じタグが後ろにあるため変換される
+    // (Java の ch[idx+1] は `</h2>` の `<` になる)。
+    let trailing = render("［＃中見出し］見出しＡ　［＃中見出し終わり］");
+    assert!(
+        trailing.contains("見出しＡ<span class=\"fullsp\"> </span></h2>"),
+        "trailing heading space must become fullsp: {trailing}"
+    );
+
+    // 開きタグが短い注記 (ここから太字 = 18 文字) では閾値に届かないので、
+    // 同じ位置の全角スペースでも変換されない。
+    let short_tag = render("［＃ここから太字］あ　い［＃ここまで太字］");
+    assert!(short_tag.contains("あ　い"), "{short_tag}");
+    assert!(!short_tag.contains("fullsp"), "{short_tag}");
+}
+
+/// Java の idx は char[] (UTF-16) の位置なので、BMP 外の文字はサロゲート
+/// ペアの 2 文字、`&` `<` `>` は実体参照の長さ (5/4/4) で数える。
+#[test]
+fn counts_utf16_units_for_space_hyphenation_positions() {
+    let config =
+        AozoraConfig::from_ini(IniSettings::parse("SpaceHyphenation=1\n").expect("ini parses"));
+    // 19 文字 + 4 バイト文字 (idx 21) は変換、19 文字だけ (idx 19) は変換しない
+    let astral =
+        super::plain_text_to_xhtml_with_config(&format!("{}🷷　Ｘ", "Ａ".repeat(19)), &config)
+            .unwrap();
+    assert!(astral.contains("fullsp"), "{astral}");
+    let plain =
+        super::plain_text_to_xhtml_with_config(&format!("{}　Ｘ", "Ａ".repeat(19)), &config)
+            .unwrap();
+    assert!(!plain.contains("fullsp"), "{plain}");
+
+    // `&` は `&amp;` に展開されるので 5 文字分 (idx 22) になり変換される
+    let ampersand =
+        super::plain_text_to_xhtml_with_config(&format!("{}&　Ｘ", "Ａ".repeat(17)), &config)
+            .unwrap();
+    assert!(
+        ampersand.contains("&amp;<span class=\"fullsp\"> </span>Ｘ"),
+        "{ampersand}"
+    );
+}
+
+/// Java はルビ読みを `convertTcyText(..., noTcy=true)` で変換するため、読みの
+/// 中では全角スペースの禁則調整を行わない。基底は行内の位置で判定する。
+#[test]
+fn excludes_ruby_readings_from_space_hyphenation() {
+    let config =
+        AozoraConfig::from_ini(IniSettings::parse("SpaceHyphenation=1\n").expect("ini parses"));
+    let reading =
+        super::plain_text_to_xhtml_with_config(&format!("漢《{}　い》", "あ".repeat(21)), &config)
+            .unwrap();
+    assert!(reading.contains("あ　い</rt>"), "{reading}");
+    assert!(!reading.contains("fullsp"), "{reading}");
+
+    // 基底は行内の位置で判定する (20 文字 + ｜ の直後の全角スペースが変換される)
+    let base = super::plain_text_to_xhtml_with_config(
+        &format!("{}｜　《か》Ｘ", "Ａ".repeat(20)),
+        &config,
+    )
+    .unwrap();
+    assert!(
+        base.contains("<ruby><span class=\"fullsp\"> </span><rt>か</rt></ruby>"),
+        "{base}"
+    );
+}
+
 /// Java `JisConverter` の全表を移植しているので、辞書 (chuki_utf.txt) に
 /// 載っていない面区点コード付き外字注記も文字に解決できる。
 #[test]
@@ -1003,6 +1096,59 @@ fn renders_empty_base_ruby_for_leading_suffix_note() {
             .unwrap();
     assert!(
         output.contains("<ruby><rt>あおぞらぶんこ</rt></ruby>本文"),
+        "{output}"
+    );
+}
+
+/// Java `printLineBuffer` は空行を次の行の出力時にまとめて出すため、
+/// セクション末尾に残った空行 (注記だけで本文が空になった行を含む) は
+/// 出力されない。Lite はその場で `<p><br/></p>` を出すので末尾だけ取り除く。
+#[test]
+fn drops_trailing_empty_paragraphs_at_section_end() {
+    let sections = super::aozora_text_to_xhtml_sections(
+        "［＃中見出し］見出しＡ［＃中見出し終わり］\n［＃中見出し終わり］\n",
+    )
+    .unwrap();
+    let output = sections.join("");
+    assert!(output.contains("</h2>"), "{output}");
+    assert!(!output.contains("<p><br/></p>"), "{output}");
+
+    // 途中の空行は Java と同じく残る
+    let middle = super::aozora_text_to_xhtml_sections(
+        "［＃中見出し］見出しＡ［＃中見出し終わり］\n本文\n\n［＃中見出し終わり］\n後に本文\n",
+    )
+    .unwrap()
+    .join("");
+    assert!(middle.contains("<p><br/></p>"), "{middle}");
+}
+
+/// Java の `ch[idx+1]` はフェーズ1バッファ上の次の文字なので、直後の注記が
+/// 何も出力しない (表に無い複合字下げなど) 場合は後ろに何も無いものとして
+/// 扱われる。複合字下げの閉じ注記の直前の全角スペースは変換されない。
+#[test]
+fn keeps_space_before_dropped_composite_close_note() {
+    let config =
+        AozoraConfig::from_ini(IniSettings::parse("SpaceHyphenation=1\n").expect("ini parses"));
+    let output = super::aozora_text_to_xhtml_sections_with_config(
+        "［＃ここから２字下げ、破線罫囲み］あ　［＃ここまで２字下げ、破線罫囲み］\n",
+        &config,
+    )
+    .unwrap()
+    .join("");
+    assert!(output.contains("あ　"), "{output}");
+    assert!(!output.contains("fullsp"), "{output}");
+}
+
+/// Java `printLineBuffer` は章行でタグ始まりの行に `id="kobo.N.M"` を差し込む。
+/// 改ページ注記と本文が同じ行にある場合 (ページ左下 など)、Lite は flush で
+/// 行番号が変わるため章行の対応を付け替える必要がある。
+#[test]
+fn injects_kobo_id_into_block_tag_on_a_chapter_line() {
+    let output = super::aozora_text_to_xhtml_sections("［＃ページ左下］テスト本文\n")
+        .unwrap()
+        .join("");
+    assert!(
+        output.contains("<div id=\"kobo.1.1\" class=\"btm\">"),
         "{output}"
     );
 }

@@ -6,7 +6,11 @@ use encoding_rs::{Encoding, SHIFT_JIS, UTF_8};
 mod inline;
 
 use inline::convert_inline;
+use inline::convert_inline_at;
+use inline::convert_inline_span;
 use inline::convert_inline_with_yoko;
+use inline::phase1_markup_len;
+use inline::phase1_text_len;
 pub fn inline_to_xhtml(input: &str, config: &AozoraConfig) -> String {
     convert_inline(input, config)
 }
@@ -475,6 +479,9 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
         // Java: chukiFlagNoBr (chuki_tag.txt 4列目=1) のブロック注記を含む行は
         // 行全体を <p> で括らない (printLineBuffer noBr)。
         let line_has_block_note = contains_block_note(line, config);
+        // 章行は改ページでセクションを flush すると行番号が変わるため、
+        // flush したときに付け替える (Java はバッファ単位で扱うので不要)。
+        let chapter_line_before_flush = chapter_lines.last().copied();
         loop {
             let Some((offset, end, note)) = find_page_break_note(remainder, config) else {
                 append_section_line(
@@ -531,6 +538,14 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
             // (タグは行末で閉じる)。注記自体は行末まで本文を包むため、残りを
             // この行に取り込んで改ページ処理を打ち切る。
             if config.block_inline_tags.contains_key(&note) {
+                // 改ページで前のセクションを出力した場合、この行は新しい
+                // セクションの先頭になる。章行の対応を付け替える。
+                if let Some((recorded, record)) = chapter_line_before_flush
+                    && chapter_lines.last().copied() == Some((recorded, record))
+                    && recorded != current.len()
+                {
+                    *chapter_lines.last_mut().unwrap() = (current.len(), record);
+                }
                 current.push(format!("［＃{note}］{}", &remainder[end..]));
                 no_br.push(true);
                 break;
@@ -1246,6 +1261,9 @@ fn render_lines<'a>(
     let mut blocks: Vec<OpenBlock> = Vec::new();
 
     let mut pending_config_heading: Option<(String, String)> = None;
+    // 本文が空になった行 (注記だけの行) が出した `<p><br/></p>` の位置。
+    // セクション末尾に残ったものは Java では出力されないので取り除く。
+    let mut empty_paragraphs: Vec<(usize, usize)> = Vec::new();
     let mut output_count = 0usize;
     let mut emitted: Vec<(usize, String)> = Vec::new();
     // Java の inYoko フィールド相当: ここから横組み〜ここで横組み終わり で切替
@@ -1372,12 +1390,22 @@ fn render_lines<'a>(
                 };
                 fragment.push_str(&close);
             }
-            fragment.push_str(&convert_inline_with_yoko(&line[..start], config, in_yoko));
+            // Java は行全体を 1 バッファで処理するので、注記前の本文と
+            // 開きタグの分だけ後続テキストの位置が後ろにずれる
+            // (id は Java では変換後の printLineBuffer で付くため数えない)。
+            let (prefix, prefix_len) = convert_inline_span(&line[..start], config, in_yoko, 0);
+            fragment.push_str(&prefix);
+            let content_offset = prefix_len + phase1_markup_len(&open_tag);
             let open_tag = chapter_id
                 .map(|id| inject_kobo_id(&open_tag, &id))
                 .unwrap_or(open_tag);
             fragment.push_str(&open_tag);
-            fragment.push_str(&convert_inline_with_yoko(&line[end..], config, in_yoko));
+            fragment.push_str(&convert_inline_at(
+                &line[end..],
+                config,
+                in_yoko,
+                content_offset,
+            ));
             fragment.push_str(&close_tag);
             if !no_newline {
                 fragment.push('\n');
@@ -1417,14 +1445,16 @@ fn render_lines<'a>(
                     };
                     fragment.push_str(&close);
                 }
+                // Java: 注記前の行頭空白（leading）は convertEscapedText で無トリム出力される
+                let leading_len = line.len() - line.trim_start().len();
+                let content_offset =
+                    phase1_text_len(&line[..leading_len]) + phase1_markup_len(open_tag);
                 let open_tag = chapter_id
                     .map(|id| inject_kobo_id(open_tag, &id))
                     .unwrap_or_else(|| open_tag.clone());
-                // Java: 注記前の行頭空白（leading）は convertEscapedText で無トリム出力される
-                let leading_len = line.len() - line.trim_start().len();
                 fragment.push_str(&line[..leading_len]);
                 fragment.push_str(&open_tag);
-                fragment.push_str(&convert_inline_with_yoko(rest, config, in_yoko));
+                fragment.push_str(&convert_inline_at(rest, config, in_yoko, content_offset));
                 fragment.push_str(close_tag);
                 fragment.push('\n');
                 continue;
@@ -1535,6 +1565,7 @@ fn render_lines<'a>(
                     chapter_id.as_deref(),
                     page_break_chapter.unwrap_or(false),
                     in_yoko,
+                    &mut empty_paragraphs,
                 );
                 continue;
             }
@@ -1582,15 +1613,17 @@ fn render_lines<'a>(
             }
             if let Some((open_tag, close_tag)) = generated_indent_block(note) {
                 output_count += 1;
+                let content_offset = phase1_markup_len(&open_tag);
                 let open_tag = chapter_id
                     .map(|id| inject_kobo_id(&open_tag, &id))
                     .unwrap_or(open_tag);
                 fragment.push_str(&open_tag);
                 if !rest.trim().is_empty() {
-                    fragment.push_str(&convert_inline_with_yoko(
+                    fragment.push_str(&convert_inline_at(
                         rest.trim_start(),
                         config,
                         in_yoko,
+                        content_offset,
                     ));
                     fragment.push('\n');
                 } else {
@@ -1604,15 +1637,17 @@ fn render_lines<'a>(
             }
             if let Some(tag) = config.block_single_tags.get(note) {
                 output_count += 1;
+                let content_offset = phase1_markup_len(tag);
                 let tag = chapter_id
                     .map(|id| inject_kobo_id(tag, &id))
                     .unwrap_or_else(|| tag.to_owned());
                 fragment.push_str(&tag);
                 if !rest.trim().is_empty() {
-                    fragment.push_str(&convert_inline_with_yoko(
+                    fragment.push_str(&convert_inline_at(
                         rest.trim_start(),
                         config,
                         in_yoko,
+                        content_offset,
                     ));
                 }
                 fragment.push('\n');
@@ -1625,6 +1660,8 @@ fn render_lines<'a>(
                     output_count += 1;
                     // Java: 行頭の全角/半角空白はブロック開始タグの前に出力される
                     let leading_len = line.len() - line.trim_start().len();
+                    let content_offset =
+                        phase1_text_len(&line[..leading_len]) + phase1_markup_len(open_tag);
                     fragment.push_str(&line[..leading_len]);
                     let open_tag = chapter_id
                         .map(|id| inject_kobo_id(open_tag, &id))
@@ -1643,10 +1680,11 @@ fn render_lines<'a>(
                         fragment.push_str(&close);
                     }
                     fragment.push_str(&open_tag);
-                    fragment.push_str(&convert_inline_with_yoko(
+                    fragment.push_str(&convert_inline_at(
                         rest.trim_start(),
                         config,
                         in_yoko,
+                        content_offset,
                     ));
                     fragment.push_str(close_tag);
                     fragment.push('\n');
@@ -1658,6 +1696,7 @@ fn render_lines<'a>(
                 if note.contains("横組み") {
                     in_yoko = true;
                 }
+                let content_offset = phase1_markup_len(open_tag);
                 let open_tag = chapter_id
                     .map(|id| inject_kobo_id(open_tag, &id))
                     .unwrap_or_else(|| open_tag.to_owned());
@@ -1676,7 +1715,12 @@ fn render_lines<'a>(
                     let leading_len = line.len() - line.trim_start().len();
                     fragment.push_str(&line[..leading_len]);
                     fragment.push_str(&open_tag);
-                    fragment.push_str(&convert_inline_with_yoko(content, config, in_yoko));
+                    fragment.push_str(&convert_inline_at(
+                        content,
+                        config,
+                        in_yoko,
+                        phase1_text_len(&line[..leading_len]) + content_offset,
+                    ));
                     fragment.push_str(config.block_close_tags.get(close_note).unwrap());
                     fragment.push('\n');
                     if close_note.contains("横組み終わり") {
@@ -1686,7 +1730,12 @@ fn render_lines<'a>(
                 }
                 fragment.push_str(&open_tag);
                 if !rest_trimmed.is_empty() {
-                    fragment.push_str(&convert_inline_with_yoko(rest_trimmed, config, in_yoko));
+                    fragment.push_str(&convert_inline_at(
+                        rest_trimmed,
+                        config,
+                        in_yoko,
+                        content_offset,
+                    ));
                     fragment.push('\n');
                 } else {
                     fragment.push('\n');
@@ -1707,6 +1756,7 @@ fn render_lines<'a>(
             chapter_id.as_deref(),
             page_break_chapter.unwrap_or(false),
             in_yoko,
+            &mut empty_paragraphs,
         );
     }
 
@@ -1729,6 +1779,7 @@ fn render_lines<'a>(
         fragment.push_str(&close_tag);
         fragment.push('\n');
     }
+    trim_trailing_empty_paragraphs(&mut fragment, &empty_paragraphs);
 
     if !has_line {
         fragment.push_str("    <p><br/></p>\n");
@@ -1737,6 +1788,19 @@ fn render_lines<'a>(
         fragment = add_kobo_ids(&fragment);
     }
     (balance_xhtml(&fragment), emitted)
+}
+
+/// Java printLineBuffer: 空行は次の行を出力するときにまとめて `<p><br/></p>`
+/// として出るため、セクション末尾に残った空行は出力されない。Lite は空行を
+/// その場で出力するので、注記だけで空になった行の `<p><br/></p>` が
+/// フラグメント末尾に接している場合だけ取り除く。
+fn trim_trailing_empty_paragraphs(fragment: &mut String, marks: &[(usize, usize)]) {
+    for (start, end) in marks.iter().rev() {
+        if *end < fragment.len() || *start >= *end {
+            break;
+        }
+        fragment.truncate(*start);
+    }
 }
 
 fn add_kobo_ids(fragment: &str) -> String {
@@ -2026,23 +2090,22 @@ fn convert_no_br_block_notes(
 ) -> String {
     let mut output = String::new();
     let mut cursor = 0usize;
+    let mut offset = 0usize;
     for (start, end, note) in generated_indent_notes(line) {
         let Some((open_tag, close_tag)) = generated_indent_block(&note) else {
             continue;
         };
-        output.push_str(&convert_inline_with_yoko(
-            &line[cursor..start],
-            config,
-            in_yoko,
-        ));
+        let (piece, consumed) = convert_inline_span(&line[cursor..start], config, in_yoko, offset);
+        output.push_str(&piece);
         output.push_str(&open_tag);
+        offset += consumed + phase1_markup_len(&open_tag);
         blocks.push(OpenBlock::Generated {
             close_tag,
             indent: note.contains("字下げ"),
         });
         cursor = end;
     }
-    output.push_str(&convert_inline_with_yoko(&line[cursor..], config, in_yoko));
+    output.push_str(&convert_inline_at(&line[cursor..], config, in_yoko, offset));
     output
 }
 
@@ -2160,22 +2223,21 @@ fn append_heading(
     in_yoko: bool,
 ) {
     *output_count += 1;
-    fragment.push('<');
-    fragment.push_str(spec.element);
+    let mut open_tag = format!("<{} class=\"{}\">", spec.element, spec.class_name);
+    // 見出しの開きタグもフェーズ1バッファに入る (Java は行全体を1バッファで
+    // 処理する)。id は Java では変換後の printLineBuffer で付くため数えない。
+    let content_offset = phase1_markup_len(&open_tag);
     if let Some(id) = chapter_id {
-        fragment.push_str(" id=\"");
-        fragment.push_str(id);
-        fragment.push('"');
+        open_tag = inject_kobo_id(&open_tag, id);
     }
-    fragment.push_str(" class=\"");
-    fragment.push_str(spec.class_name);
-    fragment.push_str("\">");
-    fragment.push_str(&convert_inline_with_yoko(text, config, in_yoko));
+    fragment.push_str(&open_tag);
+    fragment.push_str(&convert_inline_at(text, config, in_yoko, content_offset));
     fragment.push_str("</");
     fragment.push_str(spec.element);
     fragment.push_str(">\n");
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_line(
     fragment: &mut String,
     line: &str,
@@ -2184,13 +2246,24 @@ fn append_line(
     chapter_id: Option<&str>,
     page_break_chapter: bool,
     in_yoko: bool,
+    empty_paragraphs: &mut Vec<(usize, usize)>,
 ) {
     let converted = convert_inline_with_yoko(line, config, in_yoko);
     if append_open_image_line(fragment, &converted) {
         return;
     }
     if converted.trim().is_empty() {
-        fragment.push_str("    <p><br/></p>\n");
+        // Java printLineBuffer は空バッファを空行として数え、次の行の出力時に
+        // まとめて `<p><br/></p>` を出す。Lite はその場で1行出し、セクション
+        // 末尾に残った空行は後段で取り除く (trim_trailing_empty_paragraphs)。
+        if line.trim().is_empty() {
+            fragment.push_str("    <p><br/></p>\n");
+        } else {
+            // 注記だけで本文が空になった行 (記録して末尾なら取り除く)
+            let start = fragment.len();
+            fragment.push_str("    <p><br/></p>\n");
+            empty_paragraphs.push((start, fragment.len()));
+        }
     } else {
         *output_count += 1;
         // 見出し注記で生成された h1/h2/h3 は <p> で包まない（Java 準拠）
@@ -2219,6 +2292,7 @@ fn append_line(
         }
     }
 }
+#[allow(clippy::too_many_arguments)]
 fn append_block_line(
     fragment: &mut String,
     line: &str,
@@ -2227,13 +2301,21 @@ fn append_block_line(
     chapter_id: Option<&str>,
     page_break_chapter: bool,
     in_yoko: bool,
+    empty_paragraphs: &mut Vec<(usize, usize)>,
 ) {
     let converted = convert_inline_with_yoko(line, config, in_yoko);
     if append_open_image_line(fragment, &converted) {
         return;
     }
     if converted.trim().is_empty() {
-        fragment.push_str("<p><br/></p>\n");
+        // append_line と同じ (Java printLineBuffer の空行扱い)。
+        if line.trim().is_empty() {
+            fragment.push_str("<p><br/></p>\n");
+        } else {
+            let start = fragment.len();
+            fragment.push_str("<p><br/></p>\n");
+            empty_paragraphs.push((start, fragment.len()));
+        }
     } else {
         *output_count += 1;
         match chapter_id.filter(|_| !page_break_chapter) {
