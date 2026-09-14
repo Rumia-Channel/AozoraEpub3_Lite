@@ -667,6 +667,12 @@ fn chapter_name(line: &str, config: &AozoraConfig) -> String {
             if cleaned.ends_with('※') {
                 cleaned.pop();
             }
+            // Java convertGaijiChuki は特殊文字 (※《》｜＃) の直前に内部マーカーを
+            // 積む。マーカーは 《》｜＃ では \u0001 で後段の getChapterName が
+            // 除去するが、米印 (※) はリテラルな ※ なので 2 文字残る。
+            if replacement == "※" {
+                cleaned.push('※');
+            }
             cleaned.push_str(&replacement);
         }
         rest = &after[close + '］'.len_utf8()..];

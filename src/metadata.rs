@@ -828,10 +828,9 @@ fn unescape_marks(line: &str) -> String {
 }
 
 fn special_next(chars: &[char], index: usize) -> bool {
-    matches!(
-        chars[index],
-        '※' | '《' | '》' | '［' | '］' | '〔' | '〕' | '｜'
-    )
+    // Java が内部エスケープマーカー (\u0001) を挿すのは 《 》 ｜ ＃ の場合だけ。
+    // 米印 (※) は literal な ※ を 2 文字出力するため、※※ を潰してはいけない。
+    matches!(chars[index], '《' | '》' | '｜' | '＃')
 }
 
 /// Collapses runs of `= ＝ - ― ─` into a single character, matching the
@@ -1096,7 +1095,9 @@ mod tests {
              \n本文",
             TitleType::TitleAuthor,
         );
-        assert_eq!(book.title.as_deref(), Some("ルビ※※"));
+        // Java: 米印外字は ※ を 2 文字出力するため 2 つの米印で ※※※※ になる
+        // (test_ruby.txt の Java 出力ファイル名も ルビ※※※※《》)
+        assert_eq!(book.title.as_deref(), Some("ルビ※※※※"));
     }
 
     #[test]
