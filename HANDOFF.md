@@ -302,6 +302,13 @@ java -cp "<classes>;AozoraEpub3.jar" AozoraEpub3 -i <ini> -ext .epub -d <out> <i
 - `JisConverter` の面区点テーブル全表を `src/jis.rs` に移植
   (`tools/gen_jis.py` で生成)。辞書に無い面区点コード付き外字注記の
   不一致 60/75 → 0/75
+- 画像系: `scan_top` の代入漏れ (上余白が切り取られない)、
+  `SinglePageWidth`/`SinglePageSizeW`/`SinglePageSizeH` と
+  `AutoMarginWhiteLevel` の既定値、画像幅の `Double.toString` 表記、
+  `.jpeg` → `.jpg` 正規化、画像のみ ZIP の `FileNameComparator` 並び替え、
+  `RotateImage` の適用条件 (Java は単ページ画像とアーカイブ入力の本文画像
+  のみ)、画像注記の `（`/`）` 解析 (最後の `（` 〜 最初の `、`/`）`)、
+  画像指定外字 (`※［＃…（file）］` → 外字画像)
 
 ### 意図的に再現していない Java 側の挙動
 
@@ -322,10 +329,14 @@ java -cp "<classes>;AozoraEpub3.jar" AozoraEpub3 -i <ini> -ext .epub -d <out> <i
 - `NoIllust=1` のセクション数 (Java は `isImageSectionLine` も無効化するため
   単ページ画像由来の改ページが消える)
 - 画像の連番 (`NNNN.ext`) は Java と一致しない場合がある
-- 表紙の `AutoMargin` / `IMAGEPAGE_NOFIT` / `RotateImage` の適用条件、
-  `SinglePageWidth` 等の既定値 (Java 600/480/640 に対し 550/400/600)、
-  `AutoMarginWhiteLevel` 既定 (80 vs 100)、`scan_top` の代入漏れ、
-  `RotateImage` の無条件適用、JIS 以外の画像系の細部
+- `IMAGE_PAGE_NOFIT` (FitImage=0 で画面内に収まる単ページ画像) の扱いと
+  `ImageFitW/H` / `ImageHeight` 相当の単ページ画像 CSS
+- 画像バイト列の一致: Java は色モデル (2 値 / インデックス / グレー) を保持し
+  WebP を Lossy で書くため、リサイズが入る画像は byte 一致しない
+- `ChukiRuby` (`［＃「○」に「△」のルビ］` / 注記付き → ルビ / 小書き)
+- 章名の自動抽出キー (`ChapterExclude` / `ChapterUseNextLine` / `ChapterName` /
+  `ChapterNum*` / `ChapterPattern` / `ChapterNameLength`) は未実装
+- タイトル・章名の `※` 圧縮 (Java は米印外字で `※` を 1 文字余分に出す)
 
 フィクスチャ 21 件のうち 17 件が byte 一致 (残り 4 件は上記)。
 
@@ -360,6 +371,10 @@ java -cp "<classes>;AozoraEpub3.jar" AozoraEpub3 -i <ini> -ext .epub -d <out> <i
 - `6e773d0`: `NoIllust` を実装する
 - `fb35008`: `TocVertical` を配線し目次ラベルに縦中横を適用する
 - `1f7f5b7`: JIS X 0213 の面区点テーブルを Java から移植する
+- `c2b2b83`: 余白除去・既定値・並び順・拡張子を Java 版に一致させる
+- `660590b`: RotateImage を Java と同じ条件でのみ適用する
+- `bfb82ad`: 画像注記のファイル名抽出を Java 版に一致させる
+- `051ccb8`: 画像指定外字を外字画像として出力する
 
 再開時は既存差分を破棄せず、まず `git status --short --branch` で状態を確認すること。
 
