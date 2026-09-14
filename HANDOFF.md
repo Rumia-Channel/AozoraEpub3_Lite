@@ -632,6 +632,25 @@ Java の規則は `UUID.nameUUIDFromBytes((title + "-" + creator).getBytes())`
 実データ (n0421du) は 423 エントリ中 422 が byte 一致のまま
 (残りは dcterms:modified のみ)。`tools/parity_check.py` は 19/21。
 
+### 2026-09-15: FileSource 入力の画像解決 (commit `6fe665c`)
+
+narou.rs の Worker 経路 (`Input::from_source`) では挿絵が 1 枚も集まらず、
+画像パイプライン (単ページ画像化・連番・表紙判定) が使えなかった。
+`pipeline::collect_assets` が `Input::is_archive()` だけを見ており、
+FileSource 入力をファイルシステム側 (入力パスの隣) で解決しようとしていたため。
+
+- `Input::has_source()` を追加し、`collect_assets` の 3 箇所 (参照の有無 /
+  パス解決 / バイト読み出し) と、CLI の書き出し時プロバイダ・
+  `decorate_image_tags` の archive フラグを
+  `input.is_archive() || input.has_source()` に変更
+  (`Input::read_image` / `resolve_image_path` は元から FileSource 対応)
+- 回帰テスト `collects_and_reflows_images_from_a_file_source`: FileSource に
+  本文 + 挿絵 2 枚 (700x900) を入れ、収集 → 装飾 → 参照名の書き換え →
+  表紙画像の除外 → 再構成まで CLI と同じ順で通し、`image/0001.png` (表紙) と
+  `image/0002.png` (単ページ) を確認。修正前は assets 0 件で失敗する
+- CLI (.txt / .zip 入力) は不変 (`has_source()` は false)。parity_check 19/21、
+  実データ 422/423 byte 一致、fullsp 1,944 = 1,944
+
 ### 2026-09-15: v0.1.3 リリース
 
 - タグ `v0.1.3` / master `5b09168` (develop からの `--no-ff` マージ)。成果物 6 件
@@ -692,6 +711,7 @@ Java の規則は `UUID.nameUUIDFromBytes((title + "-" + creator).getBytes())`
 - `d997dd8` / `01df448`: HANDOFF の記録
 - `1c3fca6`: バージョンを 0.1.3 にする (v0.1.3 として master へ `--no-ff` マージ)
 - `f6cb2dd`: ルビ基底のフェーズ1位置の underflow 修正 (develop のみ、v0.1.4 に載る)
+- `6fe665c`: FileSource 入力でも挿絵を解決できるようにする (v0.1.4 に載る)
 
 2026-09-14 の修正は以下のコミット。
 
