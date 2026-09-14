@@ -57,6 +57,9 @@ fn convert_inline_with_options(
     // 文字位置。SpaceHyphenation の `idx > 20` 判定に使う。注記はタグ長、
     // ルビ・生タグ・〔〕は raw 文字数、※エスケープは 2 として数える。
     let mut java_pos = 0usize;
+    // Java convertReplacedChar は使用済みのエスケープ対象文字を `ch[idx] = '　'`
+    // で潰すため、同じ文字が続けてマーカーとして使われることはない。
+    let mut escaped_at: Option<usize> = None;
     // Java bufSuf 相当: chuki_tag.txt 3列目の行末タグを行末に出力するための遅延バッファ
     let mut deferred_close = String::new();
     while index < chars.len() {
@@ -85,11 +88,16 @@ fn convert_inline_with_options(
         if matches!(chars[index], '《' | '》' | '｜' | '＃' | '※')
             && index > 0
             && chars[index - 1] == '※'
+            && escaped_at != Some(index - 1)
+            // Java は外字変換 (convertGaijiChuki) を先に通すため、※［＃…］ の
+            // ※はマーカーではなく外字注記の開始文字になる
+            && !(chars[index] == '※' && starts_note(&chars, index))
         {
             if output.ends_with('※') {
                 output.pop();
             }
             push_text_char_escaped(&mut output, chars[index]);
+            escaped_at = Some(index);
             index += 1;
             java_pos += 1;
             continue;
@@ -503,6 +511,12 @@ fn rewrite_escape_pairs(input: &str) -> String {
         index += 1;
     }
     output
+}
+
+/// `chars[index+1..]` が `［＃` で始まるか（= `chars[index]` が外字注記の
+/// 開始 `※` かどうか）。
+fn starts_note(chars: &[char], index: usize) -> bool {
+    chars.get(index + 1) == Some(&'［') && chars.get(index + 2) == Some(&'＃')
 }
 
 /// ／＼→〳〵 ／″＼→〴〵 (くの字点)
