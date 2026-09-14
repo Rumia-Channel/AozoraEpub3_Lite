@@ -615,7 +615,9 @@ Java の規則は `UUID.nameUUIDFromBytes((title + "-" + creator).getBytes())`
 - **セクション末尾の空行**: 注記だけで本文が空になった行は Java では
   printEmptyLines に積まれ、次の行の出力時にまとめて `<p><br/></p>` になる。
   セクション末尾に残った分は出力されないため、Lite も末尾に接するものは
-  取り除く (`trim_trailing_empty_paragraphs`)
+  取り除く (`trim_trailing_empty_paragraphs`)。なお Java の
+  `setRemoveEmptyLine` は **`MaxEmptyLine=0` を「無制限」に読み替える**
+  (`Integer.MAX_VALUE`)。「0 = 空行を出さない」ではないので注意
 - **複合字下げの閉じ注記の直前の全角スペース**: Java の `ch[idx+1]` は
   フェーズ1バッファ上の次の文字なので、何も出力しない注記は読み飛ばす
   (`next_phase1_char`)。表に無い複合字下げの閉じ注記が直後にある場合は
