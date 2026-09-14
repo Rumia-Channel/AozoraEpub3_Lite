@@ -500,7 +500,22 @@ Lite はテンプレートを `include_str!` でコンパイル埋め込みし�
 ファイルが入らないことを実測)。ユーザーが格納済みテンプレートと同じ名前で
 `_custom` を置いた場合のみ Java 側だけが差し替えるため、既知の残差として扱う。
 
-## 作業ツリーとコミット状態## 作業ツリーとコミット状態
+### 2026-09-14: v0.1.2 リリース
+
+- タグ `v0.1.2` / master `75cc5a4` (develop からの `--no-ff` マージ)。成果物 6 件
+  (linux/mac/win × x64/arm64)。Release ワークフローの検証・ビルド・署名・公開が全て成功
+- リリースノートは自動生成だと PR 1 件しか出ないため `gh release edit --notes-file`
+  で要約 (修正 3 件 + 注記タグの追加 + 検証状況) を入れた
+- リリース後の追加修正 (develop のみ、次回リリースに載る)
+  - `tests/fixtures/test_ruby.txt` を同梱し、`sample/` (gitignore) 依存だった
+    `keeps_separator_blank_from_real_ruby_fixture` を CI でも実行できるようにした。
+    同梱物は Java 版 `test_data/test_ruby.txt` (Shift_JIS, 7.3KB) と同一で、
+    `assets/aozora/*` と同じく上流 GPL-3.0 資産の再配布
+  - `scripts/package-release.ps1` の `-Version` 既定 (0.1.0) を廃止して必須化
+    (手動実行で誤った名前の成果物が出るため。CI は既に `-Version` を渡している)
+  - HANDOFF の「作業ツリーとコミット状態」見出しが 1 行に 2 回並んでいたのを修正
+
+## 作業ツリーとコミット状態
 引き継ぎ後に完了した論理単位は、以下のコミットとして `develop` へ commit / push 済み。
 
 - `bc3a29d`: Aozora 変換データ資産
