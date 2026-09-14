@@ -2578,7 +2578,11 @@ mod tests {
     }
     #[test]
     fn keeps_separator_blank_from_real_ruby_fixture() {
-        // Java 版 test_data/test_ruby.txt を同梱したもの (Shift_JIS)
+        // 直上の `keeps_separator_blank_from_gaiji_title_fixture` は同じ先頭行を
+        // インライン文字列で持ち、メタデータ除去の完全一致を見る。こちらは
+        // 同梱した Java 版 test_data/test_ruby.txt を丸ごと通す経路
+        // (Shift_JIS の自動判別 → 全文のメタデータ検出 → 本文) を守るため、
+        // 重複ではなく別の被覆。同梱物は tests/fixtures/ を参照。
         let bytes = std::fs::read("tests/fixtures/test_ruby.txt").unwrap();
         let text = decode_text(&bytes, None).unwrap();
         let config = AozoraConfig::default();
