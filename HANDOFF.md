@@ -336,7 +336,14 @@ java -cp "<classes>;AozoraEpub3.jar" AozoraEpub3 -i <ini> -ext .epub -d <out> <i
 - `ChukiRuby` (`［＃「○」に「△」のルビ］` / 注記付き → ルビ / 小書き)
 - 章名の自動抽出キー (`ChapterExclude` / `ChapterUseNextLine` / `ChapterName` /
   `ChapterNum*` / `ChapterPattern` / `ChapterNameLength`) は未実装
-- タイトル・章名の `※` 圧縮 (Java は米印外字で `※` を 1 文字余分に出す)
+- タイトル・章名の `※` 圧縮。`test_ruby.txt` で Java は `ルビ※※※※《》`、
+  Lite は `ルビ※※《》` となる。Java は 444d66d で内部エスケープを `※` から
+  `\u0001` に変えたため、`CharUtils.getChapterName` は `\u0001` の除去だけを
+  行い、`※` は通常文字として残る (米印外字は `※` を 2 文字出力する)。
+  Lite の `metadata.rs` は旧挙動 (`※` + 特殊文字のペア除去) を移植しており、
+  単純に外すと逆に 1 文字多い `ルビ※※※※※《※》` になる。切り分けには
+  `convert_gaiji_notes` と `remove_ruby` / `unescape_marks` の適用順の整理が
+  必要 (未着手)。
 
 フィクスチャ 21 件のうち 17 件が byte 一致 (残り 4 件は上記)。
 
