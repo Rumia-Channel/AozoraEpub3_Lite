@@ -265,6 +265,70 @@ Web小説取得、HTTP / HTTPS リソース取得、RAR入力、GUIは、未実�
 この監査では、軽量版の互換対象をローカル入力からEPUBを生成する経路に限定した。Web小説取得、HTTP / HTTPS、RAR、GUIは実装対象外として評価から除外する。
 
 
+## 2026-09-14: Java 版との全面監査と修正
+
+Java 版 (kyukyunyorituryo/AozoraEpub3) の 8 サブシステムを並列監査し、ローカル
+変換経路の欠落・不一致を洗い出して修正した。**インストール済みの
+`AozoraEpub3.jar` は参照にならない**点に注意。jar (2026-08-07 ビルド) は
+リポジトリ `src/` (2026-09-11) より古く、`ImageInfoReader.correctExt` の
+null ガード (1453e12) が未反映で `test_chapter.txt` の変換が
+`NullPointerException` で落ちる。参照実装は `src/` を javac でビルドして使う。
+
+```text
+javac -encoding UTF-8 -proc:none -cp "AozoraEpub3.jar" -d <classes> <src/**/*.java>
+java -cp "<classes>;AozoraEpub3.jar" AozoraEpub3 -i <ini> -ext .epub -d <out> <input>
+```
+
+`--config-dir` は注記資産の場所を指定するだけで、変換フラグを変えてはならない。
+（以前は Java CLI パリティの上書きが `--config-dir` の有無で分岐していた。）
+
+### 修正済み
+
+- 表紙ページを `item/xhtml/cover.xhtml` に出力（manifest の href と一致せず
+  参照切れだった）。`cover.vm` を再現（fixed-layout-jp.css / viewport /
+  `epub:type="cover"` / SVG 画像）
+- `-i`/`--preset` 指定時に `AutoYoko` / `DakutenType` / `IvsBMP` / `IvsSSP` が
+  捨てられる問題。`AutoYokoEQ3` の既定を true に（Java は INI キーを持たず
+  常に有効）。`replace.txt` を `replace_sample.txt` に改名して Java と同じ
+  「未使用」状態に
+- noBr 行の複合字下げ開きタグ欠落、字下げ省略 (前ブロックを同じ行で閉じる)、
+  キャプション終わりでの画像ラッパー閉じ
+- `※` エスケープの判定順（Java は外字変換が先）と連鎖（`ch[idx]='　'` 相当）
+- package.vm の空行と表紙 itemref のインデント、toc.ncx の本文フォールバック、
+  表紙 item の属性順
+- スタイル設定 8 キー (`PageMargin` / `BodyMargin` / `*Unit` / `LineHeight` /
+  `FontSize` / `BoldUseGothic` / `gothicUseBold`) を text.css に反映
+- `CoverPage` / `CoverPageToc` / `TocVertical` / `NoIllust` を実装
+- `JisConverter` の面区点テーブル全表を `src/jis.rs` に移植
+  (`tools/gen_jis.py` で生成)。辞書に無い面区点コード付き外字注記の
+  不一致 60/75 → 0/75
+
+### 意図的に再現していない Java 側の挙動
+
+- `［＃米印］` 等で内部エスケープマーカーが `※` から `\u0001` に変わった
+  (444d66d) 影響で、`＜＜` / `＞＞` がルビとして解釈され行が欠落する
+  (`test_chuki.txt` 0049)。Lite は文書化された意図 (`＜＜` → リテラルの `《`)
+  に従う
+- `dcterms:modified`: Java はローカル時刻に `Z` を付ける。Lite は UTC
+- 章名中の `※` の並びで行が欠落する件 (kyukyunyorituryo/AozoraEpub3#34)
+
+### 既知の残差
+
+- `test_title.txt` 0001: 表題前の表紙画像（`preTitleBuf` 相当）で
+  Java は `<p><br/></p>` + p なし `<span>`、Lite は `<p><span>`
+- `test_ruby.txt`: タイトル抽出の `※` 圧縮が Java と異なり出力ファイル名が
+  `ルビ※※※※《》` vs `ルビ※※《》`
+- `test_png.zip`: 画像のみ EPUB の `standard.opf`
+- `NoIllust=1` のセクション数 (Java は `isImageSectionLine` も無効化するため
+  単ページ画像由来の改ページが消える)
+- 画像の連番 (`NNNN.ext`) は Java と一致しない場合がある
+- 表紙の `AutoMargin` / `IMAGEPAGE_NOFIT` / `RotateImage` の適用条件、
+  `SinglePageWidth` 等の既定値 (Java 600/480/640 に対し 550/400/600)、
+  `AutoMarginWhiteLevel` 既定 (80 vs 100)、`scan_top` の代入漏れ、
+  `RotateImage` の無条件適用、JIS 以外の画像系の細部
+
+フィクスチャ 21 件のうち 17 件が byte 一致 (残り 4 件は上記)。
+
 ## 作業ツリーとコミット状態
 引き継ぎ後に完了した論理単位は、以下のコミットとして `develop` へ commit / push 済み。
 
@@ -283,7 +347,19 @@ Web小説取得、HTTP / HTTPS リソース取得、RAR入力、GUIは、未実�
 - `325c0a8`: コメントブロックの字下げ抑止
 - `f740859`: Parity 残差分 64行→8行（19/21完全一致、画像・横組み・窓見出し・0049・目次章名・空行処理）
 
-`develop` の HEAD は `origin/develop` より先行しており、今回のパリティ修正と本 HANDOFF 更新は未 push。`master` は変更していない。
+`develop` の HEAD は `origin/develop` と同期している (`master` は変更していない)。
+2026-09-14 の修正は以下のコミット。
+
+- `a7e0144`: 表紙ページと OPF/NCX を Java 版に一致させる
+- `18894c8`: `-i`/`--preset` 指定時に INI の変換フラグが捨てられる問題を修正
+- `1a72dbb`: noBr 行のブロック注記処理を Java 版に一致させる
+- `e4db6e3`: `※` エスケープの判定順と連鎖を Java 版に一致させる
+- `3c7c47c`: インライン字下げ注記でも字下げ省略を適用する
+- `893784d`: スタイル設定 8 キーを text.css に反映する
+- `db1bcd5`: `CoverPage` / `CoverPageToc` を実装する
+- `6e773d0`: `NoIllust` を実装する
+- `fb35008`: `TocVertical` を配線し目次ラベルに縦中横を適用する
+- `1f7f5b7`: JIS X 0213 の面区点テーブルを Java から移植する
 
 再開時は既存差分を破棄せず、まず `git status --short --branch` で状態を確認すること。
 

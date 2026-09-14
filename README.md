@@ -180,10 +180,17 @@ AozoraEpub3_Lite --preset presets/kobo_touch.ini 作品.txt
 - `Vertical`: 縦書き / 横書き
 - `TitleType`: タイトル・著者の取得方法
 - `PageBreak*`: 改ページ判定のしきい値
+- `CoverPage` / `CoverPageToc`: 表紙ページの出力と目次への追加
+- `TocPage` / `TocVertical`: 目次ページの出力と縦書き指定
+- `NoIllust`: 挿絵を出力しない（表紙と外字画像は残ります）
+- `PageMargin` / `BodyMargin` / `LineHeight` / `FontSize` / `BoldUseGothic` / `gothicUseBold`: 本文 CSS
 - `CoverW` / `CoverH`: 表紙サイズ
 - `FitImage`: 画像を表示領域に収めるかどうか
 - `ImageFloatPage` / `ImageFloatBlock`: 画像の回り込み設定
 - `SvgImage`: 単ページ画像を SVG 固定レイアウトにするかどうか
+
+`-i` / `--preset` で読み込んだ INI はコマンドラインオプションより優先度が低く、
+同じ項目を両方で指定した場合はコマンドラインが優先されます。
 
 ## 注記定義ファイル
 
@@ -293,9 +300,11 @@ book.write_to_stream_with(response_body, |epub_path| {
 - [hmdev/AozoraEpub3](https://github.com/hmdev/AozoraEpub3)
 - [kyukyunyorituryo/AozoraEpub3](https://github.com/kyukyunyorituryo/AozoraEpub3)
 
-ローカル変換の XHTML 出力について、21 件のテストフィクスチャのうち 19 件は Java 版と完全一致しています。残る差分は 8 行で、表紙画像まわりの特殊ケース 3 行と、Java 版側のデータ欠落挙動 5 行です。
+ローカル変換の出力について、21 件のテストフィクスチャのうち 17 件が Java 版と byte 一致しています。残る 4 件は、表題前の表紙画像のバッファ処理、タイトル抽出時の記号の扱い、画像のみ EPUB の OPF です。
 
-Java 版で、章名中の `※` の並びによって行が欠落するケースがあります。この挙動は AozoraEpub3_Lite では意図的に再現していません。詳細は [kyukyunyorituryo/AozoraEpub3#34](https://github.com/kyukyunyorituryo/AozoraEpub3/issues/34) を参照してください。
+Java 版で、章名中の `※` の並びによって行が欠落するケースがあります。また `＜＜` / `＞＞` がルビとして解釈され行が欠落するケースがあります。これらの挙動は AozoraEpub3_Lite では意図的に再現していません。前者の詳細は [kyukyunyorituryo/AozoraEpub3#34](https://github.com/kyukyunyorituryo/AozoraEpub3/issues/34) を参照してください。
+
+なお、Java 版 AozoraEpub3 の同梱 jar はビルド時点がリポジトリより古い場合があり、`test_chapter.txt` の変換が例外で終了することがあります。差分を取る場合はリポジトリの `src/` をビルドして参照実装にしてください。
 
 ## 対象外
 
