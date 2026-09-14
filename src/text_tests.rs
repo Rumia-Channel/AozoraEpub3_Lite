@@ -914,3 +914,23 @@ fn resolves_gaiji_notes_by_jis_code_without_dictionary_entry() {
     assert!(output.contains("<p>\u{20089}</p>"), "{output}");
     assert!(!output.contains("〓"), "{output}");
 }
+
+/// Java `getImageChukiFileName` は `lastIndexOf('（')` から最初の `、`/`）` までを
+/// ファイル名にする。説明文中に `（` があってもファイル名を取り違えない。
+#[test]
+fn resolves_image_source_after_inner_parentheses() {
+    let output = plain_text_to_xhtml(
+        "表題\n著者\n\n［＃「図（A）」のキャプション付きの図（fig.png）入る］\n\
+         ［＃ここからキャプション］\n説明\n［＃ここでキャプション終わり］\n",
+    )
+    .unwrap();
+    assert!(output.contains("src=\"../image/fig.png\""), "{output}");
+}
+
+/// サイズ指定付き（`（file、横W×縦H）`）でもファイル名だけを取り出す。
+#[test]
+fn resolves_image_source_before_size_specification() {
+    let output =
+        plain_text_to_xhtml("表題\n著者\n\n［＃左画像（fig.png、横320×縦322）入る］\n").unwrap();
+    assert!(output.contains("src=\"../image/fig.png\""), "{output}");
+}

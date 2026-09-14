@@ -1737,13 +1737,21 @@ fn image_note_parts(chars: &[char], start: usize) -> Option<(usize, String, Stri
         .skip(start + 2)
         .find_map(|(index, character)| (*character == '］').then_some(index))?;
     let note = chars[start + 2..close].iter().collect::<String>();
-    let open_paren = note.find('（')?;
-    let close_paren = note.rfind('）')?;
-    if open_paren >= close_paren {
-        return None;
-    }
-    let inside = &note[open_paren + '（'.len_utf8()..close_paren];
-    let path = inside.split('、').next()?.trim();
+    // Java `getImageChukiFileName`: 呼び出し側が lastIndexOf('（') を渡し、
+    // 最初の '、' か '）' の早い方までをファイル名とする。(どちらも無ければ
+    // 画像注記ではない)
+    let open_paren = note.rfind('（')?;
+    let after = &note[open_paren + '（'.len_utf8()..];
+    let end = match after.find('、') {
+        Some(comma) => match after.find('）') {
+            Some(parenthesis) if parenthesis < comma => parenthesis,
+            Some(_) => comma,
+            // Java は min(comma, -1) = -1 となり null を返す
+            None => return None,
+        },
+        None => after.find('）')?,
+    };
+    let path = after[..end].trim();
     if !path.contains('.') {
         return None;
     }
