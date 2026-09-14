@@ -216,7 +216,8 @@ fn writes_cover_document_and_cover_manifest_property() {
         "image/jpeg",
         vec![0xff, 0xd8, 0xff],
     )])
-    .with_cover_asset("image/cover.jpg");
+    .with_cover_asset("image/cover.jpg")
+    .with_cover_page(true, false);
     let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
     let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
 
@@ -226,9 +227,10 @@ fn writes_cover_document_and_cover_manifest_property() {
         .unwrap()
         .read_to_string(&mut package)
         .unwrap();
+    // Java package.vm: 表紙画像だけ属性順が media-type → id → href。
     assert!(
         package.contains(
-            "href=\"image/cover.jpg\" media-type=\"image/jpeg\" properties=\"cover-image\""
+            "<item media-type=\"image/jpeg\" id=\"img0001\" href=\"image/cover.jpg\" properties=\"cover-image\"/>"
         )
     );
     assert!(package.contains("id=\"cover-page\" href=\"xhtml/cover.xhtml\""));

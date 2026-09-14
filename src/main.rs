@@ -254,6 +254,14 @@ fn convert_input(
             &image_references(&text),
             &resolved_references,
         );
+        // Java Epub3Writer.getImageFilePath: 表紙ページに移動した挿絵は
+        // 本文から取り除く (先頭の挿絵を表紙に使う -c 0 のときのみ)。
+        if config.cover_page
+            && is_auto_cover(cover_setting)
+            && let Some(cover) = cover.as_deref()
+        {
+            remove_image_sources(&mut sections, &[cover.to_owned()]);
+        }
         reflow_image_sections(&mut sections, &mut chapter_records, &assets, config);
 
         let nav_chapters = chapter_records
@@ -338,6 +346,7 @@ fn convert_input(
             .with_vertical(vertical)
             .with_kindle(is_kindle(options))
             .with_toc_page(config.toc_page)
+            .with_cover_page(config.cover_page, config.cover_page_toc)
             .with_style(StyleSettings::from_ini(&config.ini))
             .with_toc_nest(config.nav_nest, config.ncx_nest)
             .with_title_toc(config.title_toc)
@@ -890,11 +899,20 @@ fn remove_missing_image_sources(
     references: &[String],
     resolved_references: &[String],
 ) {
-    for reference in references {
-        if resolved_references.contains(reference) {
-            continue;
-        }
-        let source = format!("../image/{}", escape_html(reference));
+    let missing = references
+        .iter()
+        .filter(|reference| !resolved_references.contains(reference))
+        .map(|reference| format!("image/{reference}"))
+        .collect::<Vec<_>>();
+    remove_image_sources(sections, &missing);
+}
+
+/// 指定した EPUB 内パス (`image/0001.jpg`) を参照する `<img>` を本文から取り除く。
+/// Java `Epub3Writer.getImageFilePath` が null を返す経路（画像未解決・表紙ページへ
+/// 移動した挿絵）と同じ後始末をする。
+fn remove_image_sources(sections: &mut [String], sources: &[String]) {
+    for source in sources {
+        let source = format!("src=\"../{}\"", escape_html(source));
         for section in sections.iter_mut() {
             let mut cursor = 0;
             while let Some(offset) = section[cursor..].find("<img") {
@@ -904,7 +922,7 @@ fn remove_missing_image_sources(
                 };
                 let end = start + end_offset + 2;
                 let tag = &section[start..end];
-                if !tag.contains(&format!("src=\"{source}\"")) {
+                if !tag.contains(source.as_str()) {
                     cursor = end;
                     continue;
                 }

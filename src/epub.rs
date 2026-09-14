@@ -323,6 +323,10 @@ pub struct EpubBook {
     pub cover_dimensions: Option<(u32, u32)>,
     /// `text.css` に展開するスタイル設定 (Java `text.vm` の変数)。
     pub style: StyleSettings,
+    /// `CoverPage` INI key: 表紙ページを xhtml/cover.xhtml に出力する。
+    insert_cover_page: bool,
+    /// `CoverPageToc` INI key: 目次に表紙への項目を追加する。
+    cover_page_toc: bool,
     pub chapters: Vec<NavChapter>,
     vertical: bool,
     toc_vertical: bool,
@@ -369,6 +373,8 @@ impl EpubBook {
             cover_asset: None,
             cover_dimensions: None,
             style: StyleSettings::default(),
+            insert_cover_page: false,
+            cover_page_toc: false,
             chapters: Vec::new(),
             vertical: true,
             toc_vertical: false,
@@ -408,6 +414,19 @@ impl EpubBook {
     pub fn with_style(mut self, style: StyleSettings) -> Self {
         self.style = style;
         self
+    }
+
+    /// `CoverPage` / `CoverPageToc` INI keys。表紙ページを出さない場合でも
+    /// 表紙画像は OPF の `cover-image` として残る (Java と同じ)。
+    pub fn with_cover_page(mut self, insert_cover_page: bool, cover_page_toc: bool) -> Self {
+        self.insert_cover_page = insert_cover_page;
+        self.cover_page_toc = cover_page_toc;
+        self
+    }
+
+    /// Java `bookInfo.insertCoverPage`: 表紙画像が無ければ表紙ページは出ない。
+    fn cover_page_enabled(&self) -> bool {
+        self.insert_cover_page && self.cover_asset.is_some()
     }
 
     pub fn with_vertical(mut self, vertical: bool) -> Self {
@@ -610,6 +629,7 @@ fn write_epub_body<W: Write + Seek>(
 
     if let Some(cover_asset) = &book.cover_asset
         && !image_only
+        && book.cover_page_enabled()
     {
         write_entry(
             archive,
@@ -672,6 +692,7 @@ fn write_epub_body<W: Write + Seek>(
             book.cover_asset.as_deref(),
             book.vertical,
             book.toc_page,
+            book.cover_page_enabled(),
         )
         .as_bytes(),
         CompressionMethod::Deflated,
@@ -689,6 +710,8 @@ fn write_epub_body<W: Write + Seek>(
             book.toc_page,
             book.nav_nest,
             book.title_toc,
+            book.cover_page_enabled(),
+            book.cover_page_enabled() && book.cover_page_toc,
         )
         .as_bytes(),
         CompressionMethod::Deflated,
@@ -703,6 +726,7 @@ fn write_epub_body<W: Write + Seek>(
             &book.chapters,
             book.ncx_nest,
             book.title_toc,
+            book.cover_page_enabled() && book.cover_page_toc,
         )
         .as_bytes(),
         CompressionMethod::Deflated,

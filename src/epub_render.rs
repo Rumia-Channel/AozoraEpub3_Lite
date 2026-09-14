@@ -84,6 +84,7 @@ pub(super) fn render_package(
     cover_asset: Option<&str>,
     vertical: bool,
     toc_page: bool,
+    insert_cover_page: bool,
 ) -> String {
     let identifier = metadata
         .identifier
@@ -199,11 +200,14 @@ pub(super) fn render_package(
     let mut manifest_gaiji = String::new();
     let mut gaiji_number = 0;
     for (index, asset) in assets.iter().enumerate() {
-        let properties = if !image_only && cover_asset == Some(asset.path.as_str()) {
-            " properties=\"cover-image\""
-        } else {
-            ""
-        };
+        // Java: `properties="cover-image"` は表紙ページを出力するときだけ付く
+        // (Epub3Writer の insertCoverPage ブロックで setIsCover(true) される)。
+        let properties =
+            if !image_only && insert_cover_page && cover_asset == Some(asset.path.as_str()) {
+                " properties=\"cover-image\""
+            } else {
+                ""
+            };
         if asset.path.starts_with("gaiji/") {
             gaiji_number += 1;
             manifest_gaiji.push_str(&format!(
@@ -214,19 +218,28 @@ pub(super) fn render_package(
             continue;
         }
         let id = asset_manifest_id(&asset.path, index + 1);
-        manifest_assets.push_str(&format!(
-            "\t\t<item id=\"{id}\" href=\"{}\" media-type=\"{}\"{properties}/>\n",
-            xml_escape(&asset.path),
-            xml_escape(&asset.media_type),
-        ));
+        // Java package.vm は表紙画像だけ属性の順序が異なる。
+        if properties.is_empty() {
+            manifest_assets.push_str(&format!(
+                "\t\t<item id=\"{id}\" href=\"{}\" media-type=\"{}\"{properties}/>\n",
+                xml_escape(&asset.path),
+                xml_escape(&asset.media_type),
+            ));
+        } else {
+            manifest_assets.push_str(&format!(
+                "\t\t<item media-type=\"{}\" id=\"{id}\" href=\"{}\"{properties}/>\n",
+                xml_escape(&asset.media_type),
+                xml_escape(&asset.path),
+            ));
+        }
     }
-    let cover_manifest = if !image_only && cover_asset.is_some() {
+    let cover_manifest = if !image_only && insert_cover_page {
         // Java package.vm: 表紙 item の直後にリテラル空行が1行入る
         "\t\t<item media-type=\"application/xhtml+xml\" id=\"cover-page\" href=\"xhtml/cover.xhtml\" properties=\"svg\"/>\n\n"
     } else {
         ""
     };
-    let cover_spine = if !image_only && cover_asset.is_some() {
+    let cover_spine = if !image_only && insert_cover_page {
         "\t\t   <itemref linear=\"yes\" idref=\"cover-page\" properties=\"rendition:page-spread-center\"/>\n"
     } else {
         ""
@@ -305,8 +318,16 @@ pub(super) fn render_nav(
     toc_page: bool,
     nav_nest: bool,
     title_toc: bool,
+    cover_page: bool,
+    cover_toc: bool,
 ) -> String {
     let mut nav_items = render_nav_items(chapters, sections, nav_nest, title_toc, title);
+    if cover_toc {
+        // Java xhtml_nav.vm: 表紙ページへの項目を目次の先頭に追加する。
+        nav_items = format!(
+            "\t\t\t<li class=\"chapter\" id=\"toccover\"><a href=\"xhtml/cover.xhtml\">表紙</a></li>\r\n{nav_items}"
+        );
+    }
     if chapters.is_empty() && title_toc && sections.iter().any(is_title_page) {
         // Java: タイトルページを目次の先頭に書籍タイトルで追加する
         let title = xml_escape(&metadata.title);
@@ -330,6 +351,12 @@ pub(super) fn render_nav(
             format!("xhtml/{body_number:04}.xhtml")
         });
     let mut landmark = String::new();
+    if cover_page {
+        // Java xhtml_nav.vm landmarks: 表紙ページへの項目。
+        landmark.push_str(
+            "\t\t\t<li><a epub:type=\"cover\" href=\"xhtml/cover.xhtml\">表紙</a></li>\r\n",
+        );
+    }
     if toc_page {
         landmark.push_str("\t\t\t<li><a epub:type=\"toc\" href=\"nav.xhtml\">目次</a></li>\r\n");
     }
@@ -487,8 +514,11 @@ pub(super) fn render_ncx(
     chapters: &[NavChapter],
     ncx_nest: bool,
     title_toc: bool,
+    cover_toc: bool,
 ) -> String {
-    let mut entries: Vec<TocEntry> = if chapters.is_empty() {
+    // Java toc.ncx.vm: toccover が playOrder 1 を占めるため hasNcxItem が真になり、
+    // 本文のみのフォールバックも使われない。
+    let mut entries: Vec<TocEntry> = if chapters.is_empty() && !cover_toc {
         // Java toc.ncx.vm: 章情報も表紙目次も無いときは `#if (!$hasNcxItem)` の
         // フォールバックに入り、最初のセクションだけをインデント無しの
         // navPoint で出力して `#break` する。
@@ -536,8 +566,20 @@ pub(super) fn render_ncx(
         .or_else(|| metadata.identifier.strip_prefix("urn:"))
         .unwrap_or(&metadata.identifier);
     let mut nav_points = String::new();
+    if cover_toc {
+        nav_points.push_str(
+            "\t<navPoint id=\"toccover\" playOrder=\"1\">\n\
+            \t\t<navLabel>\n\
+            \t\t\t<text>表紙</text>\n\
+            \t\t</navLabel>\n\
+            \t\t<content src=\"xhtml/cover.xhtml\"/>\n\
+            \t</navPoint>\n",
+        );
+    }
+    // 表紙項目があると以降の playOrder が 1 ずれる。
+    let play_order_offset = usize::from(cover_toc);
     for (index, entry) in entries.iter().enumerate() {
-        let play_order = index + 1;
+        let play_order = index + 1 + play_order_offset;
         let label = if entry.markup {
             entry.label.clone()
         } else {
@@ -628,8 +670,7 @@ width="100%" height="100%" viewBox="0 0 {width} {height}">
 </svg>
 </div>
 </body>
-</html>
-"#
+</html>"#
     )
 }
 

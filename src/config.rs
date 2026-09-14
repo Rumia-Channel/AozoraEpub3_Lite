@@ -304,6 +304,10 @@ pub struct AozoraConfig {
     pub ncx_nest: bool,
     /// `TitleToc` INI: 表題を目次に含める (Java BookInfo 既定 true、CLI は INI 無記載で false)。
     pub title_toc: bool,
+    /// `CoverPage` INI key: 表紙ページを出力する (Java 既定 false)。
+    pub cover_page: bool,
+    /// `CoverPageToc` INI key: 目次に表紙への項目を追加する。
+    pub cover_page_toc: bool,
     /// 章検出 `ChapterSection`: 改ページ後の先頭行を章にする (Java: キー無記載で true)。
     pub chapter_section: bool,
     /// 章検出 `ChapterH/H1/H2/H3`: 見出し注記を章にする (Java 既定 false)。
@@ -459,6 +463,8 @@ impl Default for AozoraConfig {
             nav_nest: false,
             ncx_nest: false,
             title_toc: true,
+            cover_page: false,
+            cover_page_toc: false,
             chapter_section: true,
             chapter_h: false,
             chapter_h1: false,
@@ -540,6 +546,8 @@ impl AozoraConfig {
         let nav_nest = ini.get_bool("NavNest").unwrap_or(false);
         let ncx_nest = ini.get_bool("NcxNest").unwrap_or(false);
         let title_toc = ini.get_bool("TitleToc").unwrap_or(false);
+        let cover_page = ini.get_bool("CoverPage").unwrap_or(false);
+        let cover_page_toc = ini.get_bool("CoverPageToc").unwrap_or(false);
         // Java: ChapterSection はキー無記載で true、値があれば "1" のみ true。
         let chapter_section = match ini.get("ChapterSection") {
             None => true,
@@ -584,6 +592,8 @@ impl AozoraConfig {
             nav_nest,
             ncx_nest,
             title_toc,
+            cover_page,
+            cover_page_toc,
             chapter_section,
             chapter_h,
             chapter_h1,
