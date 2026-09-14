@@ -1459,6 +1459,10 @@ fn is_standalone_image_line(line: &str) -> bool {
         .and_then(|value| value.strip_suffix("</span>"))
         .map(str::trim)
         .unwrap_or(inner);
+    // 外字画像は Java では printImageChuki を通らず単ページ化も改ページもされない
+    if inner.contains("class=\"gaiji") {
+        return false;
+    }
     inner.starts_with("<img") && inner.ends_with("/>")
 }
 
@@ -1770,16 +1774,26 @@ fn decorate_image_tags(
             if tag_attribute(tag, "class")
                 .is_some_and(|class| class.split_whitespace().any(|name| name == "gaiji"))
             {
-                let class_name = match image_orientation(dimensions, config) {
-                    1 => "gaiji-wide",
-                    2 => "gaiji-line",
-                    _ => "gaiji",
-                };
-                replacements.push((
-                    start,
-                    end,
-                    render_image_tag(source, &alt, Some(class_name), None),
-                ));
+                // Java: getImageOrientation が -1 (行方向 64px 以下) のときは
+                // switch に一致する case が無く、img タグを出力しない。
+                // (画像ファイル自体は登録済みなので EPUB には格納される)
+                match image_orientation(dimensions, config) {
+                    -1 => replacements.push((start, end, String::new())),
+                    orientation => {
+                        let class_name = if orientation == 1 {
+                            "gaiji-wide"
+                        } else if orientation == 2 {
+                            "gaiji-line"
+                        } else {
+                            "gaiji"
+                        };
+                        replacements.push((
+                            start,
+                            end,
+                            render_image_tag(source, &alt, Some(class_name), None),
+                        ));
+                    }
+                }
                 cursor = end;
                 continue;
             }

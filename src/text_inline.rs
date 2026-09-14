@@ -102,27 +102,10 @@ fn convert_inline_with_options(
             java_pos += 1;
             continue;
         }
-        if chars[index] == '※'
-            && let Some((end, replacement)) = parse_image_note(&chars, index + 1, config)
-        {
-            // Java: ※付きの画像注記（※［＃…（img/…）入る］）は画像を出力しない
-            // （※ は外字注記開始として消費され、注記本体は画像注記として処理されない）
-            // ただし #GAIJI# フラグ付き（外字画像）は出力する
-            if !chars[index + 1..end]
-                .iter()
-                .collect::<String>()
-                .contains("#GAIJI#")
-            {
-                let _ = replacement;
-                index = end;
-                java_pos += 1 + replacement.chars().count();
-                continue;
-            }
-            output.push_str(&replacement);
-            index = end;
-            java_pos += 1 + replacement.chars().count();
-            continue;
-        }
+        // `※［＃…（img/…）…］` は Java `convertGaijiChuki` が「画像指定外字」に
+        // 変換する (外字として変換できない注記に画像パスが付いている場合)。
+        // parse_gaiji_note 側の gaiji_image_note が処理するため、ここでは
+        // 通常の画像注記として先に消費しない。
         if chars[index] == '※'
             && let Some((end, replacement)) =
                 parse_gaiji_note(&chars, index, config, allow_upright && tcy_depth == 0)
@@ -1364,6 +1347,11 @@ fn parse_gaiji_note(
     if let Some(replacement) = jis_note_replacement(bare_note, config, allow_upright) {
         return Some((end, replacement));
     }
+    // Java convertGaijiChuki: 文字に変換できない外字注記に画像パスが付いていれば
+    // 画像指定外字として扱う (`［＃…（file）#GAIJI#］` 相当)。
+    if let Some(image_note) = gaiji_image_note(chars, start, config) {
+        return Some(image_note);
+    }
     let open = config
         .inline_notes
         .get("行右小書き")
@@ -1403,6 +1391,24 @@ fn jis_note_replacement(note: &str, config: &AozoraConfig, allow_upright: bool) 
 /// `crate::jis` に持つ (1 面 14〜94 区と 2 面、BMP 外はサロゲートペア)。
 fn jis_to_unicode(plane: u8, row: u8, cell: u8) -> Option<String> {
     crate::jis::to_char_string(u32::from(plane), u32::from(row), u32::from(cell))
+}
+
+/// Java `convertGaijiChuki` の「画像指定外字」: 変換できなかった `※［＃…］` に
+/// 画像パス (`（file.ext）`) が付いていれば外字画像として出力する。
+fn gaiji_image_note(
+    chars: &[char],
+    start: usize,
+    config: &AozoraConfig,
+) -> Option<(usize, String)> {
+    // `※` の次が注記本体
+    let (end, path, _, _) = image_note_parts(chars, start + 1)?;
+    let source = format!("../image/{}", escape_html(&path));
+    let replacement = config
+        .inline_notes
+        .get("外字画像")
+        .map(|template| format_image_template(template, &source, ""))
+        .unwrap_or_else(|| format!(r#"<img class="gaiji" src="{source}" alt=""/>"#));
+    Some((end, replacement))
 }
 
 fn gaiji_note_range(chars: &[char], start: usize) -> Option<(usize, String)> {

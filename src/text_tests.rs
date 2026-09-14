@@ -934,3 +934,15 @@ fn resolves_image_source_before_size_specification() {
         plain_text_to_xhtml("表題\n著者\n\n［＃左画像（fig.png、横320×縦322）入る］\n").unwrap();
     assert!(output.contains("src=\"../image/fig.png\""), "{output}");
 }
+
+/// Java `convertGaijiChuki`: 文字に変換できない外字注記に画像パスが付いている
+/// 場合は「画像指定外字」として外字画像を出力する。
+#[test]
+fn renders_image_bearing_gaiji_notes_as_gaiji_images() {
+    let output = plain_text_to_xhtml("表題\n著者\n\n※［＃てすと（img/x.png）］\n").unwrap();
+    assert!(
+        output.contains("<img class=\"gaiji\" src=\"../image/img/x.png\""),
+        "{output}"
+    );
+    assert!(!output.contains("※"), "{output}");
+}
