@@ -2,3 +2,7 @@
 /sample
 # CocoIndex Code (ccc)
 /.cocoindex_code/
+# Serena MCP (コード解析ツールの作業ディレクトリ)
+/.serena/
+# 監査ハーネス (tools/*.py) のキャッシュ
+__pycache__/

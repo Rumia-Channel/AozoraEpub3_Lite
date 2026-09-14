@@ -4,21 +4,6 @@ const PAGE_BOTTOM_MARKER: &str = "<!-- aozora-page-bottom -->";
 const PAGE_NO_CHAPTER_MARKER: &str = "<!-- aozora-page-no-chapter -->";
 const PAGE_CHAPTER_MARKER: &str = "<!-- aozora-page-chapter -->";
 
-pub(super) fn section_path(section: &EpubSection, body_number: usize) -> String {
-    if is_title_page(section) {
-        "xhtml/title.xhtml".to_owned()
-    } else {
-        format!("xhtml/{body_number:04}.xhtml")
-    }
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct NavEntry {
-    label: String,
-    markup: bool,
-    path: String,
-    level: usize,
-}
-
 /// One TOC row with the nesting fields Java's `ChapterInfo.setTocNestLevel`
 /// computes: `level` is the raw heading level going in and the nesting depth
 /// coming out; `level_start`/`level_end` count `<ol>` opens and
@@ -83,213 +68,6 @@ fn set_toc_nest_level(entries: &mut [TocEntry], ncx_nest: bool, title_toc: bool)
         }
     }
 }
-fn is_no_chapter(section: &EpubSection) -> bool {
-    section
-        .body_fragment
-        .trim_start()
-        .starts_with(PAGE_NO_CHAPTER_MARKER)
-}
-fn is_separator_section(section: &EpubSection) -> bool {
-    let Some(label) = first_text_label_raw(&section.body_fragment) else {
-        return false;
-    };
-    let leading_equals = label
-        .chars()
-        .take_while(|character| *character == '=')
-        .count();
-    let trailing_equals = label
-        .chars()
-        .rev()
-        .take_while(|character| *character == '=')
-        .count();
-    leading_equals >= 2 && trailing_equals >= 2
-}
-
-fn is_image_only_section(section: &EpubSection) -> bool {
-    section.body_fragment.contains("<img") && strip_html(&section.body_fragment).trim().is_empty()
-}
-
-fn normalize_chapter_label(label: String) -> String {
-    let trimmed = label.trim();
-    let leading_equals = trimmed
-        .chars()
-        .take_while(|character| *character == '=')
-        .count();
-    let trailing_equals = trimmed
-        .chars()
-        .rev()
-        .take_while(|character| *character == '=')
-        .count();
-    if leading_equals >= 2
-        && trailing_equals >= 2
-        && leading_equals + trailing_equals < trimmed.len()
-    {
-        let inner = &trimmed[leading_equals..trimmed.len() - trailing_equals];
-        format!("={inner}=")
-    } else {
-        trimmed.to_owned()
-    }
-}
-fn nav_entries(sections: &[EpubSection], title: &str, title_toc: bool) -> Vec<NavEntry> {
-    let body_count = sections
-        .iter()
-        .filter(|section| {
-            !is_title_page(section) && !is_no_chapter(section) && !is_image_only_section(section)
-        })
-        .count();
-    let mut body_number = 0;
-    let mut entries = Vec::with_capacity(sections.len());
-    let mut first_body_entry = true;
-    for section in sections {
-        if !is_title_page(section) {
-            body_number += 1;
-        }
-        let is_title = is_title_page(section);
-        // Java insertTitleToc=false drops the title from the TOC entirely.
-        if is_title && !title_toc {
-            continue;
-        }
-        if is_no_chapter(section) || (!is_title && is_image_only_section(section)) {
-            continue;
-        }
-        if !is_title && first_body_entry && is_separator_section(section) {
-            first_body_entry = false;
-            continue;
-        }
-        if !is_title {
-            first_body_entry = false;
-        }
-        let label = if is_title {
-            // Java: 目次の表題項目は bookInfo.title（生の表題文字列）を使う。
-            title.to_owned()
-        } else {
-            section_label(section, body_number, body_count)
-        };
-        let markup = false;
-        let level = if is_title {
-            1
-        } else {
-            first_heading(section.body_fragment.as_str())
-                .map(|(level, _)| level)
-                .unwrap_or(1)
-        };
-        entries.push(NavEntry {
-            label,
-            markup,
-            path: section_path(section, body_number),
-            level: level.clamp(1, 3),
-        });
-    }
-    entries
-}
-
-pub(super) fn section_label(
-    section: &EpubSection,
-    body_number: usize,
-    body_count: usize,
-) -> String {
-    if is_title_page(section) {
-        return "タイトル".to_owned();
-    }
-    first_heading_label(&section.body_fragment)
-        .or_else(|| first_text_label(&section.body_fragment))
-        .unwrap_or_else(|| {
-            if body_count == 1 {
-                "本文".to_owned()
-            } else {
-                format!("本文 {body_number}")
-            }
-        })
-}
-
-fn first_heading(body: &str) -> Option<(usize, String)> {
-    for (level, element) in ["h1", "h2", "h3"].into_iter().enumerate() {
-        let open = format!("<{element}");
-        let Some(start) = body.find(&open) else {
-            continue;
-        };
-        let Some(open_end) = body[start..].find('>') else {
-            continue;
-        };
-        let content_start = start + open_end + 1;
-        let close = format!("</{element}>");
-        let Some(close_offset) = body[content_start..].find(&close) else {
-            continue;
-        };
-        let content_end = content_start + close_offset;
-        let label = strip_html(&strip_ruby_readings(&body[content_start..content_end]));
-        if !label.trim().is_empty() {
-            return Some((level + 1, normalize_chapter_label(label)));
-        }
-    }
-    None
-}
-
-fn first_text_label_raw(body: &str) -> Option<String> {
-    let mut offset = 0usize;
-    while let Some(relative_start) = body[offset..].find("<p") {
-        let start = offset + relative_start;
-        let content_start = start + body[start..].find('>')? + 1;
-        let content_end = body[content_start..].find("</p>")? + content_start;
-        let label = unescape_html(&strip_html(&strip_ruby_readings(
-            &body[content_start..content_end],
-        )));
-        if !label.trim().is_empty() {
-            return Some(label.trim().to_owned());
-        }
-        offset = content_end + "</p>".len();
-    }
-    None
-}
-
-fn first_text_label(body: &str) -> Option<String> {
-    first_text_label_raw(body).map(normalize_chapter_label)
-}
-fn unescape_html(value: &str) -> String {
-    value
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-}
-fn first_heading_label(body: &str) -> Option<String> {
-    first_heading(body).map(|(_, label)| label)
-}
-
-fn strip_html(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut in_tag = false;
-    for character in input.chars() {
-        match character {
-            '<' => in_tag = true,
-            '>' if in_tag => in_tag = false,
-            _ if !in_tag => output.push(character),
-            _ => {}
-        }
-    }
-    output
-}
-
-fn strip_ruby_readings(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut remainder = input;
-    while let Some(start) = remainder.find("<rt") {
-        output.push_str(&remainder[..start]);
-        let Some(open_end) = remainder[start..].find('>') else {
-            output.push_str(&remainder[start..]);
-            return output;
-        };
-        let after_open = start + open_end + 1;
-        let Some(close_offset) = remainder[after_open..].find("</rt>") else {
-            output.push_str(&remainder[start..]);
-            return output;
-        };
-        remainder = &remainder[after_open + close_offset + "</rt>".len()..];
-    }
-    output.push_str(remainder);
-    output
-}
 
 fn asset_manifest_id(path: &str, fallback: usize) -> String {
     let filename = path.rsplit('/').next().unwrap_or(path);
@@ -306,6 +84,7 @@ pub(super) fn render_package(
     cover_asset: Option<&str>,
     vertical: bool,
     toc_page: bool,
+    insert_cover_page: bool,
 ) -> String {
     let identifier = metadata
         .identifier
@@ -365,26 +144,24 @@ pub(super) fn render_package(
     let mut body_number = 0;
     let mut manifest_sections = String::new();
     let mut spine_sections = String::new();
-    let mut title_page_seen = false;
+    // Java package.vm: xhtml セクション群の直前には常に空行が1行入る
+    // （#if/#end の直後のリテラル空行）。表題ページと nav の item はその前に出る。
+    let mut manifest_head = String::new();
+    let mut spine_head = String::new();
     let mut nav_spine_inserted = false;
     for (index, section) in sections.iter().enumerate() {
         if is_title_page(section) {
-            title_page_seen = true;
-            manifest_sections.push_str(
+            manifest_head.push_str(
                 "\t\t<item id=\"title-page\" href=\"xhtml/title.xhtml\" media-type=\"application/xhtml+xml\"/>\n",
             );
-            spine_sections.push_str("\t\t<itemref idref=\"title-page\" linear=\"yes\"/>\n");
+            spine_head.push_str("\t\t<itemref idref=\"title-page\" linear=\"yes\"/>\n");
             // Java package.vm: InsertTocPage places the nav itemref right
             // after the title page, before the body sections.
             if toc_page {
-                spine_sections.push_str("\t\t<itemref idref=\"nav\" linear=\"yes\"/>\n");
+                spine_head.push_str("\t\t<itemref idref=\"nav\" linear=\"yes\"/>\n");
                 nav_spine_inserted = true;
             }
             continue;
-        }
-        if title_page_seen && body_number == 0 {
-            manifest_sections.push('\n');
-            spine_sections.push('\n');
         }
         body_number += 1;
         if image_only {
@@ -416,18 +193,21 @@ pub(super) fn render_package(
     }
     if toc_page && !nav_spine_inserted {
         // No title page: the nav itemref still precedes the body sections.
-        spine_sections.insert_str(0, "\t\t<itemref idref=\"nav\" linear=\"yes\"/>\n");
+        spine_head.push_str("\t\t<itemref idref=\"nav\" linear=\"yes\"/>\n");
     }
     let mut manifest_assets = String::new();
     // Java: 外字フォントの item は xhtml セクション群の後、ncx の前に出力される
     let mut manifest_gaiji = String::new();
     let mut gaiji_number = 0;
     for (index, asset) in assets.iter().enumerate() {
-        let properties = if !image_only && cover_asset == Some(asset.path.as_str()) {
-            " properties=\"cover-image\""
-        } else {
-            ""
-        };
+        // Java: `properties="cover-image"` は表紙ページを出力するときだけ付く
+        // (Epub3Writer の insertCoverPage ブロックで setIsCover(true) される)。
+        let properties =
+            if !image_only && insert_cover_page && cover_asset == Some(asset.path.as_str()) {
+                " properties=\"cover-image\""
+            } else {
+                ""
+            };
         if asset.path.starts_with("gaiji/") {
             gaiji_number += 1;
             manifest_gaiji.push_str(&format!(
@@ -438,19 +218,29 @@ pub(super) fn render_package(
             continue;
         }
         let id = asset_manifest_id(&asset.path, index + 1);
-        manifest_assets.push_str(&format!(
-            "\t\t<item id=\"{id}\" href=\"{}\" media-type=\"{}\"{properties}/>\n",
-            xml_escape(&asset.path),
-            xml_escape(&asset.media_type),
-        ));
+        // Java package.vm は表紙画像だけ属性の順序が異なる。
+        if properties.is_empty() {
+            manifest_assets.push_str(&format!(
+                "\t\t<item id=\"{id}\" href=\"{}\" media-type=\"{}\"{properties}/>\n",
+                xml_escape(&asset.path),
+                xml_escape(&asset.media_type),
+            ));
+        } else {
+            manifest_assets.push_str(&format!(
+                "\t\t<item media-type=\"{}\" id=\"{id}\" href=\"{}\"{properties}/>\n",
+                xml_escape(&asset.media_type),
+                xml_escape(&asset.path),
+            ));
+        }
     }
-    let cover_manifest = if !image_only && cover_asset.is_some() {
-        "\t\t<item media-type=\"application/xhtml+xml\" id=\"cover-page\" href=\"xhtml/cover.xhtml\" properties=\"svg\"/>\n"
+    let cover_manifest = if !image_only && insert_cover_page {
+        // Java package.vm: 表紙 item の直後にリテラル空行が1行入る
+        "\t\t<item media-type=\"application/xhtml+xml\" id=\"cover-page\" href=\"xhtml/cover.xhtml\" properties=\"svg\"/>\n\n"
     } else {
         ""
     };
-    let cover_spine = if !image_only && cover_asset.is_some() {
-        "\t\t<itemref linear=\"yes\" idref=\"cover-page\" properties=\"rendition:page-spread-center\"/>\n"
+    let cover_spine = if !image_only && insert_cover_page {
+        "\t\t   <itemref linear=\"yes\" idref=\"cover-page\" properties=\"rendition:page-spread-center\"/>\n"
     } else {
         ""
     };
@@ -488,12 +278,13 @@ pub(super) fn render_package(
 <!-- style -->
 {styles}<!-- image -->
 {assets}<!-- xhtml -->
-{cover}{sections}
-{gaiji}		<item href="toc.ncx" id="ncx" media-type="application/x-dtbncx+xml"/>
+{cover}{head}
+{sections}{gaiji}		<item href="toc.ncx" id="ncx" media-type="application/x-dtbncx+xml"/>
 	</manifest>
 
 	<spine page-progression-direction="{progression}" toc="ncx">
-{cover_spine}{spine}	</spine>
+{cover_spine}{spine_head}
+{spine}	</spine>
 
 </package>"#,
         language = xml_escape(&metadata.language),
@@ -506,9 +297,11 @@ pub(super) fn render_package(
         styles = styles,
         assets = manifest_assets,
         cover = cover_manifest,
-        sections = manifest_sections.trim_end(),
+        head = manifest_head,
+        sections = manifest_sections,
         gaiji = manifest_gaiji,
         cover_spine = cover_spine,
+        spine_head = spine_head,
         spine = spine_sections,
         progression = progression,
     )
@@ -525,8 +318,16 @@ pub(super) fn render_nav(
     toc_page: bool,
     nav_nest: bool,
     title_toc: bool,
+    cover_page: bool,
+    cover_toc: bool,
 ) -> String {
     let mut nav_items = render_nav_items(chapters, sections, nav_nest, title_toc, title);
+    if cover_toc {
+        // Java xhtml_nav.vm: 表紙ページへの項目を目次の先頭に追加する。
+        nav_items = format!(
+            "\t\t\t<li class=\"chapter\" id=\"toccover\"><a href=\"xhtml/cover.xhtml\">表紙</a></li>\r\n{nav_items}"
+        );
+    }
     if chapters.is_empty() && title_toc && sections.iter().any(is_title_page) {
         // Java: タイトルページを目次の先頭に書籍タイトルで追加する
         let title = xml_escape(&metadata.title);
@@ -550,6 +351,12 @@ pub(super) fn render_nav(
             format!("xhtml/{body_number:04}.xhtml")
         });
     let mut landmark = String::new();
+    if cover_page {
+        // Java xhtml_nav.vm landmarks: 表紙ページへの項目。
+        landmark.push_str(
+            "\t\t\t<li><a epub:type=\"cover\" href=\"xhtml/cover.xhtml\">表紙</a></li>\r\n",
+        );
+    }
     if toc_page {
         landmark.push_str("\t\t\t<li><a epub:type=\"toc\" href=\"nav.xhtml\">目次</a></li>\r\n");
     }
@@ -594,7 +401,7 @@ fn render_nav_items(
                 .unwrap_or_default();
             TocEntry {
                 label: chapter.label.clone(),
-                markup: false,
+                markup: chapter.markup,
                 path: format!("{}{}", chapter.path, anchor),
                 level: chapter.level as usize,
                 level_start: 0,
@@ -664,6 +471,42 @@ fn first_body_path(sections: &[EpubSection]) -> String {
         })
         .unwrap_or_else(|| "xhtml/0001.xhtml".to_owned())
 }
+/// Java toc.ncx.vm の `#if (!$hasNcxItem)` フォールバック。章情報も表紙目次も
+/// 無いときは最初のセクションだけをインデント無しの navPoint で出力する。
+fn render_ncx_fallback(metadata: &EpubMetadata, sections: &[EpubSection]) -> String {
+    let identifier = metadata
+        .identifier
+        .strip_prefix("urn:uuid:")
+        .or_else(|| metadata.identifier.strip_prefix("urn:"))
+        .unwrap_or(&metadata.identifier);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+<head>
+<meta name="dtb:uid" content="urn:uuid:{identifier}"/>
+<meta name="dtb:depth" content="1"/>
+<meta name="dtb:totalPageCount" content="0"/>
+<meta name="dtb:maxPageNumber" content="0"/>
+</head>
+<docTitle>
+	<text>{title}</text>
+</docTitle>
+<navMap>
+<navPoint id="toc1" playOrder="1">
+<navLabel>
+<text>本文</text>
+</navLabel>
+<content src="{path}"/>
+</navPoint>
+</navMap>
+</ncx>
+"#,
+        identifier = xml_escape(identifier),
+        title = xml_escape(&metadata.title),
+        path = xml_escape(&first_body_path(sections)),
+    )
+}
+
 pub(super) fn render_ncx(
     metadata: &EpubMetadata,
     sections: &[EpubSection],
@@ -671,20 +514,15 @@ pub(super) fn render_ncx(
     chapters: &[NavChapter],
     ncx_nest: bool,
     title_toc: bool,
+    cover_toc: bool,
 ) -> String {
-    let mut entries: Vec<TocEntry> = if chapters.is_empty() {
-        nav_entries(sections, title, title_toc)
-            .into_iter()
-            .map(|entry| TocEntry {
-                label: entry.label,
-                markup: entry.markup,
-                path: entry.path,
-                level: entry.level,
-                level_start: 0,
-                level_end: 0,
-                nav_close: 0,
-            })
-            .collect()
+    // Java toc.ncx.vm: toccover が playOrder 1 を占めるため hasNcxItem が真になり、
+    // 本文のみのフォールバックも使われない。
+    let mut entries: Vec<TocEntry> = if chapters.is_empty() && !cover_toc {
+        // Java toc.ncx.vm: 章情報も表紙目次も無いときは `#if (!$hasNcxItem)` の
+        // フォールバックに入り、最初のセクションだけをインデント無しの
+        // navPoint で出力して `#break` する。
+        return render_ncx_fallback(metadata, sections);
     } else {
         chapters
             .iter()
@@ -696,7 +534,7 @@ pub(super) fn render_ncx(
                     .unwrap_or_default();
                 TocEntry {
                     label: chapter.label.clone(),
-                    markup: false,
+                    markup: chapter.markup,
                     path: format!("{}{}", chapter.path, anchor),
                     level: chapter.level as usize,
                     level_start: 0,
@@ -707,9 +545,7 @@ pub(super) fn render_ncx(
             .collect()
     };
     // Java insertTitleToc: the title page joins the TOC as the first entry.
-    // The auto-detected path (nav_entries) already emits the title row, so
-    // only the explicit-chapters path prepends it here.
-    if title_toc && !chapters.is_empty() && sections.iter().any(is_title_page) {
+    if title_toc && sections.iter().any(is_title_page) {
         entries.insert(
             0,
             TocEntry {
@@ -723,18 +559,6 @@ pub(super) fn render_ncx(
             },
         );
     }
-    // 章情報も nav_entries も空の場合は本文のみのフォールバックを出力する
-    if entries.is_empty() {
-        entries.push(TocEntry {
-            label: "本文".to_owned(),
-            markup: false,
-            path: first_body_path(sections),
-            level: 1,
-            level_start: 0,
-            level_end: 0,
-            nav_close: 0,
-        });
-    }
     set_toc_nest_level(&mut entries, ncx_nest, title_toc);
     let identifier = metadata
         .identifier
@@ -742,8 +566,20 @@ pub(super) fn render_ncx(
         .or_else(|| metadata.identifier.strip_prefix("urn:"))
         .unwrap_or(&metadata.identifier);
     let mut nav_points = String::new();
+    if cover_toc {
+        nav_points.push_str(
+            "\t<navPoint id=\"toccover\" playOrder=\"1\">\n\
+            \t\t<navLabel>\n\
+            \t\t\t<text>表紙</text>\n\
+            \t\t</navLabel>\n\
+            \t\t<content src=\"xhtml/cover.xhtml\"/>\n\
+            \t</navPoint>\n",
+        );
+    }
+    // 表紙項目があると以降の playOrder が 1 ずれる。
+    let play_order_offset = usize::from(cover_toc);
     for (index, entry) in entries.iter().enumerate() {
-        let play_order = index + 1;
+        let play_order = index + 1 + play_order_offset;
         let label = if entry.markup {
             entry.label.clone()
         } else {
@@ -797,27 +633,44 @@ pub(super) fn render_ncx(
     )
 }
 
-pub(super) fn render_cover(metadata: &EpubMetadata, asset_path: &str, kindle: bool) -> String {
-    let kindle_class = if kindle { " kindle" } else { "" };
+/// Java `template/item/xhtml/cover.vm`: 固定レイアウトの表紙ページ。
+/// `svgCoverImage` 分岐（タイトル・著者を描く SVG 表紙）は GUI の
+/// 確認ダイアログからのみ設定されるため対象外。
+pub(super) fn render_cover(
+    metadata: &EpubMetadata,
+    asset_path: &str,
+    dimensions: Option<(u32, u32)>,
+    kindle: bool,
+) -> String {
+    let _ = kindle;
+    let language = xml_escape(&metadata.language);
+    let title = xml_escape(&metadata.title);
+    let image_name = asset_path.rsplit('/').next().unwrap_or(asset_path);
+    let (width, height) = dimensions.unwrap_or((0, 0));
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{language}">
+<html
+xmlns="http://www.w3.org/1999/xhtml"
+xmlns:epub="http://www.idpf.org/2007/ops"
+xml:lang="{language}"
+>
 <head>
-  <meta charset="UTF-8"/>
-  <title>{title}</title>
+<meta charset="UTF-8"/>
+<title>{title}</title>
+<link rel="stylesheet" type="text/css" href="../style/fixed-layout-jp.css"/>
+<meta name="viewport" content="width={width}, height={height}"/>
 </head>
-<body class="p-image{kindle_class}">
-  <div class="cover">
-    <img src="{asset_path}" alt="{title}"/>
-  </div>
+<body epub:type="cover">
+<div class="main">
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1"
+xmlns:xlink="http://www.w3.org/1999/xlink"
+width="100%" height="100%" viewBox="0 0 {width} {height}">
+<image width="{width}" height="{height}" xlink:href="../image/{image_name}"/>
+</svg>
+</div>
 </body>
-</html>
-"#,
-        language = xml_escape(&metadata.language),
-        title = xml_escape(&metadata.title),
-        asset_path = xml_escape(asset_path),
-        kindle_class = kindle_class,
+</html>"#
     )
 }
 

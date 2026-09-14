@@ -265,7 +265,242 @@ Web小説取得、HTTP / HTTPS リソース取得、RAR入力、GUIは、未実�
 この監査では、軽量版の互換対象をローカル入力からEPUBを生成する経路に限定した。Web小説取得、HTTP / HTTPS、RAR、GUIは実装対象外として評価から除外する。
 
 
-## 作業ツリーとコミット状態
+## 2026-09-14: Java 版との全面監査と修正
+
+Java 版 (kyukyunyorituryo/AozoraEpub3) の 8 サブシステムを並列監査し、ローカル
+変換経路の欠落・不一致を洗い出して修正した。**インストール済みの
+`AozoraEpub3.jar` は参照にならない**点に注意。jar (2026-08-07 ビルド) は
+リポジトリ `src/` (2026-09-11) より古く、`ImageInfoReader.correctExt` の
+null ガード (1453e12) が未反映で `test_chapter.txt` の変換が
+`NullPointerException` で落ちる。参照実装は `src/` を javac でビルドして使う。
+
+```text
+javac -encoding UTF-8 -proc:none -cp "AozoraEpub3.jar" -d <classes> <src/**/*.java>
+java -cp "<classes>;AozoraEpub3.jar" AozoraEpub3 -i <ini> -ext .epub -d <out> <input>
+```
+
+`--config-dir` は注記資産の場所を指定するだけで、変換フラグを変えてはならない。
+（以前は Java CLI パリティの上書きが `--config-dir` の有無で分岐していた。）
+
+### 修正済み
+
+- 表紙ページを `item/xhtml/cover.xhtml` に出力（manifest の href と一致せず
+  参照切れだった）。`cover.vm` を再現（fixed-layout-jp.css / viewport /
+  `epub:type="cover"` / SVG 画像）
+- `-i`/`--preset` 指定時に `AutoYoko` / `DakutenType` / `IvsBMP` / `IvsSSP` が
+  捨てられる問題。`AutoYokoEQ3` の既定を true に（Java は INI キーを持たず
+  常に有効）。`replace.txt` を `replace_sample.txt` に改名して Java と同じ
+  「未使用」状態に
+- noBr 行の複合字下げ開きタグ欠落、字下げ省略 (前ブロックを同じ行で閉じる)、
+  キャプション終わりでの画像ラッパー閉じ
+- `※` エスケープの判定順（Java は外字変換が先）と連鎖（`ch[idx]='　'` 相当）
+- package.vm の空行と表紙 itemref のインデント、toc.ncx の本文フォールバック、
+  表紙 item の属性順
+- スタイル設定 8 キー (`PageMargin` / `BodyMargin` / `*Unit` / `LineHeight` /
+  `FontSize` / `BoldUseGothic` / `gothicUseBold`) を text.css に反映
+- `CoverPage` / `CoverPageToc` / `TocVertical` / `NoIllust` を実装
+- `JisConverter` の面区点テーブル全表を `src/jis.rs` に移植
+  (`tools/gen_jis.py` で生成)。辞書に無い面区点コード付き外字注記の
+  不一致 60/75 → 0/75
+- 画像系: `scan_top` の代入漏れ (上余白が切り取られない)、
+  `SinglePageWidth`/`SinglePageSizeW`/`SinglePageSizeH` と
+  `AutoMarginWhiteLevel` の既定値、画像幅の `Double.toString` 表記、
+  `.jpeg` → `.jpg` 正規化、画像のみ ZIP の `FileNameComparator` 並び替え、
+  `RotateImage` の適用条件 (Java は単ページ画像とアーカイブ入力の本文画像
+  のみ)、画像注記の `（`/`）` 解析 (最後の `（` 〜 最初の `、`/`）`)、
+  画像指定外字 (`※［＃…（file）］` → 外字画像)
+
+### 意図的に再現していない Java 側の挙動
+
+- `［＃米印］` 等で内部エスケープマーカーが `※` から `\u0001` に変わった
+  (444d66d) 影響で、`＜＜` / `＞＞` がルビとして解釈され行が欠落する
+  (`test_chuki.txt` 0049)。Lite は文書化された意図 (`＜＜` → リテラルの `《`)
+  に従う
+- `dcterms:modified`: Java はローカル時刻に `Z` を付ける。Lite は UTC
+- 章名中の `※` の並びで行が欠落する件 (kyukyunyorituryo/AozoraEpub3#34)
+
+### 既知の残差
+
+- `test_title.txt` 0001: 表題前の表紙画像（`preTitleBuf` 相当）で
+  Java は `<p><br/></p>` + p なし `<span>`、Lite は `<p><span>`
+- `test_ruby.txt`: タイトル抽出の `※` 圧縮が Java と異なり出力ファイル名が
+  `ルビ※※※※《》` vs `ルビ※※《》`
+- `test_png.zip`: 画像のみ EPUB の `standard.opf`
+- `NoIllust=1` のセクション数 (Java は `isImageSectionLine` も無効化するため
+  単ページ画像由来の改ページが消える)
+- 画像の連番 (`NNNN.ext`) は Java と一致しない場合がある
+- `IMAGE_PAGE_NOFIT` (FitImage=0 で画面内に収まる単ページ画像) の扱いと
+  `ImageFitW/H` / `ImageHeight` 相当の単ページ画像 CSS
+- 画像バイト列の一致: Java は色モデル (2 値 / インデックス / グレー) を保持し
+  WebP を Lossy で書くため、リサイズが入る画像は byte 一致しない
+- `ChukiRuby` (`［＃「○」に「△」のルビ］` / 注記付き → ルビ / 小書き)
+- 章名の自動抽出キー (`ChapterExclude` / `ChapterUseNextLine` / `ChapterName` /
+  `ChapterNum*` / `ChapterPattern` / `ChapterNameLength`) は未実装
+- タイトル・章名の `※` 圧縮。`test_ruby.txt` で Java は `ルビ※※※※《》`、
+  Lite は `ルビ※※《》` となる。Java は 444d66d で内部エスケープを `※` から
+  `\u0001` に変えたため、`CharUtils.getChapterName` は `\u0001` の除去だけを
+  行い、`※` は通常文字として残る (米印外字は `※` を 2 文字出力する)。
+  Lite の `metadata.rs` は旧挙動 (`※` + 特殊文字のペア除去) を移植しており、
+  単純に外すと逆に 1 文字多い `ルビ※※※※※《※》` になる。切り分けには
+  `convert_gaiji_notes` と `remove_ruby` / `unescape_marks` の適用順の整理が
+  必要 (未着手)。
+
+フィクスチャ 21 件のうち 18 件が byte 一致。差分は `test_chuki.txt` 0049
+(Java 側のエスケープ退行)、`test_title.txt` 0001 (表題前バッファ)、
+`test_png.zip` (画像のみ EPUB の OPF) の 3 件。
+
+2026-09-14 の追加修正 (続き):
+
+- 米印外字の `※` を 2 文字出力 (Java の内部マーカーは 《》｜＃ では `\u0001`
+  だが ※ では literal な ※ のため)。タイトル・目次ラベルが一致し
+  `test_ruby.txt` が完全一致に
+- ChukiRuby 周辺: `※［＃…のルビ］` を前方参照注記として扱わない
+  (Java は外字変換を先に通す)、対象が行頭に無い場合の空基底ルビ、
+  その際のインデックス外 panic を修正
+- 章の自動抽出 (`ChapterName` / `ChapterNumOnly` / `ChapterNumTitle` /
+  `ChapterNumParen` / `ChapterNumParenTitle` / `ChapterUseNextLine` /
+  `ChapterExclude`) を実装。抽出 4 種 + 次行連結 + 除外の 6 構成で
+  nav / toc.ncx が Java と一致
+- `tools/parity_check.py` を追加 (21 フィクスチャの差分をカーネル外で測る)
+- 注記表の網羅検証 `tools/note_coverage.py` を追加。`chuki_tag.txt` /
+  `chuki_tag_suf.txt` の全行を 1 行ずつ Java / Rust で変換して比較する。
+  開始注記と終了注記は表の意味論で対にして 1 ケースにし (`X前`↔`X後`、
+  `X開始`↔`X終了`、`ここからX`↔`ここまでX`/`ここで…終わり`、段番号が
+  落ちる綴りは接尾辞の最長一致)、利用者が本文に書けない 33 行
+  (画像タグ 19 行 = `printImageChuki` の `String.format` テンプレート、
+  折り返し1/2/3 等の断片・属性 14 行) を除外する。結果は **589 ケース中
+  5 件が差分、Java が出すタグを Rust が出していない注記は 0 件**
+- 残る 5 件は次の 2 挙動のみ
+  - `ページ左下` / `ページの左下`: Java はページ注記と章の先頭行が同一行の
+    ときのみ `id="kobo.N.M"` を注入する (Lite は注入しない)。注記を単独行に
+    置く実用法では byte 一致する
+  - `地付き` / `字下げ省略` / `行内地付き`: Java は閉じタグを二重出力する
+    (`<div class="btm">本文</div></div>` 等)。Java 側が非整合なため再現しない
+- ページ下付き注記 (chuki_tag.txt 4列目=L) を flag=1 と同じタグ登録に含め、
+  改ページ後の行に開閉タグを出力するようにした。`tools/realistic_cases.py`
+  (現実的な用法 17 ケース) は 16 件が Java と一致。残り 1 件は `［＃地付き］`
+  の二重 `</div>` で、上記と同じ意図的非再現
+- `ページの左右中央` はタグ列が空の注記なのに `block_single_tags` の既定に
+  入っていたため noBr 扱いになり `<p>` が落ちていた。既定から外して Java と
+  一致 (`block_single_tags` の既定はタグを持つ注記のみにする)
+- 複合字下げのクラス付与が Java の else-if と違っていた。`破線枠囲み` は
+  `枠囲み` を含むため `dashed_border` と `border` の両方が付いていた
+  (Java は `dashed_border` のみ)。罫囲み / 枠囲み の各組で排他にする
+- 回帰テストは `中寄せ` を合成していて修正前でも通る空振りだった。既定 config の
+  `ページの左右中央` を使う形に直し、旧既定に戻すと落ちることを確認した
+
+### 注記表カバレッジの最終値 (2026-09-14)
+
+`tools/note_coverage.py` は開始注記と終了注記を表の意味論で対にして 1 ケースにし、
+利用者が本文に書けない 33 行 (画像タグ 19 行 = `printImageChuki` の
+`String.format` テンプレート、折り返し1/2/3 等の断片・属性 14 行) を除外する。
+`chuki_tag_suf.txt` の行は開始/終了注記名から `chuki_tag.txt` のタグ列を引いて
+期待タグにする (93 行分を解決) ので、gap 判定は両表を覆う。
+
+```text
+(内部生成タグ/断片として除外: 33)
+(対になる終了注記なし: 77)
+notes: 589
+differs: 5/589
+=== Java が出すタグを Rust が出していない注記: 0 ===
+```
+
+残り 5 件は「`ページ左下`/`ページの左下` の `id="kobo.N.M"` 注入 (注記と章の
+先頭行が同一行のときのみ)」2 件と「Java が閉じタグを二重出力する
+`地付き`/`字下げ省略`/`行内地付き`」3 件で、いずれも再現しない方針。
+
+除外した 33 行が未検証のまま残るわけではない。画像タグ 19 行は
+`main.rs` の画像処理 (`decorate_image_tags`、float / 単ページ / 外字画像) と
+`applies_java_float_image_classes` などのテスト、`test_image.txt` /
+`test_gaiji_image.txt` / `test_png.zip` フィクスチャで検証している。断片・属性
+14 行は複合字下げとして `realistic_cases.py` の 6 形態で検証している。
+`柱` は `chuki_ivs.txt` の IVS 外字エントリでタグ注記ではない (外字経路で検証)。
+`tools/realistic_cases.py` は 22 ケース中 21 件が Java と一致 (残りは上記の
+二重 `</div>`)。複合字下げのクラスは全形で一致する。
+
+```text
+［＃ここから３字下げ、罫囲みと中央揃え］ → mt3 border center
+［＃ここから２字下げ、破線罫囲み］       → mt2 dashed_border
+［＃ここから２字下げ、破線枠囲み］       → mt2 dashed_border
+［＃ここから２字下げ、横書き］           → mt2 yoko
+［＃ここから３字下げ、５字詰め］         → pt3 jzm5
+［＃ここから３字下げ、折り返して２字下げ］ → pt2 idt1
+```
+
+### 2026-09-14: Narou カスタム注記は narou.rs が所有 (Lite 側は上流表のまま)
+
+Narou.rb / Narou Bridge のカスタム注記 (`ここから柱` / 前書き / 後書き /
+パラメーター / 一字〜三字下げ / 二分アキ / 濁点 / zws / `ｌｉｎｋ＿ｓ` 系) は
+**narou.rs 側の資産**であり、Lite の `assets/aozora/chuki_tag.txt` には
+取り込まない (上流 874 行のまま)。当初は配布物の表 (904 行) を正として
+30 行を取り込んだが、次の理由で撤回した。
+
+- 配布物の 30 行は narou.rs の `init` が書き込んだもの。`init.rs:286-305` が
+  `preset/custom_chuki_tag.txt` を読み、インストール先 `chuki_tag.txt` の
+  `### Narou.rb embedded custom chuki ###` マーカー間を置換 (無ければ追記) する。
+  上流リポジトリの表には痕跡が無い (`git log -S "ここから柱"` が空)
+- narou.rs は Lite 資産のスナップショット `assets/aozora_lite/*.txt` (874 行) を
+  `include_str!` で持ち、`AozoraConfig::default()` に `load_tag_text` などで
+  自前で重ねる (`src/epub_lite.rs:28-60` の `embedded_config()`)。注入配線は
+  narou.rs 側にあり、Lite に焼き込んでもスナップショットを更新するまで届かない
+- つまり焼き込みは二重管理。Lite 側の責務は「注記タグを外部から注入できる口」で、
+  それは実装済み (下記)
+
+検証 (上流表に戻した状態):
+
+```text
+tools/note_coverage.py  : 589 ケース中 5 件差分、タグ欠落 0 件
+tools/realistic_cases.py: [aozora] 21/22 / [narou] 9/9
+tools/parity_check.py   : 18/21 (既知 3 件のみ)
+cargo test --release    : 全バイナリ green
+```
+
+`realistic_cases.py` の Narou グループは実経路で比較する: Java は
+「上流表 + narou プリセット」の作業ディレクトリ、Rust は
+`--config-dir` に narou.rs の `preset/custom_chuki_tag.txt` を
+`custom_chuki_tag.txt` として渡す。プリセットの場所は環境変数 `NAROU_PRESET` で
+差し替え可 (既定 `../narou.rs/preset/custom_chuki_tag.txt`)。無い場合はスキップ。
+
+#### 注記タグ / CSS の外部注入 (配線状況)
+
+- 注記タグ: ライブラリは `AozoraConfig::load_tag_text` ほかの公開ローダを持ち、
+  `load_from_dirs` は `chuki_tag.txt` に加えて `custom_chuki_tag.txt` を上書き
+  マージする (テスト `loads_standard_and_overlay_directories_in_order`)。CLI は
+  `--config-dir <dir>` でこれを配線済み。実測: `custom_chuki_tag.txt` に
+  `テスト強調<TAB><span class="test-em">` だけ置いたディレクトリを
+  `--config-dir` で渡すと `<span class="test-em">強調</span>` が出力される
+- 組み込み表は `include_str!` でコンパイル埋め込みのため、`--config-dir` を
+  渡しても既定の注記は失われない。実測: `--config-dir` (追加 1 ファイルのみ) でも
+  `［＃大見出し］` / `［＃ここから太字］` / `［＃ここから３字下げ、罫囲みと中央揃え］`
+  がすべて期待どおり出力される
+- `--config-dir` が置き換えるのは**ディスク上の資産解決** (`main.rs:70-73`)。
+  失われるのは `<dir>/gaiji/*.ttf` のみ (加算化は未対応)
+- CSS: ライブラリは `EpubBook::with_assets([EpubAsset::new("style/x.css",
+  "text/css", bytes)])` で追加できる (manifest にも入る)。CLI に CSS を足す口は
+  無い (既定で有効にする必要が出たときのみ検討)
+- 配布物の `template/OPS/css_custom/vertical_font.css` には `/* 柱（もどき） */`
+  として `.running_head` / `.half_em_space` / `.introduction` / `.postscript` /
+  `.custom_parameter_block` の定義があるが、**変換では使われない** (Java ソースに
+  `css_custom` 参照なし、生成 EPUB に `OPS/` も `css_custom/` も含まれない)。
+  README_Changes 1.1.0b8 の名残で、リーダー向けの手動カスタム用サンプル
+- `chuki_utf.txt` は Rust 資産だけ 1 行修正済み (`U+003AC` → `U+01F71`、
+  JIS X 0213 1-11-39 の文字。6de28a6)。意図的に残す
+
+#### 未対応: テンプレートの `_custom` 上書き
+
+Java の `Epub3Writer.writeFile` (Epub3Writer.java:371-383) は、EPUB に格納する
+テンプレートファイルごとに `template/<dir>_custom/<同名ファイル>` があれば
+そちらを優先する (2012 年の README_Changes 1.1.0b8 の項目)。配布物の
+`template/OPS/css_custom/vertical_font.css` と `template/item/css_custom/*.css`
+はこの仕組み用のファイル。
+
+Lite はテンプレートを `include_str!` でコンパイル埋め込みしているため、
+この上書き機構を持たない。現状で出力差は出ない (配布物の `_custom` のファイル名が
+実際に格納されるテンプレート名と一致せず、生成 EPUB に `css_custom` 由来の
+ファイルが入らないことを実測)。ユーザーが格納済みテンプレートと同じ名前で
+`_custom` を置いた場合のみ Java 側だけが差し替えるため、既知の残差として扱う。
+
+## 作業ツリーとコミット状態## 作業ツリーとコミット状態
 引き継ぎ後に完了した論理単位は、以下のコミットとして `develop` へ commit / push 済み。
 
 - `bc3a29d`: Aozora 変換データ資産
@@ -283,7 +518,26 @@ Web小説取得、HTTP / HTTPS リソース取得、RAR入力、GUIは、未実�
 - `325c0a8`: コメントブロックの字下げ抑止
 - `f740859`: Parity 残差分 64行→8行（19/21完全一致、画像・横組み・窓見出し・0049・目次章名・空行処理）
 
-`develop` の HEAD は `origin/develop` より先行しており、今回のパリティ修正と本 HANDOFF 更新は未 push。`master` は変更していない。
+`develop` の HEAD は `origin/develop` と同期している (`master` は変更していない)。
+2026-09-14 の修正は以下のコミット。
+
+- `a7e0144`: 表紙ページと OPF/NCX を Java 版に一致させる
+- `18894c8`: `-i`/`--preset` 指定時に INI の変換フラグが捨てられる問題を修正
+- `1a72dbb`: noBr 行のブロック注記処理を Java 版に一致させる
+- `e4db6e3`: `※` エスケープの判定順と連鎖を Java 版に一致させる
+- `3c7c47c`: インライン字下げ注記でも字下げ省略を適用する
+- `893784d`: スタイル設定 8 キーを text.css に反映する
+- `db1bcd5`: `CoverPage` / `CoverPageToc` を実装する
+- `6e773d0`: `NoIllust` を実装する
+- `fb35008`: `TocVertical` を配線し目次ラベルに縦中横を適用する
+- `1f7f5b7`: JIS X 0213 の面区点テーブルを Java から移植する
+- `c2b2b83`: 余白除去・既定値・並び順・拡張子を Java 版に一致させる
+- `660590b`: RotateImage を Java と同じ条件でのみ適用する
+- `bfb82ad`: 画像注記のファイル名抽出を Java 版に一致させる
+- `051ccb8`: 画像指定外字を外字画像として出力する
+
+- `7433b7d`: Narou.rb / Narou Bridge のカスタム注記 26 行を取り込む
+- `84b93c6`: README に Narou 注記の対応を追記する
 
 再開時は既存差分を破棄せず、まず `git status --short --branch` で状態を確認すること。
 

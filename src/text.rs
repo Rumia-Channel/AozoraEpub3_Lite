@@ -12,7 +12,7 @@ pub fn inline_to_xhtml(input: &str, config: &AozoraConfig) -> String {
 }
 pub use inline::{
     apply_alt_upright, collect_image_alts, escape_html, image_reference_occurrences,
-    image_references,
+    image_references, tcy_label,
 };
 
 #[derive(Debug, Eq, PartialEq)]
@@ -204,6 +204,34 @@ pub struct ChapterRecord {
     /// is rendered. Only non-`page_break_chapter` records get a TOC
     /// fragment.
     pub anchor: Option<String>,
+    /// Java `ChapterLineInfo.lineNum` 相当の通し行番号
+    /// (`ChapterExclude` の前後判定に使う)。
+    pub source_line: usize,
+    /// Java `ChapterLineInfo.type` 相当 (`ChapterExclude` の判定に使う)。
+    pub kind: ChapterKind,
+    /// Java `ChapterLineInfo.emptyNext`: 直前の行が空行だったか。
+    pub empty_next: bool,
+}
+
+/// Java `ChapterLineInfo.TYPE_*` 相当。`is_pattern` が真の種別だけが
+/// `ChapterExclude` の対象になる。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChapterKind {
+    Title,
+    PageBreak,
+    ChukiH1,
+    ChukiH2,
+    ChukiH3,
+    ChapterName,
+    ChapterNum,
+    Pattern,
+}
+
+impl ChapterKind {
+    /// Java `ChapterLineInfo.isPattern`: 章名・数字・パターンでマッチした行。
+    fn is_pattern(self) -> bool {
+        matches!(self, Self::ChapterName | Self::ChapterNum | Self::Pattern)
+    }
 }
 
 pub fn aozora_text_to_xhtml_sections(input: &str) -> Result<Vec<String>, TextError> {
@@ -299,9 +327,36 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
     // Java pre-read: a heading note with nothing after it takes its name
     // from the next visible line only. Holds (level, page_break_chapter).
     let mut pending_heading: Option<(u8, bool)> = None;
+    // Java `addNextChapterName`: 章名に繋げる次の行番号。
+    let mut add_next_chapter_name: Option<usize> = None;
+    // Java `lastEmptyLine`: 直近の空行番号 (`emptyNext` 判定に使う)。
+    let mut last_empty_line: Option<usize> = None;
 
-    for line in visible_lines(input, config).iter() {
+    for (line_index, line) in visible_lines(input, config).iter().enumerate() {
         let line_start_section = section_index;
+
+        if crate::metadata::remove_ruby(line)
+            .trim_matches([' ', '　'])
+            .is_empty()
+        {
+            last_empty_line = Some(line_index);
+        }
+
+        // 見出しの次の行を章名に繋げる (Java `addNextChapterName`)
+        if add_next_chapter_name == Some(line_index)
+            && !chapter_lines
+                .iter()
+                .any(|(index, _)| *index == current.len())
+            && let Some(record) = chapters.last_mut()
+        {
+            let name = chapter_name(line, config);
+            if !name.is_empty() {
+                // Java ChapterLineInfo.joinChapterName: 全角空白で連結する
+                record.label.push('　');
+                record.label.push_str(&name);
+            }
+            add_next_chapter_name = None;
+        }
 
         // Resolve a deferred heading name before anything else on this line;
         // an empty name drops the pending chapter (Java clears the slot).
@@ -316,6 +371,9 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
                     level,
                     page_break_chapter: pbc,
                     anchor: None,
+                    source_line: line_index,
+                    kind: chapter_kind_for_level(level),
+                    empty_next: last_empty_line == Some(line_index.wrapping_sub(1)),
                 });
                 add_section_chapter = false;
             }
@@ -351,8 +409,42 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
                         level,
                         page_break_chapter: pbc,
                         anchor: None,
+                        source_line: line_index,
+                        kind: chapter_kind_for_level(level),
+                        empty_next: last_empty_line == Some(line_index.wrapping_sub(1)),
                     });
                 }
+            }
+        }
+
+        // Java `getBookInfo`: 見出し行パターン抽出。すでに章がある行は対象外。
+        if auto_chapter_enabled(config)
+            && !chapter_lines
+                .iter()
+                .any(|(index, _)| *index == current.len())
+        {
+            let plain = chapter_plain_line(line, config);
+            for level in auto_chapter_levels(&plain, config) {
+                chapter_lines.push((current.len(), chapters.len()));
+                chapters.push(ChapterRecord {
+                    section_index: line_start_section,
+                    line_index: current.len(),
+                    label: chapter_name(line, config),
+                    level,
+                    page_break_chapter: add_section_chapter,
+                    anchor: None,
+                    source_line: line_index,
+                    kind: if level <= 2 {
+                        ChapterKind::ChapterName
+                    } else {
+                        ChapterKind::ChapterNum
+                    },
+                    empty_next: last_empty_line == Some(line_index.wrapping_sub(1)),
+                });
+                if config.chapter_use_next_line {
+                    add_next_chapter_name = Some(line_index + 1);
+                }
+                add_section_chapter = false;
             }
         }
 
@@ -369,6 +461,9 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
                     level: 1,
                     page_break_chapter: true,
                     anchor: None,
+                    source_line: line_index,
+                    kind: ChapterKind::PageBreak,
+                    empty_next: last_empty_line == Some(line_index.wrapping_sub(1)),
                 });
                 add_section_chapter = false;
             } else if is_colophon_line(line) {
@@ -432,6 +527,14 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
             } else {
                 Some(PAGE_CHAPTER_MARKER)
             };
+            // Java: ページ左下/ページの左下 のタグは改ページ後の行に出力される
+            // (タグは行末で閉じる)。注記自体は行末まで本文を包むため、残りを
+            // この行に取り込んで改ページ処理を打ち切る。
+            if config.block_inline_tags.contains_key(&note) {
+                current.push(format!("［＃{note}］{}", &remainder[end..]));
+                no_br.push(true);
+                break;
+            }
             remainder = &remainder[end..];
             if remainder.is_empty() {
                 break;
@@ -452,7 +555,57 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
             config,
         );
     }
+    // Java `BookInfo.excludeTocChapter`: 目次ページの自動抽出見出しを除外する。
+    if config.chapter_exclude {
+        exclude_toc_chapters(&mut chapters);
+    }
     Ok((sections, chapters))
+}
+
+/// Java `BookInfo.excludeTocChapter`: 前後 2 行に自動抽出見出しが並ぶ行を
+/// 目次から除外する (間は空行のみ許可)。
+fn exclude_toc_chapters(chapters: &mut Vec<ChapterRecord>) {
+    let is_pattern = |line: usize| {
+        chapters
+            .iter()
+            .find(|record| record.source_line == line)
+            .is_some_and(|record| record.kind.is_pattern())
+    };
+    let mut first = std::collections::BTreeSet::new();
+    for record in chapters.iter() {
+        if !record.kind.is_pattern() {
+            continue;
+        }
+        let line = record.source_line;
+        let previous = line.checked_sub(1).is_some_and(is_pattern)
+            || (record.empty_next && line.checked_sub(2).is_some_and(is_pattern));
+        let next = is_pattern(line + 1) || is_pattern(line + 2);
+        if previous && next {
+            first.insert(line);
+        }
+    }
+    let mut second = std::collections::BTreeSet::new();
+    for record in chapters.iter() {
+        let line = record.source_line;
+        if first.contains(&line) || !record.kind.is_pattern() {
+            continue;
+        }
+        let adjacent = line
+            .checked_sub(1)
+            .is_some_and(|value| first.contains(&value))
+            || (record.empty_next
+                && line
+                    .checked_sub(2)
+                    .is_some_and(|value| first.contains(&value)))
+            || first.contains(&(line + 1))
+            || first.contains(&(line + 2));
+        if adjacent {
+            second.insert(line);
+        }
+    }
+    chapters.retain(|record| {
+        !first.contains(&record.source_line) && !second.contains(&record.source_line)
+    });
 }
 
 /// Java: chukiFlagNoBr (chuki_tag.txt 4列目=1) のブロック注記を含むか。
@@ -575,6 +728,195 @@ fn append_section_line(
 /// Normalizes a chapter label the way the reference pre-read does:
 /// suffix notes keep their target text, ruby readings and note markers are
 /// removed, symbol runs collapse, and the label is truncated at 64 chars.
+/// Java `autoChapter`: 章の自動抽出が有効か。
+fn auto_chapter_enabled(config: &AozoraConfig) -> bool {
+    config.chapter_name_auto
+        || config.chapter_num_only
+        || config.chapter_num_title
+        || config.chapter_num_paren
+        || config.chapter_num_paren_title
+}
+
+/// Java `ChapterLineInfo.getLevel` の見出し種別 → レベル。
+fn chapter_kind_for_level(level: u8) -> ChapterKind {
+    match level {
+        1 => ChapterKind::ChukiH1,
+        2 => ChapterKind::ChukiH2,
+        _ => ChapterKind::ChukiH3,
+    }
+}
+
+const CHAPTER_NUM_CHARS: &str =
+    "0123456789０１２３４５６７８９〇一二三四五六七八九十百壱弐参肆伍ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ";
+const CHAPTER_SEPARATORS: [char; 8] = [' ', '　', '-', '－', '「', '―', '『', '（'];
+const CHAPTER_NAMES: [&str; 14] = [
+    "プロローグ",
+    "エピローグ",
+    "モノローグ",
+    "序",
+    "序章",
+    "序　章",
+    "終章",
+    "終　章",
+    "間章",
+    "間　章",
+    "転章",
+    "転　章",
+    "幕間",
+    "幕　間",
+];
+const CHAPTER_NUM_PREFIXES: [&str; 3] = ["第", "その", ""];
+const CHAPTER_NUM_SUFFIXES: [&[&str]; 3] =
+    [&["話", "章", "篇", "部", "節", "幕", "編"], &[""], &["章"]];
+const CHAPTER_NUM_PAREN_PREFIXES: [&str; 4] = ["（", "〈", "〔", "【"];
+const CHAPTER_NUM_PAREN_SUFFIXES: [&str; 4] = ["）", "〉", "〕", "】"];
+
+fn is_chapter_num_char(character: char) -> bool {
+    CHAPTER_NUM_CHARS.contains(character)
+}
+
+fn is_chapter_separator(character: char) -> bool {
+    CHAPTER_SEPARATORS.contains(&character)
+}
+
+/// Java `removeSpace(removeTag(noRubyLine))`: ルビ・注記・タグを落として
+/// 前後の空白を除去した行。
+fn chapter_plain_line(line: &str, _config: &AozoraConfig) -> String {
+    let no_ruby = crate::metadata::remove_ruby(line);
+    let mut out = String::with_capacity(no_ruby.len());
+    let chars = no_ruby.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '［' && chars.get(index + 1) == Some(&'＃') {
+            // ［＃…］ 注記を除去
+            let mut end = index + 2;
+            while end < chars.len() && chars[end] != '］' {
+                end += 1;
+            }
+            index = (end + 1).min(chars.len());
+            continue;
+        }
+        if chars[index] == '<' {
+            let mut end = index + 1;
+            while end < chars.len() && chars[end] != '>' {
+                end += 1;
+            }
+            index = (end + 1).min(chars.len());
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out.trim_matches([' ', '　']).to_owned()
+}
+
+/// Java `getBookInfo` の章自動抽出。ヒットした種別のレベルを返す
+/// (Java は 4 つの判定が独立なので 1 行で複数ヒットしうる)。
+fn auto_chapter_levels(line: &str, config: &AozoraConfig) -> Vec<u8> {
+    let chars = line.chars().collect::<Vec<_>>();
+    let length = chars.len();
+    let mut levels = Vec::new();
+
+    if config.chapter_name_auto {
+        for prefix in CHAPTER_NAMES {
+            let prefix_chars = prefix.chars().count();
+            if line.starts_with(prefix)
+                && (length == prefix_chars || is_chapter_separator(chars[prefix_chars]))
+            {
+                levels.push(1);
+                break;
+            }
+        }
+    }
+
+    if config.chapter_num_only || config.chapter_num_title {
+        for (index, prefix) in CHAPTER_NUM_PREFIXES.iter().enumerate() {
+            let prefix_chars = prefix.chars().count();
+            if !line.starts_with(prefix) {
+                continue;
+            }
+            let mut idx = prefix_chars;
+            while idx < length && is_chapter_num_char(chars[idx]) {
+                idx += 1;
+            }
+            if idx <= prefix_chars {
+                break;
+            }
+            for suffix in CHAPTER_NUM_SUFFIXES[index] {
+                let suffix_chars = suffix.chars().count();
+                if idx + suffix_chars > length {
+                    continue;
+                }
+                let after = idx + suffix_chars;
+                let matches = if suffix_chars == 0 {
+                    true
+                } else {
+                    chars[idx..after].iter().collect::<String>() == *suffix
+                };
+                if !matches {
+                    continue;
+                }
+                if config.chapter_num_only && length == after
+                    || config.chapter_num_title
+                        && length > after
+                        && is_chapter_separator(chars[after])
+                {
+                    levels.push(2);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Java: prefix 無しの数字のみ / 数字+区切り も別途判定する
+    if config.chapter_num_only || config.chapter_num_title {
+        let mut idx = 0;
+        while idx < length && is_chapter_num_char(chars[idx]) {
+            idx += 1;
+        }
+        if idx > 0
+            && (config.chapter_num_only && length == idx
+                || config.chapter_num_title && length > idx && is_chapter_separator(chars[idx]))
+        {
+            levels.push(2);
+        }
+    }
+
+    if config.chapter_num_paren || config.chapter_num_paren_title {
+        for (index, prefix) in CHAPTER_NUM_PAREN_PREFIXES.iter().enumerate() {
+            let prefix_chars = prefix.chars().count();
+            if !line.starts_with(prefix) {
+                continue;
+            }
+            let mut idx = prefix_chars;
+            while idx < length && is_chapter_num_char(chars[idx]) {
+                idx += 1;
+            }
+            if idx <= prefix_chars {
+                break;
+            }
+            let suffix = CHAPTER_NUM_PAREN_SUFFIXES[index];
+            let suffix_chars = suffix.chars().count();
+            if idx + suffix_chars > length
+                || chars[idx..idx + suffix_chars].iter().collect::<String>() != suffix
+            {
+                continue;
+            }
+            let after = idx + suffix_chars;
+            if config.chapter_num_paren && length == after
+                || config.chapter_num_paren_title
+                    && length > after
+                    && is_chapter_separator(chars[after])
+            {
+                levels.push(13);
+                break;
+            }
+        }
+    }
+
+    levels
+}
+
 fn chapter_name(line: &str, config: &AozoraConfig) -> String {
     let mut name = line.to_owned();
     // Suffix notes (［＃「X」…］) keep their target text.
@@ -666,6 +1008,12 @@ fn chapter_name(line: &str, config: &AozoraConfig) -> String {
             // ※プレフィクスは注記と一体で変換される
             if cleaned.ends_with('※') {
                 cleaned.pop();
+            }
+            // Java convertGaijiChuki は特殊文字 (※《》｜＃) の直前に内部マーカーを
+            // 積む。マーカーは 《》｜＃ では \u0001 で後段の getChapterName が
+            // 除去するが、米印 (※) はリテラルな ※ なので 2 文字残る。
+            if replacement == "※" {
+                cleaned.push('※');
             }
             cleaned.push_str(&replacement);
         }
@@ -872,6 +1220,16 @@ impl OpenBlock {
             OpenBlock::Generated { indent, .. } | OpenBlock::Configured { indent, .. } => *indent,
         }
     }
+
+    /// ブロックを閉じるタグ。Java の `字下げ省略` (`</div>`) 相当。
+    fn close_tag(&self) -> &str {
+        match self {
+            OpenBlock::Generated { close_tag, .. } => close_tag,
+            OpenBlock::Configured {
+                fallback_close_tag, ..
+            } => fallback_close_tag,
+        }
+    }
 }
 
 /// Renders one section's lines to an XHTML fragment. `chapter_lines` maps
@@ -935,9 +1293,25 @@ fn render_lines<'a>(
         }
         if line_no_br {
             // Java: noBr 行は <p> で括らず行全体を1行出力する。
-            // ブロック注記は convert_inline が inline_notes 経由でタグ化する。
+            // ブロック注記は convert_inline が inline_notes 経由でタグ化するが、
+            // chuki_tag.txt に無い複合字下げ（ここから N 字下げ、折り返して M
+            // 字下げ / N 字下げ、M 字詰め）だけはここでタグを差し込む。
             output_count += 1;
-            let converted = convert_inline_with_yoko(line, config, in_yoko);
+            // Java: 字下げブロック継続時は前の字下げブロックを閉じて同じ行で開く
+            // (convertTextLineToEpub3 の `字下げ省略` → buf.append("</div>"))。
+            let open_tag = indent_block_open_tag(line, config);
+            let previous_close = match open_tag {
+                Some(_) if blocks.iter().any(OpenBlock::is_indent) => {
+                    blocks.pop().map(|block| block.close_tag().to_owned())
+                }
+                _ => None,
+            };
+            let mut converted = convert_no_br_block_notes(line, config, in_yoko, &mut blocks);
+            if let (Some(open_tag), Some(close_tag)) = (open_tag, previous_close)
+                && let Some(position) = converted.find(&open_tag)
+            {
+                converted.insert_str(position, &close_tag);
+            }
             let converted = chapter_id
                 .map(|id| inject_kobo_id(&converted, &id))
                 .unwrap_or(converted);
@@ -959,12 +1333,15 @@ fn render_lines<'a>(
                     if note.contains("横組み終わり") {
                         in_yoko = false;
                     }
+                    // Java: キャプション終わりの </span> で画像ラッパーも閉じる
+                    // (printLineBuffer の noBr 行でも同じ後始末を行う)
+                    if config.block_close_tags.get(&note).map(String::as_str) == Some("</span>")
+                        && image_wrapper_is_open(&fragment)
+                    {
+                        fragment.push_str("</span>");
+                        fragment.push('\n');
+                    }
                     blocks.pop();
-                } else if let Some((_, close_tag)) = generated_indent_block(&note) {
-                    blocks.push(OpenBlock::Generated {
-                        close_tag,
-                        indent: note.contains("字下げ"),
-                    });
                 }
             }
             continue;
@@ -1636,6 +2013,74 @@ fn heading_spec(note: &str) -> Option<HeadingSpec> {
     }
 }
 
+/// noBr 行の本文をインライン変換する。Java は `chukiPattern` の複合字下げ
+/// （ここから N 字下げ、折り返して M 字下げ / N 字下げ、M 字詰め）でも
+/// タグをその位置に出力するが、`chuki_tag.txt` に定義が無いため
+/// `convert_inline` ではタグ化されない。生成ブロックの注記だけを開きタグへ
+/// 置き換え、それ以外の注記は行ごと1回の変換に任せる。
+fn convert_no_br_block_notes(
+    line: &str,
+    config: &AozoraConfig,
+    in_yoko: bool,
+    blocks: &mut Vec<OpenBlock>,
+) -> String {
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    for (start, end, note) in generated_indent_notes(line) {
+        let Some((open_tag, close_tag)) = generated_indent_block(&note) else {
+            continue;
+        };
+        output.push_str(&convert_inline_with_yoko(
+            &line[cursor..start],
+            config,
+            in_yoko,
+        ));
+        output.push_str(&open_tag);
+        blocks.push(OpenBlock::Generated {
+            close_tag,
+            indent: note.contains("字下げ"),
+        });
+        cursor = end;
+    }
+    output.push_str(&convert_inline_with_yoko(&line[cursor..], config, in_yoko));
+    output
+}
+
+/// 行中の「字下げブロックを開く注記」の開きタグを返す。
+/// `chuki_tag.txt` にある `ここからＮ字下げ` 系と、プログラム生成の
+/// 複合字下げ（`generated_indent_block`）の両方を対象にする。
+fn indent_block_open_tag(line: &str, config: &AozoraConfig) -> Option<String> {
+    if let Some((_, _, note)) = generated_indent_notes(line).into_iter().next()
+        && let Some((open_tag, _)) = generated_indent_block(&note)
+    {
+        return Some(open_tag);
+    }
+    line_note_names(line)
+        .into_iter()
+        .find(|(note, _)| note.ends_with("字下げ"))
+        .and_then(|(note, _)| {
+            config.block_open_tags.get(&note).cloned().or_else(|| {
+                config
+                    .block_inline_tags
+                    .get(&note)
+                    .map(|(open, _)| open.clone())
+            })
+        })
+}
+
+/// 行中の複合字下げ注記を (開始, 終了, 注記名) で列挙する。
+fn generated_indent_notes(line: &str) -> Vec<(usize, usize, String)> {
+    let mut notes = Vec::new();
+    for (note, end) in line_note_names(line) {
+        if generated_indent_block(&note).is_none() {
+            continue;
+        }
+        let start = end - note.len() - "［＃］".len();
+        notes.push((start, end, note));
+    }
+    notes
+}
+
 fn generated_indent_block(note: &str) -> Option<(String, String)> {
     let rest = note.strip_prefix("ここから")?;
     let (indent, rest) = parse_fullwidth_number(rest)?;
@@ -1655,14 +2100,18 @@ fn generated_indent_block(note: &str) -> Option<(String, String)> {
         (format!("pt{indent} jzm{width}"), "")
     } else {
         let mut classes = vec![format!("mt{indent}")];
-        for (needle, class) in [
-            ("破線罫囲み", "dashed_border"),
-            ("罫囲み", "border"),
-            ("破線枠囲み", "dashed_border"),
-            ("枠囲み", "border"),
-            ("中央揃え", "center"),
-            ("横書き", "yoko"),
-        ] {
+        // Java は 罫囲み / 枠囲み の各組で「破線 → 実線」を else-if で排他にする
+        // (AozoraEpub3Converter.java:2277-2283)。`破線枠囲み` は `枠囲み` を含むため、
+        // 独立した contains 判定にすると `border` が余計に付く。
+        for (dashed, solid) in [("破線罫囲み", "罫囲み"), ("破線枠囲み", "枠囲み")]
+        {
+            if rest.contains(dashed) {
+                classes.push("dashed_border".to_owned());
+            } else if rest.contains(solid) {
+                classes.push("border".to_owned());
+            }
+        }
+        for (needle, class) in [("中央揃え", "center"), ("横書き", "yoko")] {
             if rest.contains(needle) {
                 classes.push(class.to_owned());
             }

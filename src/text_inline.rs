@@ -57,6 +57,9 @@ fn convert_inline_with_options(
     // 文字位置。SpaceHyphenation の `idx > 20` 判定に使う。注記はタグ長、
     // ルビ・生タグ・〔〕は raw 文字数、※エスケープは 2 として数える。
     let mut java_pos = 0usize;
+    // Java convertReplacedChar は使用済みのエスケープ対象文字を `ch[idx] = '　'`
+    // で潰すため、同じ文字が続けてマーカーとして使われることはない。
+    let mut escaped_at: Option<usize> = None;
     // Java bufSuf 相当: chuki_tag.txt 3列目の行末タグを行末に出力するための遅延バッファ
     let mut deferred_close = String::new();
     while index < chars.len() {
@@ -85,36 +88,24 @@ fn convert_inline_with_options(
         if matches!(chars[index], '《' | '》' | '｜' | '＃' | '※')
             && index > 0
             && chars[index - 1] == '※'
+            && escaped_at != Some(index - 1)
+            // Java は外字変換 (convertGaijiChuki) を先に通すため、※［＃…］ の
+            // ※はマーカーではなく外字注記の開始文字になる
+            && !(chars[index] == '※' && starts_note(&chars, index))
         {
             if output.ends_with('※') {
                 output.pop();
             }
             push_text_char_escaped(&mut output, chars[index]);
+            escaped_at = Some(index);
             index += 1;
             java_pos += 1;
             continue;
         }
-        if chars[index] == '※'
-            && let Some((end, replacement)) = parse_image_note(&chars, index + 1, config)
-        {
-            // Java: ※付きの画像注記（※［＃…（img/…）入る］）は画像を出力しない
-            // （※ は外字注記開始として消費され、注記本体は画像注記として処理されない）
-            // ただし #GAIJI# フラグ付き（外字画像）は出力する
-            if !chars[index + 1..end]
-                .iter()
-                .collect::<String>()
-                .contains("#GAIJI#")
-            {
-                let _ = replacement;
-                index = end;
-                java_pos += 1 + replacement.chars().count();
-                continue;
-            }
-            output.push_str(&replacement);
-            index = end;
-            java_pos += 1 + replacement.chars().count();
-            continue;
-        }
+        // `※［＃…（img/…）…］` は Java `convertGaijiChuki` が「画像指定外字」に
+        // 変換する (外字として変換できない注記に画像パスが付いている場合)。
+        // parse_gaiji_note 側の gaiji_image_note が処理するため、ここでは
+        // 通常の画像注記として先に消費しない。
         if chars[index] == '※'
             && let Some((end, replacement)) =
                 parse_gaiji_note(&chars, index, config, allow_upright && tcy_depth == 0)
@@ -271,33 +262,33 @@ fn convert_inline_with_options(
                 java_pos += 1;
                 continue;
             };
+            // Java: ｜《…》 は基底が空でも <ruby><rt>…</rt></ruby> を出力する
+            // (前方参照注記の対象が行頭に無い場合にこの形になる)。
             let base = chars[index + 1..open].iter().collect::<String>();
-            if !base.is_empty() {
-                let reading = chars[open + 1..close].iter().collect::<String>();
-                let continues = has_following_implicit_ruby(&chars, close + 1);
-                if continues {
-                    output.push_str("<ruby>");
-                    push_ruby_part(
-                        &mut output,
-                        &base,
-                        &reading,
-                        config,
-                        auto_yoko && tcy_depth == 0,
-                    );
-                    implicit_ruby_open = true;
-                } else {
-                    push_ruby(
-                        &mut output,
-                        &base,
-                        &reading,
-                        config,
-                        auto_yoko && tcy_depth == 0,
-                    );
-                }
-                java_pos += close + 1 - index;
-                index = close + 1;
-                continue;
+            let reading = chars[open + 1..close].iter().collect::<String>();
+            let continues = has_following_implicit_ruby(&chars, close + 1);
+            if continues {
+                output.push_str("<ruby>");
+                push_ruby_part(
+                    &mut output,
+                    &base,
+                    &reading,
+                    config,
+                    auto_yoko && tcy_depth == 0,
+                );
+                implicit_ruby_open = true;
+            } else {
+                push_ruby(
+                    &mut output,
+                    &base,
+                    &reading,
+                    config,
+                    auto_yoko && tcy_depth == 0,
+                );
             }
+            java_pos += close + 1 - index;
+            index = close + 1;
+            continue;
         }
 
         if chars[index] == '《'
@@ -503,6 +494,12 @@ fn rewrite_escape_pairs(input: &str) -> String {
         index += 1;
     }
     output
+}
+
+/// `chars[index+1..]` が `［＃` で始まるか（= `chars[index]` が外字注記の
+/// 開始 `※` かどうか）。
+fn starts_note(chars: &[char], index: usize) -> bool {
+    chars.get(index + 1) == Some(&'［') && chars.get(index + 2) == Some(&'＃')
 }
 
 /// ／＼→〳〵 ／″＼→〴〵 (くの字点)
@@ -837,6 +834,17 @@ fn contains_literal_gaiji_note(input: &str) -> bool {
 fn convert_ruby_reading(reading: &str, config: &AozoraConfig) -> String {
     convert_inline_with_options(reading, config, false, false, false)
 }
+/// Java `Epub3Writer` の目次ラベル変換: `converter.vertical = tocVertical` の
+/// 状態で `convertTcyText` を適用する。呼び出し側でエスケープ済みの文字列を渡す。
+pub fn tcy_label(label: &str, config: &AozoraConfig) -> String {
+    if !config.auto_yoko {
+        return label.to_owned();
+    }
+    let mut vertical = config.clone();
+    vertical.vertical = true;
+    rewrite_auto_yoko(label, &vertical)
+}
+
 fn rewrite_auto_yoko(input: &str, config: &AozoraConfig) -> String {
     if !config.vertical || !config.auto_yoko {
         return input.to_owned();
@@ -1008,6 +1016,11 @@ fn suffix_note_at(chars: &[char], start: usize) -> Option<(usize, String, String
     if chars.get(start) != Some(&'［') || chars.get(start + 1) != Some(&'＃') {
         return None;
     }
+    // Java は convertGaijiChuki を先に通すため、`※［＃…］` は外字注記として
+    // 消費され前方参照注記にはならない (解決できなければ 〓（…） になる)。
+    if start > 0 && chars[start - 1] == '※' {
+        return None;
+    }
     let target_start = {
         let mut found = None;
         for (index, character) in chars.iter().enumerate().skip(start + 2) {
@@ -1152,7 +1165,9 @@ fn suffix_target_range_by_len(prefix: &str, target_len: usize) -> Option<(usize,
         }
         idx -= 1;
     }
-    let mut start = indexed[idx].0;
+    // Java getTargetStart は idx を使い切ると 0 を返す (前方に文字が無い場合)。
+    // 空プレフィクスでも panic しないようにする。
+    let mut start = indexed.get(idx).map_or(0, |(offset, _)| *offset);
     // ルビをまたいだら先頭の｜を含める
     if has_ruby && start >= '｜'.len_utf8() && prefix[..start].ends_with('｜') {
         start -= '｜'.len_utf8();
@@ -1339,6 +1354,11 @@ fn parse_gaiji_note(
     if let Some(replacement) = jis_note_replacement(bare_note, config, allow_upright) {
         return Some((end, replacement));
     }
+    // Java convertGaijiChuki: 文字に変換できない外字注記に画像パスが付いていれば
+    // 画像指定外字として扱う (`［＃…（file）#GAIJI#］` 相当)。
+    if let Some(image_note) = gaiji_image_note(chars, start, config) {
+        return Some(image_note);
+    }
     let open = config
         .inline_notes
         .get("行右小書き")
@@ -1371,27 +1391,31 @@ fn jis_note_replacement(note: &str, config: &AozoraConfig, allow_upright: bool) 
     let row = parts.next()?.parse::<u8>().ok()?;
     let cell = parts.next()?.parse::<u8>().ok()?;
     let character = jis_to_unicode(plane, row, cell)?;
-    Some(render_gaiji_replacement(
-        &character.to_string(),
-        config,
-        allow_upright,
-    ))
+    Some(render_gaiji_replacement(&character, config, allow_upright))
 }
 
-/// JIS X 0213 1面 8区(㉑-㊿)・12区(❶-❿,⓫-⓴)・13区(①-⑳) → Unicode.
-fn jis_to_unicode(plane: u8, row: u8, cell: u8) -> Option<char> {
-    if plane != 1 {
-        return None;
-    }
-    let code = match row {
-        8 if (33..=47).contains(&cell) => 0x3251 + (cell - 33) as u32,
-        8 if (48..=62).contains(&cell) => 0x32b1 + (cell - 48) as u32,
-        12 if (1..=10).contains(&cell) => 0x2776 + (cell - 1) as u32,
-        12 if (11..=20).contains(&cell) => 0x24eb + (cell - 11) as u32,
-        13 if (1..=20).contains(&cell) => 0x2460 + (cell - 1) as u32,
-        _ => return None,
-    };
-    char::from_u32(code)
+/// JIS X 0213 の面区点 → 文字列。Java `JisConverter.toCharString` の全表を
+/// `crate::jis` に持つ (1 面 14〜94 区と 2 面、BMP 外はサロゲートペア)。
+fn jis_to_unicode(plane: u8, row: u8, cell: u8) -> Option<String> {
+    crate::jis::to_char_string(u32::from(plane), u32::from(row), u32::from(cell))
+}
+
+/// Java `convertGaijiChuki` の「画像指定外字」: 変換できなかった `※［＃…］` に
+/// 画像パス (`（file.ext）`) が付いていれば外字画像として出力する。
+fn gaiji_image_note(
+    chars: &[char],
+    start: usize,
+    config: &AozoraConfig,
+) -> Option<(usize, String)> {
+    // `※` の次が注記本体
+    let (end, path, _, _) = image_note_parts(chars, start + 1)?;
+    let source = format!("../image/{}", escape_html(&path));
+    let replacement = config
+        .inline_notes
+        .get("外字画像")
+        .map(|template| format_image_template(template, &source, ""))
+        .unwrap_or_else(|| format!(r#"<img class="gaiji" src="{source}" alt=""/>"#));
+    Some((end, replacement))
 }
 
 fn gaiji_note_range(chars: &[char], start: usize) -> Option<(usize, String)> {
@@ -1429,6 +1453,10 @@ fn parse_image_note(
     config: &AozoraConfig,
 ) -> Option<(usize, String)> {
     let (end, path, description, is_gaiji) = image_note_parts(chars, start)?;
+    // Java: NoIllust は挿絵を出力しない。外字画像と表紙は残る。
+    if config.no_illust && !is_gaiji {
+        return Some((end, String::new()));
+    }
     let source = format!("../image/{}", escape_html(&path));
     if is_gaiji {
         let replacement = config
@@ -1521,6 +1549,10 @@ fn parse_raw_image(chars: &[char], start: usize, config: &AozoraConfig) -> Optio
         return None;
     }
     let source = raw_tag_attribute(&raw, "src")?;
+    // Java: NoIllust は <img> 注記も出力しない。
+    if config.no_illust && !source.contains("#GAIJI#") {
+        return Some((end + 1, String::new()));
+    }
     if source.trim().is_empty() {
         // Java: src 空の img は画像取得失敗で出力されない
         return Some((end + 1, String::new()));
@@ -1718,13 +1750,21 @@ fn image_note_parts(chars: &[char], start: usize) -> Option<(usize, String, Stri
         .skip(start + 2)
         .find_map(|(index, character)| (*character == '］').then_some(index))?;
     let note = chars[start + 2..close].iter().collect::<String>();
-    let open_paren = note.find('（')?;
-    let close_paren = note.rfind('）')?;
-    if open_paren >= close_paren {
-        return None;
-    }
-    let inside = &note[open_paren + '（'.len_utf8()..close_paren];
-    let path = inside.split('、').next()?.trim();
+    // Java `getImageChukiFileName`: 呼び出し側が lastIndexOf('（') を渡し、
+    // 最初の '、' か '）' の早い方までをファイル名とする。(どちらも無ければ
+    // 画像注記ではない)
+    let open_paren = note.rfind('（')?;
+    let after = &note[open_paren + '（'.len_utf8()..];
+    let end = match after.find('、') {
+        Some(comma) => match after.find('）') {
+            Some(parenthesis) if parenthesis < comma => parenthesis,
+            Some(_) => comma,
+            // Java は min(comma, -1) = -1 となり null を返す
+            None => return None,
+        },
+        None => after.find('）')?,
+    };
+    let path = after[..end].trim();
     if !path.contains('.') {
         return None;
     }

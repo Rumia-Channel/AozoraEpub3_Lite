@@ -1,6 +1,6 @@
 use std::io::{Cursor, Read};
 
-use aozora_epub3_lite::{EpubAsset, EpubBook, EpubMetadata};
+use aozora_epub3_lite::{EpubAsset, EpubBook, EpubMetadata, IniSettings, StyleSettings};
 use zip::{CompressionMethod, ZipArchive};
 
 #[test]
@@ -216,7 +216,8 @@ fn writes_cover_document_and_cover_manifest_property() {
         "image/jpeg",
         vec![0xff, 0xd8, 0xff],
     )])
-    .with_cover_asset("image/cover.jpg");
+    .with_cover_asset("image/cover.jpg")
+    .with_cover_page(true, false);
     let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
     let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
 
@@ -226,21 +227,124 @@ fn writes_cover_document_and_cover_manifest_property() {
         .unwrap()
         .read_to_string(&mut package)
         .unwrap();
+    // Java package.vm: 表紙画像だけ属性順が media-type → id → href。
     assert!(
         package.contains(
-            "href=\"image/cover.jpg\" media-type=\"image/jpeg\" properties=\"cover-image\""
+            "<item media-type=\"image/jpeg\" id=\"img0001\" href=\"image/cover.jpg\" properties=\"cover-image\"/>"
         )
     );
     assert!(package.contains("id=\"cover-page\" href=\"xhtml/cover.xhtml\""));
     assert!(package.contains("<itemref linear=\"yes\" idref=\"cover-page\""));
 
+    // manifest の href は実在する ZIP エントリでなければならない。
+    let names = archive.file_names().map(str::to_owned).collect::<Vec<_>>();
+    for href in manifest_hrefs(&package) {
+        assert!(
+            names.iter().any(|name| *name == format!("item/{href}")),
+            "manifest href {href} has no archive entry"
+        );
+    }
+
     let mut cover = String::new();
     archive
-        .by_name("item/cover.xhtml")
+        .by_name("item/xhtml/cover.xhtml")
         .unwrap()
         .read_to_string(&mut cover)
         .unwrap();
-    assert!(cover.contains("<img src=\"image/cover.jpg\""));
+    assert!(cover.contains("href=\"../style/fixed-layout-jp.css\""));
+    assert!(cover.contains("<body epub:type=\"cover\">"));
+    assert!(cover.contains("xlink:href=\"../image/cover.jpg\""));
+}
+
+/// `<item ... href="..."/>` として宣言されたリソースパスを取り出す。
+fn manifest_hrefs(package: &str) -> Vec<String> {
+    package
+        .match_indices("href=\"")
+        .filter_map(|(index, _)| {
+            let rest = &package[index + "href=\"".len()..];
+            let end = rest.find('"')?;
+            let href = &rest[..end];
+            (!href.starts_with("http")).then(|| href.to_owned())
+        })
+        .collect()
+}
+
+/// Java `text.vm` と同じく、INI のスタイル値が text.css に反映されること。
+#[test]
+fn writes_text_css_from_style_settings() {
+    let ini = IniSettings::parse(
+        "PageMargin=0,0.5,0,0\n\
+         PageMarginUnit=0\n\
+         BodyMargin=1,1,0.5,0.5\n\
+         BodyMarginUnit=0\n\
+         LineHeight=1.5\n\
+         FontSize=120\n\
+         BoldUseGothic=1\n\
+         gothicUseBold=1\n",
+    )
+    .unwrap();
+    let book = EpubBook::new(EpubMetadata::new("題名", "urn:test:css"), "<p>本文</p>")
+        .with_style(StyleSettings::from_ini(&ini));
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let mut css = String::new();
+    archive
+        .by_name("item/style/text.css")
+        .unwrap()
+        .read_to_string(&mut css)
+        .unwrap();
+
+    assert!(css.contains("margin: 0em 0.5em 0em 0em;"));
+    assert!(css.contains("margin: 1em 1em 0.5em 0.5em;"));
+    assert!(css.contains("font-size: 120%;"));
+    assert!(css.contains("line-height: 1.5;"));
+    // BoldUseGothic / gothicUseBold はセレクタ行を増やす
+    assert!(css.contains(".vrtl .b,\n.vrtl .gtc {"));
+    assert!(css.contains(".gtc,\n.b { font-weight: bold; }"));
+}
+
+/// キー未指定なら Java CLI の既定 (PageMargin/BodyMargin は単位なしの 0)。
+#[test]
+fn writes_default_text_css_without_style_settings() {
+    let book = EpubBook::new(EpubMetadata::new("題名", "urn:test:css"), "<p>本文</p>");
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let mut css = String::new();
+    archive
+        .by_name("item/style/text.css")
+        .unwrap()
+        .read_to_string(&mut css)
+        .unwrap();
+
+    assert!(css.contains("margin: 0 0 0 0;"));
+    assert!(css.contains("font-size: 100%;"));
+    assert!(css.contains("line-height: 1.8;"));
+    assert!(!css.contains(".vrtl .b,\n"));
+}
+
+/// Java TocVertical: 目次ページが縦書きになり、ラベルは
+/// `convertTcyText` 済みの XHTML として素通しで出力される。
+#[test]
+fn writes_vertical_toc_with_markup_labels() {
+    let book = EpubBook::from_sections(EpubMetadata::new("題名", "urn:test:tocv"), ["<p>本文</p>"])
+        .with_chapters([aozora_epub3_lite::NavChapter::new(
+            "第<span class=\"tcy\">1</span>話",
+            "xhtml/0001.xhtml",
+        )
+        .with_markup(true)])
+        .with_toc_vertical(true);
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let mut nav = String::new();
+    archive
+        .by_name("item/nav.xhtml")
+        .unwrap()
+        .read_to_string(&mut nav)
+        .unwrap();
+
+    assert!(nav.contains("writing-mode: vertical-rl;"));
+    // markup ラベルは再エスケープされない
+    assert!(nav.contains("第<span class=\"tcy\">1</span>話"));
 }
 
 #[test]

@@ -145,6 +145,28 @@ fn classifies_middle_and_bottom_page_breaks() {
     .unwrap();
     assert!(sections[1].starts_with("<!-- aozora-page-middle -->"));
     assert!(sections[2].starts_with("<!-- aozora-page-bottom -->"));
+
+    // タグ列が空のページ注記はブロック注記ではないので、注記と本文が同一行でも
+    // Java は <p> を付ける (noBr にしない)。既定 config の `ページの左右中央` は
+    // 以前 block_single_tags に入っていたため bare 出力になっていた。
+    let inline = super::aozora_text_to_xhtml_sections("前\n［＃ページの左右中央］中央").unwrap();
+    assert_eq!(inline.len(), 2);
+    assert!(inline[1].contains("<p>中央</p>"));
+}
+
+#[test]
+fn emits_page_bottom_tag_on_the_break_target_page() {
+    // Java: ページ左下/ページの左下 は改ページ後の行に <div class="btm"></div> を出力する
+    let mut config = AozoraConfig::default();
+    config.load_tag_text("ページ左下\t<div class=\"btm\">\t</div>\tL\n");
+    let sections =
+        super::aozora_text_to_xhtml_sections_with_config("前\n［＃ページ左下］\n後", &config)
+            .unwrap();
+    assert_eq!(sections.len(), 2);
+    assert!(sections[0].contains("<p>前</p>"));
+    assert!(sections[1].contains("<div class=\"btm\"></div>"));
+    assert!(sections[1].contains("<p>後</p>"));
+    assert!(!sections[1].contains("&lt;div"));
 }
 
 #[test]
@@ -896,4 +918,91 @@ fn applies_space_hyphenation_for_late_full_width_spaces() {
     let early = super::plain_text_to_xhtml_with_config("短い　行", &config).unwrap();
     assert!(early.contains("短い　行"));
     assert!(!early.contains("fullsp"));
+}
+
+/// Java `JisConverter` の全表を移植しているので、辞書 (chuki_utf.txt) に
+/// 載っていない面区点コード付き外字注記も文字に解決できる。
+#[test]
+fn resolves_gaiji_notes_by_jis_code_without_dictionary_entry() {
+    let output = plain_text_to_xhtml(
+        "表題\n著者\n\n\
+         ※［＃てすと、1-16-1］\n\
+         ※［＃てすと、第3水準1-14-1］\n\
+         ※［＃てすと、2-1-1］\n",
+    )
+    .unwrap();
+    assert!(output.contains("<p>亜</p>"), "{output}");
+    assert!(output.contains("<p>俱</p>"), "{output}");
+    assert!(output.contains("<p>\u{20089}</p>"), "{output}");
+    assert!(!output.contains("〓"), "{output}");
+}
+
+/// Java `getImageChukiFileName` は `lastIndexOf('（')` から最初の `、`/`）` までを
+/// ファイル名にする。説明文中に `（` があってもファイル名を取り違えない。
+#[test]
+fn resolves_image_source_after_inner_parentheses() {
+    let output = plain_text_to_xhtml(
+        "表題\n著者\n\n［＃「図（A）」のキャプション付きの図（fig.png）入る］\n\
+         ［＃ここからキャプション］\n説明\n［＃ここでキャプション終わり］\n",
+    )
+    .unwrap();
+    assert!(output.contains("src=\"../image/fig.png\""), "{output}");
+}
+
+/// サイズ指定付き（`（file、横W×縦H）`）でもファイル名だけを取り出す。
+#[test]
+fn resolves_image_source_before_size_specification() {
+    let output =
+        plain_text_to_xhtml("表題\n著者\n\n［＃左画像（fig.png、横320×縦322）入る］\n").unwrap();
+    assert!(output.contains("src=\"../image/fig.png\""), "{output}");
+}
+
+/// Java `convertGaijiChuki`: 文字に変換できない外字注記に画像パスが付いている
+/// 場合は「画像指定外字」として外字画像を出力する。
+#[test]
+fn renders_image_bearing_gaiji_notes_as_gaiji_images() {
+    let output = plain_text_to_xhtml("表題\n著者\n\n※［＃てすと（img/x.png）］\n").unwrap();
+    assert!(
+        output.contains("<img class=\"gaiji\" src=\"../image/img/x.png\""),
+        "{output}"
+    );
+    assert!(!output.contains("※"), "{output}");
+}
+
+/// Java は `convertGaijiChuki` を先に通すため、`※［＃…のルビ］` は外字注記として
+/// 消費され前方参照注記にはならない (未解決なら 〓（…） になる)。
+#[test]
+fn keeps_star_prefixed_ruby_notes_out_of_suffix_rewriting() {
+    let output = plain_text_to_xhtml(
+        "表題\n著者\n\n青空文庫※［＃「青空文庫」に「あおぞらぶんこ」のルビ］本文\n",
+    )
+    .unwrap();
+    assert!(output.contains("〓<span class=\"super\">"), "{output}");
+    assert!(!output.contains("<ruby>"), "{output}");
+}
+
+/// `※` の付かない前方参照注記はルビに変換される。
+#[test]
+fn rewrites_plain_ruby_notes_to_ruby() {
+    let output = plain_text_to_xhtml(
+        "表題\n著者\n\n青空文庫［＃「青空文庫」に「あおぞらぶんこ」のルビ］本文\n",
+    )
+    .unwrap();
+    assert!(
+        output.contains("<ruby>青空文庫<rt>あおぞらぶんこ</rt></ruby>"),
+        "{output}"
+    );
+}
+
+/// 前方参照注記の対象が行頭に無い場合、Java は空基底のルビを出力する
+/// (以前はインデックス外で panic していた)。
+#[test]
+fn renders_empty_base_ruby_for_leading_suffix_note() {
+    let output =
+        plain_text_to_xhtml("表題\n著者\n\n［＃「青空文庫」に「あおぞらぶんこ」のルビ］本文\n")
+            .unwrap();
+    assert!(
+        output.contains("<ruby><rt>あおぞらぶんこ</rt></ruby>本文"),
+        "{output}"
+    );
 }

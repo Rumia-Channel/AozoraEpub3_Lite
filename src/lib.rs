@@ -2,10 +2,11 @@ pub mod config;
 pub mod epub;
 pub mod image;
 pub mod input;
+pub(crate) mod jis;
 pub mod metadata;
 pub mod text;
 
-pub use config::{AozoraConfig, ConfigError, IniSettings, SuffixNoteRule};
+pub use config::{AozoraConfig, ConfigError, IniSettings, StyleSettings, SuffixNoteRule};
 pub use epub::{EpubAsset, EpubBook, EpubError, EpubMetadata, EpubSection, NavChapter};
 pub use input::{
     FileSource, Input, InputError, TextEntry, decode_text, detect_encoding, normalize_entry_path,
@@ -19,4 +20,5 @@ pub use text::{
     aozora_text_to_xhtml_sections_with_chapters, aozora_text_to_xhtml_sections_with_config,
     apply_alt_upright, collect_image_alts, decode_input, escape_html, image_reference_occurrences,
     image_references, inline_to_xhtml, plain_text_to_xhtml, plain_text_to_xhtml_with_config,
+    tcy_label,
 };

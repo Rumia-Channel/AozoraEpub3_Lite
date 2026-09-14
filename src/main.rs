@@ -1,9 +1,9 @@
 use aozora_epub3_lite::{
     AozoraConfig, BookMeta, ChapterRecord, EpubAsset, EpubBook, EpubMetadata, Input, NavChapter,
-    TextEntry, TitleType, aozora_text_to_xhtml_sections_with_chapters, apply_alt_upright,
-    collect_image_alts, decode_text, detect_meta_with_gaiji, escape_html, file_title_creator,
-    image::process as process_image, image_reference_occurrences, image_references,
-    inline_to_xhtml, remove_metadata_lines,
+    StyleSettings, TextEntry, TitleType, aozora_text_to_xhtml_sections_with_chapters,
+    apply_alt_upright, collect_image_alts, decode_text, detect_meta_with_gaiji, escape_html,
+    file_title_creator, image::process as process_image, image_reference_occurrences,
+    image_references, inline_to_xhtml, remove_metadata_lines, tcy_label,
 };
 use std::env;
 use std::error::Error;
@@ -75,18 +75,18 @@ fn run() -> Result<(), Box<dyn Error>> {
     };
     let config_dir_refs = config_dirs.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let mut config = AozoraConfig::load_from_dirs(&config_dir_refs, preset)?;
-    if uses_builtin_config {
-        // Java CLI parity: with no -i/--preset the reference CLI leaves these
-        // flags off (empty profile). replace.txt is loaded only when the file
-        // sits next to the executable (jarPath parity) — the manifest fallback
-        // dir is a dev convenience and must not auto-apply its bundled rules.
+    if preset.is_none() {
+        // Java CLI parity: without -i/--preset the reference CLI runs with an
+        // empty profile, so these flags stay off. An explicit INI always wins —
+        // `--config-dir` only selects where the note assets live and must not
+        // change conversion flags. replace.txt is likewise inert in the
+        // reference distribution (it ships as replace_sample.txt), so the
+        // bundled fallback directory no longer needs special-casing.
         config.auto_yoko = false;
         config.dakuten_type = 0;
         config.print_ivs_bmp = false;
         config.print_ivs_ssp = false;
-        if config_dirs[0] == Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/aozora") {
-            config.character_replacements.clear();
-        }
+        config.title_toc = false;
     }
     apply_ini_defaults(&mut options, &config);
     let vertical = options
@@ -233,11 +233,14 @@ fn convert_input(
         let title_page_selected =
             config.title_page_write && matches!(config.title_page_type, 1 | 2);
         let cover_setting = options.cover.as_deref();
-        let (assets, cover) = collect_assets(&input, entry, &text, cover_setting)?;
+        // NoIllust では本文から消えた挿絵を EPUB に格納しない
+        let body_filter = config.no_illust.then(|| sections.concat());
+        let (mut assets, cover) =
+            collect_assets(&input, entry, &text, cover_setting, body_filter.as_deref())?;
         // 装飾を書き換え前に実行: 書き換え前の src（../image/{参照名}）から
         // 参照単位の available（拡張子違いの解決有無）を判定する。Java の
         // getImageWidthRatio(srcFilePath) は元の参照名で引けなければ ratio=0 → fit。
-        decorate_image_tags(&mut sections, &assets, config);
+        decorate_image_tags(&mut sections, &mut assets, config, input.is_archive());
         for collected in &assets {
             for reference in &collected.references {
                 if collected.resolved != *reference {
@@ -254,16 +257,32 @@ fn convert_input(
             &image_references(&text),
             &resolved_references,
         );
+        // Java Epub3Writer.getImageFilePath: 表紙ページに移動した挿絵は
+        // 本文から取り除く (先頭の挿絵を表紙に使う -c 0 のときのみ)。
+        if config.cover_page
+            && is_auto_cover(cover_setting)
+            && let Some(cover) = cover.as_deref()
+        {
+            remove_image_sources(&mut sections, &[cover.to_owned()]);
+        }
         reflow_image_sections(&mut sections, &mut chapter_records, &assets, config);
 
         let nav_chapters = chapter_records
             .into_iter()
             .map(|record| {
+                // Java Epub3Writer: TocVertical のときだけ章名をエスケープ後に
+                // convertTcyText へ通す。
+                let (label, markup) = if config.toc_vertical {
+                    (tcy_label(&escape_html(&record.label), config), true)
+                } else {
+                    (record.label, false)
+                };
                 let mut chapter = NavChapter::new(
-                    record.label,
+                    label,
                     format!("xhtml/{:04}.xhtml", record.section_index + 1),
                 )
-                .with_level(record.level);
+                .with_level(record.level)
+                .with_markup(markup);
                 if let Some(anchor) = record.anchor {
                     chapter = chapter.with_anchor(anchor);
                 }
@@ -338,6 +357,9 @@ fn convert_input(
             .with_vertical(vertical)
             .with_kindle(is_kindle(options))
             .with_toc_page(config.toc_page)
+            .with_toc_vertical(config.toc_vertical)
+            .with_cover_page(config.cover_page, config.cover_page_toc)
+            .with_style(StyleSettings::from_ini(&config.ini))
             .with_toc_nest(config.nav_nest, config.ncx_nest)
             .with_title_toc(config.title_toc)
             .with_assets(
@@ -352,7 +374,15 @@ fn convert_input(
             book = book.with_title_page_markup(title_page_markup);
         }
         if let Some(cover) = cover {
-            book = book.with_cover_asset(cover);
+            // Java cover.vm の viewport / viewBox は表紙画像の元寸法を使う。
+            let cover_dimensions = assets
+                .iter()
+                .find(|collected| collected.asset.path == cover)
+                .and_then(|collected| collected.dimensions)
+                .map(|dimensions| (dimensions.width, dimensions.height));
+            book = book
+                .with_cover_asset(cover)
+                .with_cover_dimensions(cover_dimensions);
         }
         let file = File::create(&output)?;
         // 画像は書き出し時に1枚ずつ「読む → 処理 → 書く」して、全画像を
@@ -374,6 +404,7 @@ fn convert_input(
                 &collected.asset.media_type,
                 &config.ini,
                 collected.is_cover,
+                collected.rotate,
             )
             .ok()
         };
@@ -473,7 +504,10 @@ fn convert_image_only(
     let input_path = input.path();
     let mut sections = Vec::new();
     let mut assets = Vec::new();
-    for (index, path) in input.image_paths().iter().enumerate() {
+    // Java AozoraEpub3: imageOnly のときだけ FileNameComparator で並べ替える
+    let mut image_paths = input.image_paths().to_vec();
+    image_paths.sort_by(|left, right| compare_image_names(left, right));
+    for (index, path) in image_paths.iter().enumerate() {
         let data = input.read_image(path)?.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -491,8 +525,15 @@ fn convert_image_only(
                 format!("unsupported image type: {path}"),
             )
         })?;
-        let output_name = format!("{:04}.{extension}", index + 1);
-        let processed_data = process_image(&data, media_type, &config.ini, index == 0)?;
+        // Java: 出力拡張子は常に .jpg (.jpeg の jpeg を jpg に置換)
+        let output_name = format!("{:04}.{}", index + 1, extension.replace("jpeg", "jpg"));
+        // Java Epub3ImageWriter: 画像のみの EPUB は全ページが単ページ扱いなので
+        // 単ページ画像の条件で回転を決める。
+        let source_dimensions = image_dimensions(&data, media_type);
+        let rotate = source_dimensions
+            .map(|dimensions| rotate_for_image(config, dimensions, ImagePageType::Page, true))
+            .unwrap_or(0);
+        let processed_data = process_image(&data, media_type, &config.ini, index == 0, rotate)?;
         let dimensions = image_dimensions(&processed_data, media_type);
         let fragment = dimensions
             .map(|dimensions| svg_image_fragment(&output_name, dimensions))
@@ -511,6 +552,7 @@ fn convert_image_only(
             resolved: output_name,
             dimensions,
             is_cover: index == 0,
+            rotate,
         });
     }
     if assets.is_empty() {
@@ -527,7 +569,7 @@ fn convert_image_only(
         None,
         options.language.as_deref(),
     );
-    decorate_image_tags(&mut sections, &assets, config);
+    decorate_image_tags(&mut sections, &mut assets, config, false);
     let output = output_path(
         input_path,
         options.dst.as_deref().map(Path::new),
@@ -701,6 +743,9 @@ struct CollectedAsset {
     /// Whether this image is used as the cover; cover images are processed
     /// with the cover flag when the bytes are read at write time.
     is_cover: bool,
+    /// Java `imageInfo.rotateAngle`: 回転角 (度)。Java は単ページ画像と
+    /// 本文中の挿絵で条件を分けて設定する。
+    rotate: i32,
 }
 
 /// Collects EPUB assets for all image references in the text (plus the
@@ -709,11 +754,14 @@ struct CollectedAsset {
 /// bytes are read again, one image at a time, when the EPUB is written via
 /// [`EpubBook::write_to_with`]. Returns the assets and the EPUB asset path
 /// of the cover, if any.
+/// `body` が `Some` のときは、変換後の本文に残っている参照だけを集める
+/// (Java `NoIllust` は挿絵を出力しないため、EPUB にも格納されない)。
 fn collect_assets(
     input: &Input,
     entry: &TextEntry,
     text: &str,
     cover: Option<&str>,
+    body: Option<&str>,
 ) -> Result<(Vec<CollectedAsset>, Option<String>), Box<dyn Error>> {
     let base = input.path().parent().unwrap_or_else(|| Path::new("."));
     let mut assets: Vec<CollectedAsset> = Vec::new();
@@ -721,6 +769,11 @@ fn collect_assets(
     let mut image_index = 0usize;
 
     for reference in image_reference_occurrences(text) {
+        if let Some(body) = body
+            && !body.contains(&format!("../image/{}", escape_html(&reference)))
+        {
+            continue;
+        }
         image_index += 1;
         let original_available = if input.is_archive() {
             input.resolve_image_path(entry, &reference).is_some()
@@ -763,7 +816,7 @@ fn collect_assets(
             fs::read(base.join(source_path.replace('\\', "/")))?
         };
         let dimensions = image_dimensions(&data, media_type);
-        let output_name = format!("{:04}.{extension}", image_index);
+        let output_name = format!("{:04}.{}", image_index, extension.replace("jpeg", "jpg"));
         let epub_path = format!("image/{output_name}");
         let is_cover = is_auto_cover(cover)
             && cover_asset.is_none()
@@ -779,6 +832,7 @@ fn collect_assets(
             resolved: output_name,
             dimensions,
             is_cover,
+            rotate: 0,
         });
     }
 
@@ -801,7 +855,11 @@ fn collect_assets(
             })?;
             let data = fs::read(&source)?;
             let dimensions = image_dimensions(&data, media_type);
-            let output_name = format!("{:04}.{extension}", image_index + 1);
+            let output_name = format!(
+                "{:04}.{}",
+                image_index + 1,
+                extension.replace("jpeg", "jpg")
+            );
             let epub_path = format!("image/{output_name}");
             assets.push(CollectedAsset {
                 asset: EpubAsset::lazy(epub_path.clone(), media_type),
@@ -811,6 +869,7 @@ fn collect_assets(
                 resolved: output_name,
                 dimensions,
                 is_cover: true,
+                rotate: 0,
             });
             cover_asset = Some(epub_path);
         }
@@ -831,7 +890,11 @@ fn collect_assets(
                 })?;
                 let data = fs::read(&source)?;
                 let dimensions = image_dimensions(&data, media_type);
-                let output_name = format!("{:04}.{extension}", image_index + 1);
+                let output_name = format!(
+                    "{:04}.{}",
+                    image_index + 1,
+                    extension.replace("jpeg", "jpg")
+                );
                 let epub_path = format!("image/{output_name}");
                 assets.push(CollectedAsset {
                     asset: EpubAsset::lazy(epub_path.clone(), media_type),
@@ -841,6 +904,7 @@ fn collect_assets(
                     resolved: output_name,
                     dimensions,
                     is_cover: true,
+                    rotate: 0,
                 });
                 cover_asset = Some(epub_path);
             } else {
@@ -881,11 +945,20 @@ fn remove_missing_image_sources(
     references: &[String],
     resolved_references: &[String],
 ) {
-    for reference in references {
-        if resolved_references.contains(reference) {
-            continue;
-        }
-        let source = format!("../image/{}", escape_html(reference));
+    let missing = references
+        .iter()
+        .filter(|reference| !resolved_references.contains(reference))
+        .map(|reference| format!("image/{reference}"))
+        .collect::<Vec<_>>();
+    remove_image_sources(sections, &missing);
+}
+
+/// 指定した EPUB 内パス (`image/0001.jpg`) を参照する `<img>` を本文から取り除く。
+/// Java `Epub3Writer.getImageFilePath` が null を返す経路（画像未解決・表紙ページへ
+/// 移動した挿絵）と同じ後始末をする。
+fn remove_image_sources(sections: &mut [String], sources: &[String]) {
+    for source in sources {
+        let source = format!("src=\"../{}\"", escape_html(source));
         for section in sections.iter_mut() {
             let mut cursor = 0;
             while let Some(offset) = section[cursor..].find("<img") {
@@ -895,7 +968,7 @@ fn remove_missing_image_sources(
                 };
                 let end = start + end_offset + 2;
                 let tag = &section[start..end];
-                if !tag.contains(&format!("src=\"{source}\"")) {
+                if !tag.contains(source.as_str()) {
                     cursor = end;
                     continue;
                 }
@@ -1178,6 +1251,63 @@ fn image_setting_bool(config: &AozoraConfig, key: &str, default: bool) -> bool {
     config.ini.get_bool(key).unwrap_or(default)
 }
 
+/// Java `Epub3Writer.getImagePageType` (単ページ画像) と `writeArchiveImage`
+/// (本文中の挿絵) の条件で回転角を決める。表紙は Java が常に 0 にする。
+fn rotate_for_image(
+    config: &AozoraConfig,
+    dimensions: ImageDimensions,
+    page_type: ImagePageType,
+    archive_images: bool,
+) -> i32 {
+    let Some(angle) = image_rotation(config) else {
+        return 0;
+    };
+    let display_width = image_setting_f32(config, "DispW", 600.0);
+    let display_height = image_setting_f32(config, "DispH", 800.0);
+    if display_width <= 0.0
+        || display_height <= 0.0
+        || dimensions.width == 0
+        || dimensions.height == 0
+    {
+        return 0;
+    }
+    let scale = image_setting_f32(config, "ImageScale", 1.0);
+    let scaled_width = dimensions.width as f32 * scale;
+    let scaled_height = dimensions.height as f32 * scale;
+    // 単ページ画像: 画面より横長で 110% 以上 / 画面より縦長で 110% 以上
+    if page_type.is_page() {
+        if scaled_width / scaled_height > display_width / display_height {
+            return if display_width < display_height && scaled_width > scaled_height * 1.1 {
+                angle
+            } else {
+                0
+            };
+        }
+        return if display_width > display_height && scaled_width * 1.1 < scaled_height {
+            angle
+        } else {
+            0
+        };
+    }
+    // 本文中の挿絵: Java writeArchiveImage はアーカイブ入力のときだけ回転する
+    if !archive_images {
+        return 0;
+    }
+    let ratio = f64::from(dimensions.width) / f64::from(dimensions.height);
+    let display = f64::from(display_width) / f64::from(display_height);
+    if ratio >= display {
+        if display_width < display_height && 1.0 / ratio < display {
+            angle
+        } else {
+            0
+        }
+    } else if display_width > display_height && 1.0 / ratio > display {
+        angle
+    } else {
+        0
+    }
+}
+
 fn image_rotation(config: &AozoraConfig) -> Option<i32> {
     match config.ini.get("RotateImage").map(str::trim) {
         Some("1") => Some(90),
@@ -1209,9 +1339,10 @@ fn image_page_type(
         return ImagePageType::Inline;
     }
 
-    let single_page_width = image_setting_usize(config, "SinglePageWidth", 550) as u32;
-    let single_page_size_width = image_setting_usize(config, "SinglePageSizeW", 400) as u32;
-    let single_page_size_height = image_setting_usize(config, "SinglePageSizeH", 600) as u32;
+    // Java AozoraEpub3.java の既定値 (CLI)
+    let single_page_width = image_setting_usize(config, "SinglePageWidth", 600) as u32;
+    let single_page_size_width = image_setting_usize(config, "SinglePageSizeW", 480) as u32;
+    let single_page_size_height = image_setting_usize(config, "SinglePageSizeH", 640) as u32;
     let eligible = dimensions.width >= single_page_width
         || (dimensions.width >= single_page_size_width
             && dimensions.height >= single_page_size_height);
@@ -1328,6 +1459,10 @@ fn is_standalone_image_line(line: &str) -> bool {
         .and_then(|value| value.strip_suffix("</span>"))
         .map(str::trim)
         .unwrap_or(inner);
+    // 外字画像は Java では printImageChuki を通らず単ページ化も改ページもされない
+    if inner.contains("class=\"gaiji") {
+        return false;
+    }
     inner.starts_with("<img") && inner.ends_with("/>")
 }
 
@@ -1404,7 +1539,10 @@ fn split_image_page_sections(
                 output.push(prefix);
                 output.push(unwrap_image_paragraph(line));
             } else {
-                output.push(format!("{prefix}{}", unwrap_image_paragraph(line)));
+                // 直前が空段落だけなら単ページ画像セクションに持ち込まない。
+                // Java は改ページ前の空行を出力しないため、ここで混ぜると
+                // <body class="p-image"> の判定が崩れる。
+                output.push(unwrap_image_paragraph(line));
             }
             current.clear();
         } else {
@@ -1524,38 +1662,35 @@ fn escape_image_alt(value: &str) -> String {
     escape_html(&decoded).replace('×', "&times;")
 }
 
+/// Java の画像タグ (`chuki_tag.txt` の 画像 / 画像幅 / 画像浮 等) は
+/// width / height 属性を持たないため、ここでも出力しない。
 fn render_image_tag(
     source: &str,
     alt: &str,
     class_name: Option<&str>,
     style: Option<&str>,
-    dimensions: Option<ImageDimensions>,
 ) -> String {
     let class = class_name
         .map(|value| format!(" class=\"{value}\""))
-        .unwrap_or_default();
-    let dimensions = dimensions
-        .map(|value| format!(" width=\"{}\" height=\"{}\"", value.width, value.height))
         .unwrap_or_default();
     let style = style
         .filter(|value| !value.is_empty())
         .map(|value| format!(" style=\"{value}\""))
         .unwrap_or_default();
     format!(
-        "<img{class}{dimensions}{style} src=\"{}\" alt=\"{alt}\"/>",
+        "<img{class}{style} src=\"{}\" alt=\"{alt}\"/>",
         escape_html(source)
     )
 }
 
 fn decorate_image_tags(
     sections: &mut [String],
-    collected_assets: &[CollectedAsset],
+    assets: &mut [CollectedAsset],
     config: &AozoraConfig,
+    // アーカイブ入力か。Java は writeArchiveImage でしか本文中の挿絵を
+    // 回転させない (.txt 入力の画像はファイルシステムから無回転で書かれる)。
+    archive_images: bool,
 ) {
-    let display_width = image_setting_f32(config, "DispW", 600.0);
-    let display_height = image_setting_f32(config, "DispH", 800.0);
-    let rotation = image_rotation(config);
-
     for section in sections.iter_mut() {
         let original = section.clone();
         let mut replacements: Vec<(usize, usize, String)> = Vec::new();
@@ -1572,7 +1707,7 @@ fn decorate_image_tags(
                 continue;
             };
             let reference_name = source.strip_prefix("../image/").unwrap_or(source);
-            let Some(collected) = collected_assets
+            let Some(collected) = assets
                 .iter()
                 .find(|collected| collected.references.iter().any(|r| r == reference_name))
             else {
@@ -1602,14 +1737,30 @@ fn decorate_image_tags(
             let has_open_block = has_open_block_container(&original[..start]);
             let page_type =
                 image_page_type(dimensions, config, has_caption, usize::from(has_open_block));
+            let rotate = if source_missing {
+                0
+            } else {
+                rotate_for_image(config, dimensions, page_type, archive_images)
+            };
+            // Java は ImageInfo 単位で rotateAngle を持つ。同じ画像が複数回
+            // 参照されていれば最後の判定が使われる。
+            if let Some(asset) = assets
+                .iter_mut()
+                .find(|asset| asset.references.iter().any(|r| r == reference_name))
+            {
+                asset.rotate = rotate;
+            }
             let ratio = if page_type.is_page() {
                 0.0
             } else if source_missing {
                 // Java: 元参照が無い/未知拡張子なら getImageInfo が null → ratio 0 → fit
                 0.0
             } else {
-                image_width_ratio(dimensions, config, has_caption)
+                image_width_ratio(dimensions, config, has_caption, rotate)
             };
+            // Java は `style="width:%s%%"` に double を渡すため Double.toString と同じ
+            // 表記 (70 → "70.0") になる。Rust の `{:?}` が同じ書式。
+            let ratio_text = format!("{ratio:?}");
             // Java: 行バッファ全体の事後変換で alt 内の正立文字も <span class="upr"> 化される
             let alt = apply_alt_upright(
                 &escape_image_alt(tag_attribute(tag, "alt").unwrap_or_default().trim()),
@@ -1623,16 +1774,26 @@ fn decorate_image_tags(
             if tag_attribute(tag, "class")
                 .is_some_and(|class| class.split_whitespace().any(|name| name == "gaiji"))
             {
-                let class_name = match image_orientation(dimensions, config) {
-                    1 => "gaiji-wide",
-                    2 => "gaiji-line",
-                    _ => "gaiji",
-                };
-                replacements.push((
-                    start,
-                    end,
-                    render_image_tag(source, &alt, Some(class_name), None, None),
-                ));
+                // Java: getImageOrientation が -1 (行方向 64px 以下) のときは
+                // switch に一致する case が無く、img タグを出力しない。
+                // (画像ファイル自体は登録済みなので EPUB には格納される)
+                match image_orientation(dimensions, config) {
+                    -1 => replacements.push((start, end, String::new())),
+                    orientation => {
+                        let class_name = if orientation == 1 {
+                            "gaiji-wide"
+                        } else if orientation == 2 {
+                            "gaiji-line"
+                        } else {
+                            "gaiji"
+                        };
+                        replacements.push((
+                            start,
+                            end,
+                            render_image_tag(source, &alt, Some(class_name), None),
+                        ));
+                    }
+                }
                 cursor = end;
                 continue;
             }
@@ -1644,29 +1805,19 @@ fn decorate_image_tags(
                 page_type.is_page() && image_setting_bool(config, "ImageFloatPage", false);
             let block_float =
                 !page_type.is_page() && image_setting_bool(config, "ImageFloatBlock", false);
-            let (wrapper_replacement, image_class, image_style, image_dimensions) = if page_float {
-                (
-                    Some("<span class=\"img fpage\">".to_owned()),
-                    None,
-                    None,
-                    None,
-                )
+            let (wrapper_replacement, image_class, image_style) = if page_float {
+                (Some("<span class=\"img fpage\">".to_owned()), None, None)
             } else if page_type.is_page() {
-                let style = None;
-                let dimensions = rotation
-                    .filter(|_| should_rotate(dimensions, display_width, display_height))
-                    .map(|_| dimensions);
-                (Some("<span>".to_owned()), Some("fit"), style, dimensions)
+                (Some("<span>".to_owned()), Some("fit"), None)
             } else if let Some((float_type, _)) = float_type {
                 let class = if float_type == 1 { "ft" } else { "fb" };
                 if ratio > 0.0 {
                     (
                         Some(format!(
-                            "<span class=\"img {class}\" style=\"width:{ratio}%\">"
+                            "<span class=\"img {class}\" style=\"width:{ratio_text}%\">"
                         )),
                         None,
                         Some("width:100%".to_owned()),
-                        None,
                     )
                 } else {
                     let class = if float_type == 1 {
@@ -1674,52 +1825,36 @@ fn decorate_image_tags(
                     } else {
                         "float-end m-start-1em"
                     };
-                    (
-                        Some(format!("<span class=\"{class}\">")),
-                        Some("fit"),
-                        None,
-                        None,
-                    )
+                    (Some(format!("<span class=\"{class}\">")), Some("fit"), None)
                 }
             } else if block_float {
                 if ratio > 0.0 {
                     (
                         Some(format!(
-                            "<span class=\"img fblk\" style=\"width:{ratio}%\">"
+                            "<span class=\"img fblk\" style=\"width:{ratio_text}%\">"
                         )),
                         None,
                         Some("width:100%".to_owned()),
-                        None,
                     )
                 } else {
                     (
                         Some("<span class=\"img fblk\">".to_owned()),
                         Some("fit"),
                         None,
-                        None,
                     )
                 }
             } else if ratio > 0.0 {
                 (
-                    Some(format!("<span class=\"img\" style=\"width:{ratio}%\">")),
+                    Some(format!(
+                        "<span class=\"img\" style=\"width:{ratio_text}%\">"
+                    )),
                     None,
                     Some("width:100%".to_owned()),
-                    None,
                 )
             } else {
-                (None, Some("fit"), None, None)
+                (None, Some("fit"), None)
             };
-            let angle = rotation
-                .filter(|_| page_type.is_page())
-                .filter(|_| should_rotate(dimensions, display_width, display_height));
-            let image_style = if let Some(angle) = angle {
-                Some(format!(
-                    "{}transform: rotate({angle}deg); transform-origin: center;",
-                    image_style.as_deref().unwrap_or_default()
-                ))
-            } else {
-                image_style
-            };
+
             if let Some((span_start, span_end)) = wrapper
                 && let Some(wrapper_replacement) = wrapper_replacement
             {
@@ -1728,13 +1863,7 @@ fn decorate_image_tags(
             replacements.push((
                 start,
                 end,
-                render_image_tag(
-                    source,
-                    &alt,
-                    image_class,
-                    image_style.as_deref(),
-                    image_dimensions,
-                ),
+                render_image_tag(source, &alt, image_class, image_style.as_deref()),
             ));
             cursor = end;
         }
@@ -1773,7 +1902,12 @@ fn image_orientation(dimensions: ImageDimensions, config: &AozoraConfig) -> i32 
     }
 }
 
-fn image_width_ratio(dimensions: ImageDimensions, config: &AozoraConfig, has_caption: bool) -> f64 {
+fn image_width_ratio(
+    dimensions: ImageDimensions,
+    config: &AozoraConfig,
+    has_caption: bool,
+    rotate: i32,
+) -> f64 {
     let scale = image_setting_f32(config, "ImageScale", 1.0);
     if scale == 0.0 {
         return 0.0;
@@ -1786,9 +1920,15 @@ fn image_width_ratio(dimensions: ImageDimensions, config: &AozoraConfig, has_cap
     if display_width <= 0.0 || display_height <= 0.0 {
         return 0.0;
     }
+    // Java getImageWidthRatio: 回転時は縦横を入れ替えて計算する
+    let (image_width, image_height) = if rotate == 90 || rotate == -90 {
+        (dimensions.height, dimensions.width)
+    } else {
+        (dimensions.width, dimensions.height)
+    };
     // Java は double で (double)imgW/dispW*scale*100 の順に計算する
-    let mut width_ratio = dimensions.width as f64 / display_width as f64 * scale as f64 * 100.0;
-    let height_ratio = dimensions.height as f64 / display_height as f64 * scale as f64 * 100.0;
+    let mut width_ratio = image_width as f64 / display_width as f64 * scale as f64 * 100.0;
+    let height_ratio = image_height as f64 / display_height as f64 * scale as f64 * 100.0;
     if has_caption && height_ratio >= 90.0 {
         width_ratio *= 100.0 / height_ratio * 0.9;
     } else if height_ratio >= 100.0 {
@@ -1946,6 +2086,45 @@ fn normalize_relative_path(path: &str) -> Result<String, Box<dyn Error>> {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "asset path is empty").into());
     }
     Ok(parts.join("/"))
+}
+
+/// Java `FileNameComparator`: 画像のみ ZIP の並び替え。`_` を `/` として扱い、
+/// 漢数字と 上中下前後 を順序付けする (比較前に小文字化する)。
+fn compare_image_names(left: &str, right: &str) -> std::cmp::Ordering {
+    let left = left
+        .to_lowercase()
+        .chars()
+        .map(ordering_char)
+        .collect::<Vec<_>>();
+    let right = right
+        .to_lowercase()
+        .chars()
+        .map(ordering_char)
+        .collect::<Vec<_>>();
+    left.cmp(&right)
+}
+
+/// Java `FileNameComparator.replace`。
+fn ordering_char(character: char) -> u32 {
+    match character {
+        '_' => '/' as u32,
+        '一' => '一' as u32,
+        '二' => '一' as u32 + 1,
+        '三' => '一' as u32 + 2,
+        '四' => '一' as u32 + 3,
+        '五' => '一' as u32 + 4,
+        '六' => '一' as u32 + 5,
+        '七' => '一' as u32 + 6,
+        '八' => '一' as u32 + 7,
+        '九' => '一' as u32 + 8,
+        '十' => '一' as u32 + 9,
+        '上' => '上' as u32,
+        '前' => '上' as u32 + 1,
+        '中' => '上' as u32 + 2,
+        '下' => '上' as u32 + 3,
+        '後' => '上' as u32 + 4,
+        _ => character as u32,
+    }
 }
 
 fn media_type_for_extension(extension: &str) -> Option<&'static str> {
@@ -2109,11 +2288,24 @@ fn usage() -> &'static str {
 mod tests {
     use super::{
         AozoraConfig, CliOptions, CollectedAsset, EpubAsset, ImageDimensions, ImagePageType,
-        TitleType, apply_ini_defaults, decorate_image_tags, external_settings_path,
-        image_dimensions, image_page_type, java_name_uuid, output_path, parse_args,
-        reflow_image_sections, remove_metadata_lines, remove_missing_image_sources, should_rotate,
-        usage,
+        TitleType, apply_ini_defaults, compare_image_names, decorate_image_tags,
+        external_settings_path, image_dimensions, image_page_type, java_name_uuid, output_path,
+        parse_args, reflow_image_sections, remove_metadata_lines, remove_missing_image_sources,
+        should_rotate, usage,
     };
+
+    /// Java FileNameComparator: `_` は `/` として、漢数字と 上中下前後 は
+    /// 順序付けして比較する。
+    #[test]
+    fn sorts_image_names_like_java() {
+        let mut names = vec!["2.png", "10.png", "_cover.png", "第3話.png", "第1話.png"];
+        names.sort_by(|left, right| compare_image_names(left, right));
+        assert_eq!(
+            names,
+            vec!["_cover.png", "10.png", "2.png", "第1話.png", "第3話.png"]
+        );
+    }
+
     use aozora_epub3_lite::{IniSettings, decode_text, detect_meta};
     use std::path::Path;
 
@@ -2140,6 +2332,7 @@ mod tests {
             resolved: reference,
             dimensions,
             is_cover: false,
+            rotate: 0,
         }
     }
 
@@ -2466,10 +2659,13 @@ mod tests {
         );
         let mut sections =
             vec!["<p><img class=\"fit\" src=\"../image/fig.png\" alt=\"図\"/></p>".to_owned()];
-        decorate_image_tags(&mut sections, &[collected(asset)], &config);
-        assert!(sections[0].contains("width=\"1600\" height=\"900\""));
-
-        assert!(sections[0].contains("transform: rotate(90deg)"));
+        let mut assets = vec![collected(asset)];
+        decorate_image_tags(&mut sections, &mut assets, &config, false);
+        // Java の画像タグは width/height 属性も CSS 回転も持たない
+        assert!(!sections[0].contains("width=\"1600\""));
+        assert!(!sections[0].contains("transform:"));
+        // 回転は画素に対して行われる (Java imageInfo.rotateAngle)
+        assert_eq!(assets[0].rotate, 90);
     }
 
     #[test]
@@ -2487,7 +2683,7 @@ mod tests {
             "<p><span><img class=\"fit\" src=\"../image/fig.png\" alt=\"図\"/></span></p>"
                 .to_owned(),
         ];
-        decorate_image_tags(&mut sections, &[collected(asset)], &config);
+        decorate_image_tags(&mut sections, &mut [collected(asset)], &config, false);
         assert!(sections[0].contains("<span class=\"img\" style=\"width:76.5%\">"));
         assert!(sections[0].contains("<img style=\"width:100%\""));
         assert!(!sections[0].contains("width=\"459\""));
@@ -2514,6 +2710,7 @@ mod tests {
             available: vec![false],
             source: "img/fig.jpg".to_owned(),
             resolved: "fig.png".to_owned(),
+            rotate: 0,
         };
         let config = AozoraConfig::from_ini(
             IniSettings::parse("DispW=600\nDispH=800\nSinglePageWidth=1000\nImageScale=1\n")
@@ -2523,7 +2720,7 @@ mod tests {
             "<p><span><img class=\"fit\" src=\"../image/img/fig.jpg\" alt=\"図\"/></span></p>"
                 .to_owned(),
         ];
-        decorate_image_tags(&mut sections, &[collected], &config);
+        decorate_image_tags(&mut sections, &mut [collected], &config, false);
         assert!(sections[0].contains("class=\"fit\""));
         assert!(!sections[0].contains("width:"));
     }
@@ -2545,7 +2742,7 @@ mod tests {
             "<p><span><img class=\"fit\" src=\"../image/float.png\" alt=\"\"/></span></p>"
                 .to_owned(),
         ];
-        decorate_image_tags(&mut sections, &[collected(asset)], &config);
+        decorate_image_tags(&mut sections, &mut [collected(asset)], &config, false);
         assert!(sections[0].contains("<span class=\"img ft\""));
         assert!(sections[0].contains("style=\"width:83.33333333333334%\""));
     }
@@ -2567,7 +2764,7 @@ mod tests {
             "<p><span><img class=\"fit\" src=\"../image/page.png\" alt=\"\"/></span></p>"
                 .to_owned(),
         ];
-        decorate_image_tags(&mut sections, &[collected(asset)], &config);
+        decorate_image_tags(&mut sections, &mut [collected(asset)], &config, false);
         assert!(sections[0].contains("<img class=\"fit\""));
         assert!(!sections[0].contains("height:"));
     }

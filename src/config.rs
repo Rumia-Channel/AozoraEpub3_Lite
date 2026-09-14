@@ -33,6 +33,108 @@ impl From<io::Error> for ConfigError {
     }
 }
 
+/// Java `text.vm` に流し込むスタイル設定。INI の `PageMargin` /
+/// `BodyMargin` / `PageMarginUnit` / `BodyMarginUnit` / `LineHeight` /
+/// `FontSize` / `BoldUseGothic` / `gothicUseBold` に対応する。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StyleSettings {
+    /// `@page` の margin (4 値、単位込み)。
+    pub page_margin: [String; 4],
+    /// `html.vrtl` / `html.hltr` の margin (4 値、単位込み)。
+    pub body_margin: [String; 4],
+    /// `body` の line-height。Java は `Float.toString` で出力する。
+    pub line_height: String,
+    /// `body` の font-size (%)。
+    pub font_size: i32,
+    /// `BoldUseGothic`: 太字にゴシック体を併用する。
+    pub bold_use_gothic: bool,
+    /// `gothicUseBold`: ゴシック体を太字にする (Java 側のキーは小文字始まり)。
+    pub gothic_use_bold: bool,
+}
+
+impl Default for StyleSettings {
+    fn default() -> Self {
+        Self {
+            page_margin: [
+                "0".to_owned(),
+                "0".to_owned(),
+                "0".to_owned(),
+                "0".to_owned(),
+            ],
+            body_margin: [
+                "0".to_owned(),
+                "0".to_owned(),
+                "0".to_owned(),
+                "0".to_owned(),
+            ],
+            line_height: "1.8".to_owned(),
+            font_size: 100,
+            bold_use_gothic: false,
+            gothic_use_bold: false,
+        }
+    }
+}
+
+impl StyleSettings {
+    /// Java `AozoraEpub3.java` と同じ解釈で INI から読む。4 値でない
+    /// `PageMargin` / `BodyMargin` は単位なしの既定値 `0 0 0 0` になる。
+    pub fn from_ini(ini: &IniSettings) -> Self {
+        let margin = |key: &str, unit_key: &str| {
+            let Some(value) = ini.get(key) else {
+                return [
+                    "0".to_owned(),
+                    "0".to_owned(),
+                    "0".to_owned(),
+                    "0".to_owned(),
+                ];
+            };
+            let parts = value.split(',').collect::<Vec<_>>();
+            if parts.len() != 4 {
+                return [
+                    "0".to_owned(),
+                    "0".to_owned(),
+                    "0".to_owned(),
+                    "0".to_owned(),
+                ];
+            }
+            // Java: PageMarginUnit が "0" なら em、それ以外 (未指定含む) は %。
+            let unit = if ini.get(unit_key) == Some("0") {
+                "em"
+            } else {
+                "%"
+            };
+            let mut values = [
+                "0".to_owned(),
+                "0".to_owned(),
+                "0".to_owned(),
+                "0".to_owned(),
+            ];
+            for (index, part) in parts.iter().enumerate() {
+                values[index] = format!("{}{unit}", part.trim());
+            }
+            values
+        };
+        let line_height = ini
+            .get("LineHeight")
+            .and_then(|value| value.trim().parse::<f32>().ok())
+            .filter(|value| value.is_finite())
+            .unwrap_or(1.8);
+        let font_size = ini
+            .get("FontSize")
+            .and_then(|value| value.trim().parse::<i32>().ok())
+            .unwrap_or(100);
+        Self {
+            page_margin: margin("PageMargin", "PageMarginUnit"),
+            body_margin: margin("BodyMargin", "BodyMarginUnit"),
+            // Java Float.toString は常に小数点を含む ("2" ではなく "2.0")。
+            line_height: format!("{line_height:?}"),
+            font_size,
+            bold_use_gothic: ini.get_bool("BoldUseGothic").unwrap_or(false),
+            gothic_use_bold: ini.get_bool("gothicUseBold").unwrap_or(false),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct IniSettings {
     values: BTreeMap<String, String>,
@@ -202,6 +304,28 @@ pub struct AozoraConfig {
     pub ncx_nest: bool,
     /// `TitleToc` INI: 表題を目次に含める (Java BookInfo 既定 true、CLI は INI 無記載で false)。
     pub title_toc: bool,
+    /// `CoverPage` INI key: 表紙ページを出力する (Java 既定 false)。
+    pub cover_page: bool,
+    /// `CoverPageToc` INI key: 目次に表紙への項目を追加する。
+    pub cover_page_toc: bool,
+    /// `NoIllust` INI key: 挿絵を出力しない (表紙と外字画像は残る)。
+    pub no_illust: bool,
+    /// `TocVertical` INI key: 目次ページを縦書きにする。
+    pub toc_vertical: bool,
+    /// `ChapterExclude` INI key: 目次ページ内の自動抽出見出しを除外する。
+    pub chapter_exclude: bool,
+    /// `ChapterUseNextLine` INI key: 見出しの次の行を章名に繋げる。
+    pub chapter_use_next_line: bool,
+    /// `ChapterName` INI key: 数字を含まない章名 (プロローグ等) を抽出する。
+    pub chapter_name_auto: bool,
+    /// `ChapterNumOnly` INI key: 数字のみの行を抽出する。
+    pub chapter_num_only: bool,
+    /// `ChapterNumTitle` INI key: 数字+区切り+見出しを抽出する。
+    pub chapter_num_title: bool,
+    /// `ChapterNumParen` INI key: 括弧内数字のみの行を抽出する。
+    pub chapter_num_paren: bool,
+    /// `ChapterNumParenTitle` INI key: 括弧内数字+見出しを抽出する。
+    pub chapter_num_paren_title: bool,
     /// 章検出 `ChapterSection`: 改ページ後の先頭行を章にする (Java: キー無記載で true)。
     pub chapter_section: bool,
     /// 章検出 `ChapterH/H1/H2/H3`: 見出し注記を章にする (Java 既定 false)。
@@ -288,10 +412,12 @@ impl Default for AozoraConfig {
                 "３字下げ".to_owned(),
                 ("<div class=\"mt3\">".to_owned(), "</div>".to_owned()),
             )]),
+            // Java の chuki_tag.txt でタグ列が空の注記 (ページの左右中央 等) は
+            // ブロック注記ではないため、ここには入れない (入れると noBr になり
+            // `<p>` が落ちる)。読み込む資産側が正で、この既定は資産が無い場合用。
             block_single_tags: BTreeMap::from([
                 ("空行".to_owned(), "<p><br/></p>".to_owned()),
                 ("区切り線".to_owned(), "<hr/>".to_owned()),
-                ("ページの左右中央".to_owned(), String::new()),
             ]),
             page_break_notes: BTreeSet::from([
                 "改丁".to_owned(),
@@ -357,6 +483,17 @@ impl Default for AozoraConfig {
             nav_nest: false,
             ncx_nest: false,
             title_toc: true,
+            cover_page: false,
+            cover_page_toc: false,
+            no_illust: false,
+            toc_vertical: false,
+            chapter_exclude: false,
+            chapter_use_next_line: false,
+            chapter_name_auto: false,
+            chapter_num_only: false,
+            chapter_num_title: false,
+            chapter_num_paren: false,
+            chapter_num_paren_title: false,
             chapter_section: true,
             chapter_h: false,
             chapter_h1: false,
@@ -371,8 +508,10 @@ impl Default for AozoraConfig {
         config.load_ivs_text(include_str!("../assets/aozora/chuki_ivs.txt"));
         config.load_alt_text(include_str!("../assets/aozora/chuki_alt.txt"));
         config.load_latin_text(include_str!("../assets/aozora/chuki_latin.txt"));
-        // replace.txt is an optional user override. The bundled file documents
-        // rules that are only enabled when the file is explicitly supplied.
+        // replace.txt is an optional user override, loaded only when the file
+        // is present next to the executable or in a --config-dir. The bundled
+        // file ships as replace_sample.txt (inert), matching the reference
+        // distribution, so `-i preset.ini` alone does not change characters.
         config
     }
 }
@@ -420,7 +559,10 @@ impl AozoraConfig {
         let auto_yoko_num1 = ini.get_bool("AutoYokoNum1").unwrap_or(false);
         let auto_yoko_num3 = ini.get_bool("AutoYokoNum3").unwrap_or(false);
         let auto_yoko_eq1 = ini.get_bool("AutoYokoEQ1").unwrap_or(false);
-        let auto_yoko_eq3 = ini.get_bool("AutoYokoEQ3").unwrap_or(false);
+        // Java は `autoYokoEQ3` をフィールド既定 true で持ち、setAutoYoko でも
+        // CLI からも変更しない（対応する INI キーが存在しない）。3文字の `!?`
+        // 縦中横は常に有効なので、既定を true にする。
+        let auto_yoko_eq3 = ini.get_bool("AutoYokoEQ3").unwrap_or(true);
         let dakuten_type = ini
             .get("DakutenType")
             .and_then(|value| value.parse::<u8>().ok())
@@ -433,6 +575,17 @@ impl AozoraConfig {
         let nav_nest = ini.get_bool("NavNest").unwrap_or(false);
         let ncx_nest = ini.get_bool("NcxNest").unwrap_or(false);
         let title_toc = ini.get_bool("TitleToc").unwrap_or(false);
+        let cover_page = ini.get_bool("CoverPage").unwrap_or(false);
+        let cover_page_toc = ini.get_bool("CoverPageToc").unwrap_or(false);
+        let no_illust = ini.get_bool("NoIllust").unwrap_or(false);
+        let toc_vertical = ini.get_bool("TocVertical").unwrap_or(false);
+        let chapter_exclude = ini.get_bool("ChapterExclude").unwrap_or(false);
+        let chapter_use_next_line = ini.get_bool("ChapterUseNextLine").unwrap_or(false);
+        let chapter_name_auto = ini.get_bool("ChapterName").unwrap_or(false);
+        let chapter_num_only = ini.get_bool("ChapterNumOnly").unwrap_or(false);
+        let chapter_num_title = ini.get_bool("ChapterNumTitle").unwrap_or(false);
+        let chapter_num_paren = ini.get_bool("ChapterNumParen").unwrap_or(false);
+        let chapter_num_paren_title = ini.get_bool("ChapterNumParenTitle").unwrap_or(false);
         // Java: ChapterSection はキー無記載で true、値があれば "1" のみ true。
         let chapter_section = match ini.get("ChapterSection") {
             None => true,
@@ -477,6 +630,17 @@ impl AozoraConfig {
             nav_nest,
             ncx_nest,
             title_toc,
+            cover_page,
+            cover_page_toc,
+            no_illust,
+            toc_vertical,
+            chapter_exclude,
+            chapter_use_next_line,
+            chapter_name_auto,
+            chapter_num_only,
+            chapter_num_title,
+            chapter_num_paren,
+            chapter_num_paren_title,
             chapter_section,
             chapter_h,
             chapter_h1,
@@ -606,7 +770,7 @@ impl AozoraConfig {
                 }
                 _ => {}
             }
-            if flag == Some('1') {
+            if matches!(flag, Some('1' | 'L')) {
                 let tag = fields
                     .get(1)
                     .map(|value| value.trim())
@@ -857,7 +1021,9 @@ mod tests {
         assert!(!config.auto_yoko_num1);
         assert!(!config.auto_yoko_num3);
         assert!(!config.auto_yoko_eq1);
-        assert!(!config.auto_yoko_eq3);
+        // Java の autoYokoEQ3 はフィールド既定 true で、setAutoYoko でも CLI からも
+        // 変更されない（INI キーが存在しない）。3文字の `!?` 縦中横は常に有効。
+        assert!(config.auto_yoko_eq3);
         assert_eq!(config.dakuten_type, 0);
         assert!(!config.print_ivs_ssp);
     }
