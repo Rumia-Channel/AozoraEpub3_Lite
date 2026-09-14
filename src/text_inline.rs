@@ -507,9 +507,11 @@ fn convert_inline_with_options(
                 base_start -= 1;
             }
             let base = chars[base_start..index].iter().collect::<String>();
-            // 基底先頭のフェーズ1バッファ位置。基底は素の本文ランなので、
+            // 基底先頭のフェーズ1バッファ位置。基底が素の本文ランなら
             // 現在位置から基底の分を引いて求まる（Java は行全体が1バッファ）。
-            let base_offset = java_pos - phase1_slice_len(&chars[base_start..index]);
+            // 基底に外字注記などが混ざる場合は注記の置換後長が分からないため
+            // 手前側に丸める（禁則調整の閾値判定なので安全側）。
+            let base_offset = java_pos.saturating_sub(phase1_slice_len(&chars[base_start..index]));
             let base_preceding = base_start
                 .checked_sub(1)
                 .and_then(|previous| chars.get(previous).copied());
