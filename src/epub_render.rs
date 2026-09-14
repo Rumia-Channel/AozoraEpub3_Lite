@@ -119,14 +119,17 @@ pub(super) fn render_package(
             )
         })
         .unwrap_or_default();
+    // Java package.vm: `${fixed_metadata}` の後にリテラルの空行があり、その後が
+    // `<!-- etc. -->`。ImageOnly のときは Velocity の `#end` 行が消費されるため
+    // primary-writing-mode の直後に `<!-- etc. -->` が続く (空行が入らない)。
     let fixed_metadata = if image_only {
         format!(
-            "\n\n\t\t<!-- Fixed-Layout Documents指定 -->\n\
+            "\n\t\t<!-- Fixed-Layout Documents指定 -->\n\
 \t\t<meta property=\"rendition:layout\">pre-paginated</meta>\n\
 \t\t<meta property=\"rendition:spread\">landscape</meta>\n\
 \t\t<meta name=\"original-resolution\" content=\"${{coverImage.Width}}x${{coverImage.Height}}\"/>\n\
 \n\
-\t\t<meta name=\"primary-writing-mode\" content=\"{}\"/>",
+\t\t<meta name=\"primary-writing-mode\" content=\"{}\"/>\n",
             if vertical {
                 "horizontal-rl"
             } else {
@@ -134,7 +137,7 @@ pub(super) fn render_package(
             }
         )
     } else {
-        String::new()
+        "\n".to_owned()
     };
     let styles = if image_only {
         "\t\t<item id=\"svg_image\" href=\"style/fixed-layout-jp.css\" media-type=\"text/css\"/>\n"
@@ -272,9 +275,8 @@ pub(super) fn render_package(
 <!-- ファイルid -->
 		<dc:identifier id="unique-id">urn:uuid:{identifier}</dc:identifier>
 <!-- 更新日 -->
-		<meta property="dcterms:modified">{modified}</meta>{fixed_metadata}
-
-<!-- etc. -->
+		<meta property="dcterms:modified">{modified}</meta>
+{fixed_metadata}<!-- etc. -->
 <meta property="ebpaj:guide-version">1.1.3</meta>
 <meta property="ibooks:version">1.1.2</meta>
 	</metadata>
@@ -335,12 +337,6 @@ pub(super) fn render_nav(
             "\t\t\t<li class=\"chapter\" id=\"toccover\"><a href=\"xhtml/cover.xhtml\">表紙</a></li>\n{nav_items}"
         );
     }
-    if chapters.is_empty() && title_toc && sections.iter().any(is_title_page) {
-        // Java: タイトルページを目次の先頭に書籍タイトルで追加する
-        let title = xml_escape(&metadata.title);
-        nav_items =
-            format!("\t\t\t<li><a href=\"xhtml/title.xhtml\">{title}</a>\n</li>\n{nav_items}");
-    }
     let toc_style = if toc_vertical {
         "@page {margin:.5em .5em 0 0;}\nhtml {\n\twriting-mode: vertical-rl;\n\t-webkit-writing-mode: vertical-rl;\n\t-epub-writing-mode: vertical-rl;\n}\nh1 {font-size:1.5em; padding-top:1em;}\nli {padding:0 .25em 0 0;}\nli a {text-decoration:none; border-right-width:1px; border-right-style:solid; padding-right: 1px;}\n.tcy {\n  -webkit-text-combine:         horizontal;\n  -webkit-text-combine-upright: all;\n  text-combine-upright:         all;\n  -epub-text-combine:           horizontal;\n}\n.upr {\ntext-orientation: upright;\n-webkit-text-orientation: upright;\n-epub-text-orientation: upright;\n}"
     } else {
@@ -393,11 +389,6 @@ fn render_nav_items(
     title_toc: bool,
     title: &str,
 ) -> String {
-    if chapters.is_empty() {
-        // Java: 章情報が無い場合は最初の本文セクションを「本文」で出力する
-        let fallback = first_body_path(sections);
-        return format!("\t\t\t<li><a href=\"{fallback}\">本文</a></li>\n\n");
-    }
     let mut entries: Vec<TocEntry> = chapters
         .iter()
         .map(|chapter| {
@@ -432,6 +423,11 @@ fn render_nav_items(
                 nav_close: 0,
             },
         );
+    }
+    if entries.is_empty() {
+        // Java: 章情報も表題ページも無い場合は最初の本文セクションを「本文」で出力する
+        let fallback = first_body_path(sections);
+        return format!("\t\t\t<li><a href=\"{fallback}\">本文</a></li>\n\n");
     }
     set_toc_nest_level(&mut entries, false, title_toc);
     let mut output = String::new();
@@ -525,32 +521,25 @@ pub(super) fn render_ncx(
 ) -> String {
     // Java toc.ncx.vm: toccover が playOrder 1 を占めるため hasNcxItem が真になり、
     // 本文のみのフォールバックも使われない。
-    let mut entries: Vec<TocEntry> = if chapters.is_empty() && !cover_toc {
-        // Java toc.ncx.vm: 章情報も表紙目次も無いときは `#if (!$hasNcxItem)` の
-        // フォールバックに入り、最初のセクションだけをインデント無しの
-        // navPoint で出力して `#break` する。
-        return render_ncx_fallback(metadata, sections);
-    } else {
-        chapters
-            .iter()
-            .map(|chapter| {
-                let anchor = chapter
-                    .anchor
-                    .as_deref()
-                    .map(|anchor| format!("#{anchor}"))
-                    .unwrap_or_default();
-                TocEntry {
-                    label: chapter.label.clone(),
-                    markup: chapter.markup,
-                    path: format!("{}{}", chapter.path, anchor),
-                    level: chapter.level as usize,
-                    level_start: 0,
-                    level_end: 0,
-                    nav_close: 0,
-                }
-            })
-            .collect()
-    };
+    let mut entries: Vec<TocEntry> = chapters
+        .iter()
+        .map(|chapter| {
+            let anchor = chapter
+                .anchor
+                .as_deref()
+                .map(|anchor| format!("#{anchor}"))
+                .unwrap_or_default();
+            TocEntry {
+                label: chapter.label.clone(),
+                markup: chapter.markup,
+                path: format!("{}{}", chapter.path, anchor),
+                level: chapter.level as usize,
+                level_start: 0,
+                level_end: 0,
+                nav_close: 0,
+            }
+        })
+        .collect();
     // Java insertTitleToc: the title page joins the TOC as the first entry.
     if title_toc && sections.iter().any(is_title_page) {
         entries.insert(
@@ -565,6 +554,12 @@ pub(super) fn render_ncx(
                 nav_close: 0,
             },
         );
+    }
+    if entries.is_empty() && !cover_toc {
+        // Java toc.ncx.vm: 章情報も表紙目次も表題項目も無いときは
+        // `#if (!$hasNcxItem)` のフォールバックに入り、最初のセクションだけを
+        // インデント無しの navPoint で出力して `#break` する。
+        return render_ncx_fallback(metadata, sections);
     }
     set_toc_nest_level(&mut entries, ncx_nest, title_toc);
     let identifier = metadata

@@ -479,6 +479,9 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
         // Java: chukiFlagNoBr (chuki_tag.txt 4列目=1) のブロック注記を含む行は
         // 行全体を <p> で括らない (printLineBuffer noBr)。
         let line_has_block_note = contains_block_note(line, config);
+        // 章行は改ページでセクションを flush すると行番号が変わるため、
+        // flush したときに付け替える (Java はバッファ単位で扱うので不要)。
+        let chapter_line_before_flush = chapter_lines.last().copied();
         loop {
             let Some((offset, end, note)) = find_page_break_note(remainder, config) else {
                 append_section_line(
@@ -535,6 +538,14 @@ pub fn aozora_text_to_xhtml_sections_with_chapters(
             // (タグは行末で閉じる)。注記自体は行末まで本文を包むため、残りを
             // この行に取り込んで改ページ処理を打ち切る。
             if config.block_inline_tags.contains_key(&note) {
+                // 改ページで前のセクションを出力した場合、この行は新しい
+                // セクションの先頭になる。章行の対応を付け替える。
+                if let Some((recorded, record)) = chapter_line_before_flush
+                    && chapter_lines.last().copied() == Some((recorded, record))
+                    && recorded != current.len()
+                {
+                    *chapter_lines.last_mut().unwrap() = (current.len(), record);
+                }
                 current.push(format!("［＃{note}］{}", &remainder[end..]));
                 no_br.push(true);
                 break;
@@ -1250,6 +1261,9 @@ fn render_lines<'a>(
     let mut blocks: Vec<OpenBlock> = Vec::new();
 
     let mut pending_config_heading: Option<(String, String)> = None;
+    // 本文が空になった行 (注記だけの行) が出した `<p><br/></p>` の位置。
+    // セクション末尾に残ったものは Java では出力されないので取り除く。
+    let mut empty_paragraphs: Vec<(usize, usize)> = Vec::new();
     let mut output_count = 0usize;
     let mut emitted: Vec<(usize, String)> = Vec::new();
     // Java の inYoko フィールド相当: ここから横組み〜ここで横組み終わり で切替
@@ -1551,6 +1565,7 @@ fn render_lines<'a>(
                     chapter_id.as_deref(),
                     page_break_chapter.unwrap_or(false),
                     in_yoko,
+                    &mut empty_paragraphs,
                 );
                 continue;
             }
@@ -1741,6 +1756,7 @@ fn render_lines<'a>(
             chapter_id.as_deref(),
             page_break_chapter.unwrap_or(false),
             in_yoko,
+            &mut empty_paragraphs,
         );
     }
 
@@ -1763,6 +1779,7 @@ fn render_lines<'a>(
         fragment.push_str(&close_tag);
         fragment.push('\n');
     }
+    trim_trailing_empty_paragraphs(&mut fragment, &empty_paragraphs);
 
     if !has_line {
         fragment.push_str("    <p><br/></p>\n");
@@ -1771,6 +1788,19 @@ fn render_lines<'a>(
         fragment = add_kobo_ids(&fragment);
     }
     (balance_xhtml(&fragment), emitted)
+}
+
+/// Java printLineBuffer: 空行は次の行を出力するときにまとめて `<p><br/></p>`
+/// として出るため、セクション末尾に残った空行は出力されない。Lite は空行を
+/// その場で出力するので、注記だけで空になった行の `<p><br/></p>` が
+/// フラグメント末尾に接している場合だけ取り除く。
+fn trim_trailing_empty_paragraphs(fragment: &mut String, marks: &[(usize, usize)]) {
+    for (start, end) in marks.iter().rev() {
+        if *end < fragment.len() || *start >= *end {
+            break;
+        }
+        fragment.truncate(*start);
+    }
 }
 
 fn add_kobo_ids(fragment: &str) -> String {
@@ -2207,6 +2237,7 @@ fn append_heading(
     fragment.push_str(">\n");
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_line(
     fragment: &mut String,
     line: &str,
@@ -2215,13 +2246,24 @@ fn append_line(
     chapter_id: Option<&str>,
     page_break_chapter: bool,
     in_yoko: bool,
+    empty_paragraphs: &mut Vec<(usize, usize)>,
 ) {
     let converted = convert_inline_with_yoko(line, config, in_yoko);
     if append_open_image_line(fragment, &converted) {
         return;
     }
     if converted.trim().is_empty() {
-        fragment.push_str("    <p><br/></p>\n");
+        // Java printLineBuffer は空バッファを空行として数え、次の行の出力時に
+        // まとめて `<p><br/></p>` を出す。Lite はその場で1行出し、セクション
+        // 末尾に残った空行は後段で取り除く (trim_trailing_empty_paragraphs)。
+        if line.trim().is_empty() {
+            fragment.push_str("    <p><br/></p>\n");
+        } else {
+            // 注記だけで本文が空になった行 (記録して末尾なら取り除く)
+            let start = fragment.len();
+            fragment.push_str("    <p><br/></p>\n");
+            empty_paragraphs.push((start, fragment.len()));
+        }
     } else {
         *output_count += 1;
         // 見出し注記で生成された h1/h2/h3 は <p> で包まない（Java 準拠）
@@ -2250,6 +2292,7 @@ fn append_line(
         }
     }
 }
+#[allow(clippy::too_many_arguments)]
 fn append_block_line(
     fragment: &mut String,
     line: &str,
@@ -2258,13 +2301,21 @@ fn append_block_line(
     chapter_id: Option<&str>,
     page_break_chapter: bool,
     in_yoko: bool,
+    empty_paragraphs: &mut Vec<(usize, usize)>,
 ) {
     let converted = convert_inline_with_yoko(line, config, in_yoko);
     if append_open_image_line(fragment, &converted) {
         return;
     }
     if converted.trim().is_empty() {
-        fragment.push_str("<p><br/></p>\n");
+        // append_line と同じ (Java printLineBuffer の空行扱い)。
+        if line.trim().is_empty() {
+            fragment.push_str("<p><br/></p>\n");
+        } else {
+            let start = fragment.len();
+            fragment.push_str("<p><br/></p>\n");
+            empty_paragraphs.push((start, fragment.len()));
+        }
     } else {
         *output_count += 1;
         match chapter_id.filter(|_| !page_break_chapter) {

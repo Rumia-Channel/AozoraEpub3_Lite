@@ -2227,17 +2227,22 @@ fn push_text_char(
     // Java が見るのは行全体の出力バッファの末尾 1 文字。行内の一部だけを
     // 変換する入れ子呼び出しでは、その直前の文字を `preceding` で受け取る。
     let previous = output.chars().next_back().or(preceding);
+    // Java の `ch[idx+1]`: 直後の注記がタグにならず何も出力しない場合
+    // (表にない複合字下げなど) はさらに先を見る。
+    let next = match chars.get(index + 1).copied() {
+        Some('［') if chars.get(index + 2) == Some(&'＃') => {
+            next_phase1_char(chars, index + 1, config).or(following)
+        }
+        Some(character) => Some(character),
+        None => following,
+    };
     if config.space_hyphenation > 0
         && !in_yoko
         && !in_tcy
         && chars[index] == '\u{3000}'
         && java_pos > 20
         && previous.is_some_and(|character| character != '\u{3000}')
-        && chars
-            .get(index + 1)
-            .copied()
-            .or(following)
-            .is_some_and(|next| next != '\u{3000}')
+        && next.is_some_and(|character| character != '\u{3000}')
     {
         match config.space_hyphenation {
             1 => output.push_str("<span class=\"fullsp\"> </span>"),
@@ -2300,6 +2305,47 @@ fn push_text_char(
         push_text_char_escaped(output, character);
     }
     1
+}
+
+/// Java `convertReplacedChar` の `ch[idx+1]` 相当: フェーズ1バッファ上で次に
+/// 来る文字。注記がタグになるなら `<`、何も出力しない注記は読み飛ばす。
+/// 行末 (何も残らない) なら None。
+fn next_phase1_char(chars: &[char], index: usize, config: &AozoraConfig) -> Option<char> {
+    let mut index = index;
+    while index < chars.len() {
+        if chars[index] == '［' && chars.get(index + 1) == Some(&'＃') {
+            let Some(close) = chars[index + 2..]
+                .iter()
+                .position(|character| *character == '］')
+            else {
+                return Some('<');
+            };
+            let note: String = chars[index + 2..index + 2 + close].iter().collect();
+            if note_emits_output(&note, config) {
+                return Some('<');
+            }
+            index += 2 + close + 1;
+            continue;
+        }
+        // 外字注記 (※［＃…］) などは文字を出力する
+        return Some(chars[index]);
+    }
+    None
+}
+
+/// 注記がタグ (または何らかの出力) になるか。表に無い注記は Java では
+/// そのまま (または何も) 出力されないため false。
+fn note_emits_output(note: &str, config: &AozoraConfig) -> bool {
+    config.inline_notes.contains_key(note)
+        || config.block_inline_tags.contains_key(note)
+        || config.block_single_tags.contains_key(note)
+        || config.block_open_tags.contains_key(note)
+        || config.block_close_tags.contains_key(note)
+        || config.page_break_notes.contains(note)
+        || note.starts_with('窓')
+        || note.ends_with("字下げ")
+        || note.ends_with("字上げ")
+        || note.ends_with("字詰め")
 }
 
 fn normalize_dakuten_mark(character: char) -> Option<char> {

@@ -135,7 +135,9 @@ fn writes_all_sections_to_manifest_spine_and_navigation() {
 }
 
 #[test]
-fn title_page_navigation_includes_unheaded_body_entries() {
+fn title_page_navigation_lists_the_title_entry() {
+    // Java: 表題ページを目次に出すとき (TitleToc) は表題項目だけが出て、
+    // 章が無くても「本文」フォールバックは使わない (`$hasNcxItem` が真)。
     let book = EpubBook::new(
         EpubMetadata::new("題名", "urn:test:title-navigation"),
         "<p>本文だけ</p>\n",
@@ -151,8 +153,52 @@ fn title_page_navigation_includes_unheaded_body_entries() {
         .read_to_string(&mut nav)
         .unwrap();
     let toc = nav.split("<nav epub:type=\"toc\"").nth(1).unwrap();
-    assert!(toc.contains("xhtml/title.xhtml"));
-    assert!(toc.contains("xhtml/0001.xhtml"));
+    assert!(
+        toc.contains("<a href=\"xhtml/title.xhtml\">題名</a>"),
+        "{toc}"
+    );
+    assert!(!toc.contains(">本文</a>"), "{toc}");
+    let mut ncx = String::new();
+    archive
+        .by_name("item/toc.ncx")
+        .unwrap()
+        .read_to_string(&mut ncx)
+        .unwrap();
+    assert!(
+        ncx.contains("<content src=\"xhtml/title.xhtml\"/>"),
+        "{ncx}"
+    );
+    assert!(!ncx.contains("<text>本文</text>"), "{ncx}");
+}
+
+#[test]
+fn navigation_falls_back_to_the_first_body_section() {
+    // Java toc.ncx.vm / xhtml_nav.vm の `#if (!$hasNcxItem)`: 章も表題項目も
+    // 無いときだけ最初の本文セクションを「本文」で出力する。
+    let book = EpubBook::new(
+        EpubMetadata::new("題名", "urn:test:nav-fallback"),
+        "<p>本文だけ</p>\n",
+    );
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let mut nav = String::new();
+    archive
+        .by_name("item/nav.xhtml")
+        .unwrap()
+        .read_to_string(&mut nav)
+        .unwrap();
+    let toc = nav.split("<nav epub:type=\"toc\"").nth(1).unwrap();
+    assert!(
+        toc.contains("<a href=\"xhtml/0001.xhtml\">本文</a>"),
+        "{toc}"
+    );
+    let mut ncx = String::new();
+    archive
+        .by_name("item/toc.ncx")
+        .unwrap()
+        .read_to_string(&mut ncx)
+        .unwrap();
+    assert!(ncx.contains("<text>本文</text>"), "{ncx}");
 }
 
 #[test]

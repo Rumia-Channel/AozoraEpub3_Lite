@@ -1099,3 +1099,56 @@ fn renders_empty_base_ruby_for_leading_suffix_note() {
         "{output}"
     );
 }
+
+/// Java `printLineBuffer` は空行を次の行の出力時にまとめて出すため、
+/// セクション末尾に残った空行 (注記だけで本文が空になった行を含む) は
+/// 出力されない。Lite はその場で `<p><br/></p>` を出すので末尾だけ取り除く。
+#[test]
+fn drops_trailing_empty_paragraphs_at_section_end() {
+    let sections = super::aozora_text_to_xhtml_sections(
+        "［＃中見出し］見出しＡ［＃中見出し終わり］\n［＃中見出し終わり］\n",
+    )
+    .unwrap();
+    let output = sections.join("");
+    assert!(output.contains("</h2>"), "{output}");
+    assert!(!output.contains("<p><br/></p>"), "{output}");
+
+    // 途中の空行は Java と同じく残る
+    let middle = super::aozora_text_to_xhtml_sections(
+        "［＃中見出し］見出しＡ［＃中見出し終わり］\n本文\n\n［＃中見出し終わり］\n後に本文\n",
+    )
+    .unwrap()
+    .join("");
+    assert!(middle.contains("<p><br/></p>"), "{middle}");
+}
+
+/// Java の `ch[idx+1]` はフェーズ1バッファ上の次の文字なので、直後の注記が
+/// 何も出力しない (表に無い複合字下げなど) 場合は後ろに何も無いものとして
+/// 扱われる。複合字下げの閉じ注記の直前の全角スペースは変換されない。
+#[test]
+fn keeps_space_before_dropped_composite_close_note() {
+    let config =
+        AozoraConfig::from_ini(IniSettings::parse("SpaceHyphenation=1\n").expect("ini parses"));
+    let output = super::aozora_text_to_xhtml_sections_with_config(
+        "［＃ここから２字下げ、破線罫囲み］あ　［＃ここまで２字下げ、破線罫囲み］\n",
+        &config,
+    )
+    .unwrap()
+    .join("");
+    assert!(output.contains("あ　"), "{output}");
+    assert!(!output.contains("fullsp"), "{output}");
+}
+
+/// Java `printLineBuffer` は章行でタグ始まりの行に `id="kobo.N.M"` を差し込む。
+/// 改ページ注記と本文が同じ行にある場合 (ページ左下 など)、Lite は flush で
+/// 行番号が変わるため章行の対応を付け替える必要がある。
+#[test]
+fn injects_kobo_id_into_block_tag_on_a_chapter_line() {
+    let output = super::aozora_text_to_xhtml_sections("［＃ページ左下］テスト本文\n")
+        .unwrap()
+        .join("");
+    assert!(
+        output.contains("<div id=\"kobo.1.1\" class=\"btm\">"),
+        "{output}"
+    );
+}
