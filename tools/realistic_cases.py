@@ -41,6 +41,16 @@ CASES = {
     "indent-jizume": "［＃ここから３字下げ、５字詰め］\n本文\n［＃ここで字下げ終わり］\n",
     "indent-dashed-kekomi": "［＃ここから２字下げ、破線罫囲み］\n本文\n［＃ここで字下げ終わり］\n",
     "indent-yoko": "［＃ここから２字下げ、横書き］\n本文\n［＃ここで字下げ終わり］\n",
+    # 配布物 (Narou.rb / Narou Bridge 同梱) のカスタム注記
+    "narou-hashira": "［＃ここから柱］\n柱の本文\n［＃ここで柱終わり］\n本文\n",
+    "narou-preface": "［＃ここから前書き］\n前書き本文\n［＃ここで前書き終わり］\n本文\n",
+    "narou-postscript": "［＃ここから後書き］\n後書き本文\n［＃ここで後書き終わり］\n",
+    "narou-parameter": "［＃ここからパラメーター］\n名前：テスト\n［＃ここでパラメーター終わり］\n",
+    "narou-indent": "［＃一字下げ］字下げ本文\n",
+    "narou-nibuaki": "テキスト［＃二分アキ］テスト本文\n",
+    "narou-zws": "テキスト［＃zws］テスト本文\n",
+    "narou-dakuten": "テキスト［＃濁点］テスト本文［＃濁点終わり］\n",
+    "narou-link": "［＃ｌｉｎｋ＿ｓ］https://example.com［＃ｌｉｎｋ＿ｔ］リンク［＃ｌｉｎｋ＿ｅ］\n",
 }
 
 

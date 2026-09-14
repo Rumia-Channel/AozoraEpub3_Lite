@@ -10,28 +10,27 @@ import difflib
 import pathlib
 import re
 import shutil
-import subprocess
 import sys
 import zipfile
 
-RUST = pathlib.Path(__file__).resolve().parent.parent
+from java_reference import (
+    CLASSES as classes,
+    JAR,
+    JAVABIN as jdir,
+    RUST,
+    RUSTBIN,
+    run,
+    suffix_table_text,
+    sync_tables,
+    tag_table_text,
+)
+
 work = RUST / "target" / "note-coverage"
-classes = RUST / "target" / "audit-diff" / "classes"
-JAR = pathlib.Path("C:/Users/rumia/Documents/AozoraEpub3/AozoraEpub3.jar")
-jdir = RUST / "target" / "audit-diff" / "javabin"
-JAVA_REPO = pathlib.Path("C:/Users/rumia/Desktop/APP/Java/AozoraEpub3")
-RUSTBIN = RUST / "target" / "release" / "AozoraEpub3_Lite.exe"
-
-
-def run(cmd, cwd):
-    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
-    return p.returncode, (p.stdout or "") + (p.stderr or "")
 
 
 def _tag_notes():
     notes = []
-    for line in (JAVA_REPO / "chuki_tag.txt").read_text("utf-8", errors="replace").splitlines():
+    for line in tag_table_text().splitlines():
         if not line.strip() or line.startswith("#"):
             continue
         note = line.split("\t")[0].strip()
@@ -107,7 +106,9 @@ def is_internal_row(fields):
     if tag and not tag.startswith("%"):
         if ("<" in tag) != (">" in tag):
             return True
-        if "<" not in tag and ">" not in tag:
+        # 素の属性・クラス断片 (border / dashed_border / center / yoko / idt / jzm)
+        # は複合字下げ専用。`&#8203;` のような実体参照は通常の注記なので残す。
+        if "<" not in tag and ">" not in tag and re.fullmatch(r"[A-Za-z_][A-Za-z_ -]*", tag):
             return True
     del note
     return False
@@ -121,7 +122,7 @@ def tag_rows():
     """
     all_fields = [
         line.split("\t")
-        for line in (JAVA_REPO / "chuki_tag.txt").read_text("utf-8", errors="replace").splitlines()
+        for line in tag_table_text().splitlines()
         if line.strip() and not line.startswith("#")
     ]
     internal = [f for f in all_fields if is_internal_row(f)]
@@ -153,7 +154,7 @@ def tag_rows():
 def suffix_rows():
     """chuki_tag_suf.txt の (見出し, 注記テキスト) 一覧。"""
     rows = []
-    for line in (JAVA_REPO / "chuki_tag_suf.txt").read_text("utf-8", errors="replace").splitlines():
+    for line in suffix_table_text().splitlines():
         if not line.strip() or line.startswith("#"):
             continue
         fields = line.split("\t")
@@ -185,6 +186,7 @@ def main():
     parser.add_argument("--limit", type=int, default=0)
     args = parser.parse_args()
 
+    sync_tables()
     rows = tag_rows() + suffix_rows()
     if args.only:
         rows = [r for r in rows if args.only in r[2]]
@@ -227,7 +229,7 @@ def main():
 
     by_key = {key: note for key, note, _ in rows}
     tag_tags = {}
-    for line in (JAVA_REPO / "chuki_tag.txt").read_text("utf-8", errors="replace").splitlines():
+    for line in tag_table_text().splitlines():
         if not line.strip() or line.startswith("#"):
             continue
         fields = line.split("\t")
@@ -237,9 +239,7 @@ def main():
                               if f.strip() and f.strip() not in ("1", "2", "3", "P", "M", "L", "K")]
     # suffix 注記 (chuki_tag_suf.txt) の期待タグは、その開始/終了注記名に対応する
     # chuki_tag.txt のタグ列。suf 行も gap 判定の対象にする。
-    for line in (JAVA_REPO / "chuki_tag_suf.txt").read_text(
-        "utf-8", errors="replace"
-    ).splitlines():
+    for line in suffix_table_text().splitlines():
         fields = line.split("\t")
         if len(fields) < 3 or line.startswith("#") or not line.strip():
             continue

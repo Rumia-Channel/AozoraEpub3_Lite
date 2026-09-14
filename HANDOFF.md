@@ -427,6 +427,46 @@ differs: 5/589
 ［＃ここから３字下げ、折り返して２字下げ］ → pt2 idt1
 ```
 
+### 2026-09-14: Narou.rb / Narou Bridge のカスタム注記を取り込む
+
+`assets/aozora/chuki_tag.txt` は上流リポジトリの表 (874 行) ではなく
+**インストール済み配布物 `C:/Users/rumia/Documents/AozoraEpub3/chuki_tag.txt`
+(904 行) と同じ内容**にした。配布物は上流表に `### Narou.rb embedded custom
+chuki ###` / `### Narou Bridge embedded custom chuki ###` の 26 行を追加した
+もので、上流リポジトリには一度も存在しない (`git log -S "ここから柱"` が空)。
+
+追加された注記: `ここから柱`/`ここで柱終わり`、`ここから前書き`/`ここで前書き終わり`、
+`ここから後書き`/`ここで後書き終わり`、`ここからパラメーター`/`ここでパラメーター終わり`、
+`一字下げ`/`二字下げ`/`三字下げ`、`二分アキ`、`濁点`/`濁点終わり`、`zws`、
+Narou Bridge の `ｌｉｎｋ＿ｓ`/`ｌｉｎｋ＿ｔ`/`ｌｉｎｋ＿ｅ` (ASCII 別名も)。
+
+- これらのクラス (`running_head` / `half_em_space` / `introduction` /
+  `postscript` / `custom_parameter_block` / `dakuten` / `clear`) は配布物側の
+  CSS にも定義が無く、マークアップのみの差。Rust 側も CSS 追加は不要
+- `chuki_tag.txt` 以外の 5 表は配布物と上流が同一。ただし
+  `chuki_utf.txt` は Rust 資産だけ 1 行修正済み
+  (`U+003AC` → `U+01F71`、JIS X 0213 1-11-39 の文字。6de28a6)。この修正は
+  意図的に残すので、Rust 資産と配布物の表はこの 1 行だけ異なる
+- `tools/java_reference.py` を追加し、Java 参照実行ディレクトリ
+  (`target/audit-diff/javabin`) の注記資産を配布物から同期する
+  (`sync_tables()`)。`note_coverage.py` / `realistic_cases.py` はこの経路で
+  表を読むため、追加 26 行も自動でテスト対象になる
+
+検証 (配布物の表を正とした状態):
+
+```text
+tools/note_coverage.py : 601 ケース中 7 件差分、タグ欠落 2 件
+tools/realistic_cases.py: 31 ケース中 30 件一致 (Narou 注記 9 ケースを含む)
+tools/parity_check.py  : 18/21 (既知 3 件のみ、変化なし)
+cargo test --release   : 全バイナリ green
+```
+
+タグ欠落 2 件は `［＃ｌｉｎｋ＿ｅ］`/`［＃link_e］` を単独で置いた場合で、
+Java が対応する開きタグ無しに `</a>` を出す (Rust は捨てる)。`地付き` /
+`字下げ省略` / `行内地付き` と同じ「Java が閉じタグを余分に出す」挙動のため
+再現しない。実用法 (`［＃ｌｉｎｋ＿ｓ］URL［＃ｌｉｎｋ＿ｔ］文言［＃ｌｉｎｋ＿ｅ］`)
+は `realistic_cases.py` の `narou-link` で一致を確認している。
+
 ## 作業ツリーとコミット状態
 引き継ぎ後に完了した論理単位は、以下のコミットとして `develop` へ commit / push 済み。
 
