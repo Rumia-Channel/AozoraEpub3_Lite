@@ -19,4 +19,5 @@ pub use text::{
     aozora_text_to_xhtml_sections_with_chapters, aozora_text_to_xhtml_sections_with_config,
     apply_alt_upright, collect_image_alts, decode_input, escape_html, image_reference_occurrences,
     image_references, inline_to_xhtml, plain_text_to_xhtml, plain_text_to_xhtml_with_config,
+    tcy_label,
 };

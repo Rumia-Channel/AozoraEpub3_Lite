@@ -297,11 +297,11 @@ pub(super) fn render_package(
         styles = styles,
         assets = manifest_assets,
         cover = cover_manifest,
-        head = manifest_head.trim_end(),
+        head = manifest_head,
         sections = manifest_sections,
         gaiji = manifest_gaiji,
         cover_spine = cover_spine,
-        spine_head = spine_head.trim_end(),
+        spine_head = spine_head,
         spine = spine_sections,
         progression = progression,
     )
@@ -401,7 +401,7 @@ fn render_nav_items(
                 .unwrap_or_default();
             TocEntry {
                 label: chapter.label.clone(),
-                markup: false,
+                markup: chapter.markup,
                 path: format!("{}{}", chapter.path, anchor),
                 level: chapter.level as usize,
                 level_start: 0,
@@ -534,7 +534,7 @@ pub(super) fn render_ncx(
                     .unwrap_or_default();
                 TocEntry {
                     label: chapter.label.clone(),
-                    markup: false,
+                    markup: chapter.markup,
                     path: format!("{}{}", chapter.path, anchor),
                     level: chapter.level as usize,
                     level_start: 0,

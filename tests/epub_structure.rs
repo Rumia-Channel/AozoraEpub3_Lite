@@ -322,6 +322,31 @@ fn writes_default_text_css_without_style_settings() {
     assert!(!css.contains(".vrtl .b,\n"));
 }
 
+/// Java TocVertical: 目次ページが縦書きになり、ラベルは
+/// `convertTcyText` 済みの XHTML として素通しで出力される。
+#[test]
+fn writes_vertical_toc_with_markup_labels() {
+    let book = EpubBook::from_sections(EpubMetadata::new("題名", "urn:test:tocv"), ["<p>本文</p>"])
+        .with_chapters([aozora_epub3_lite::NavChapter::new(
+            "第<span class=\"tcy\">1</span>話",
+            "xhtml/0001.xhtml",
+        )
+        .with_markup(true)])
+        .with_toc_vertical(true);
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let mut nav = String::new();
+    archive
+        .by_name("item/nav.xhtml")
+        .unwrap()
+        .read_to_string(&mut nav)
+        .unwrap();
+
+    assert!(nav.contains("writing-mode: vertical-rl;"));
+    // markup ラベルは再エスケープされない
+    assert!(nav.contains("第<span class=\"tcy\">1</span>話"));
+}
+
 #[test]
 fn writes_publisher_metadata_and_kindle_body_class() {
     let book = EpubBook::new(

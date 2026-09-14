@@ -12,7 +12,7 @@ pub fn inline_to_xhtml(input: &str, config: &AozoraConfig) -> String {
 }
 pub use inline::{
     apply_alt_upright, collect_image_alts, escape_html, image_reference_occurrences,
-    image_references,
+    image_references, tcy_label,
 };
 
 #[derive(Debug, Eq, PartialEq)]

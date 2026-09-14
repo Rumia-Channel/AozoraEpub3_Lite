@@ -3,7 +3,7 @@ use aozora_epub3_lite::{
     StyleSettings, TextEntry, TitleType, aozora_text_to_xhtml_sections_with_chapters,
     apply_alt_upright, collect_image_alts, decode_text, detect_meta_with_gaiji, escape_html,
     file_title_creator, image::process as process_image, image_reference_occurrences,
-    image_references, inline_to_xhtml, remove_metadata_lines,
+    image_references, inline_to_xhtml, remove_metadata_lines, tcy_label,
 };
 use std::env;
 use std::error::Error;
@@ -270,11 +270,19 @@ fn convert_input(
         let nav_chapters = chapter_records
             .into_iter()
             .map(|record| {
+                // Java Epub3Writer: TocVertical のときだけ章名をエスケープ後に
+                // convertTcyText へ通す。
+                let (label, markup) = if config.toc_vertical {
+                    (tcy_label(&escape_html(&record.label), config), true)
+                } else {
+                    (record.label, false)
+                };
                 let mut chapter = NavChapter::new(
-                    record.label,
+                    label,
                     format!("xhtml/{:04}.xhtml", record.section_index + 1),
                 )
-                .with_level(record.level);
+                .with_level(record.level)
+                .with_markup(markup);
                 if let Some(anchor) = record.anchor {
                     chapter = chapter.with_anchor(anchor);
                 }
@@ -349,6 +357,7 @@ fn convert_input(
             .with_vertical(vertical)
             .with_kindle(is_kindle(options))
             .with_toc_page(config.toc_page)
+            .with_toc_vertical(config.toc_vertical)
             .with_cover_page(config.cover_page, config.cover_page_toc)
             .with_style(StyleSettings::from_ini(&config.ini))
             .with_toc_nest(config.nav_nest, config.ncx_nest)

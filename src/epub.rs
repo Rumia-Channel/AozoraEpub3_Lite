@@ -290,6 +290,8 @@ pub struct NavChapter {
     /// `ChapterLineInfo.getLevel`). The nav/NCX renderers convert this into
     /// the actual nesting depth.
     pub level: u8,
+    /// ラベルが既に XHTML（エスケープ済み・縦中横タグ入り）なら true。
+    pub markup: bool,
 }
 
 impl NavChapter {
@@ -299,11 +301,19 @@ impl NavChapter {
             path: path.into(),
             anchor: None,
             level: 1,
+            markup: false,
         }
     }
 
     pub fn with_anchor(mut self, anchor: impl Into<String>) -> Self {
         self.anchor = Some(anchor.into());
+        self
+    }
+
+    /// 目次ラベルを XHTML としてそのまま出力する (Java `TocVertical` の
+    /// `convertTcyText` 適用済みラベル用)。
+    pub fn with_markup(mut self, markup: bool) -> Self {
+        self.markup = markup;
         self
     }
 

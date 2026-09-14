@@ -851,6 +851,17 @@ fn contains_literal_gaiji_note(input: &str) -> bool {
 fn convert_ruby_reading(reading: &str, config: &AozoraConfig) -> String {
     convert_inline_with_options(reading, config, false, false, false)
 }
+/// Java `Epub3Writer` の目次ラベル変換: `converter.vertical = tocVertical` の
+/// 状態で `convertTcyText` を適用する。呼び出し側でエスケープ済みの文字列を渡す。
+pub fn tcy_label(label: &str, config: &AozoraConfig) -> String {
+    if !config.auto_yoko {
+        return label.to_owned();
+    }
+    let mut vertical = config.clone();
+    vertical.vertical = true;
+    rewrite_auto_yoko(label, &vertical)
+}
+
 fn rewrite_auto_yoko(input: &str, config: &AozoraConfig) -> String {
     if !config.vertical || !config.auto_yoko {
         return input.to_owned();
