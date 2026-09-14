@@ -75,18 +75,18 @@ fn run() -> Result<(), Box<dyn Error>> {
     };
     let config_dir_refs = config_dirs.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let mut config = AozoraConfig::load_from_dirs(&config_dir_refs, preset)?;
-    if uses_builtin_config {
-        // Java CLI parity: with no -i/--preset the reference CLI leaves these
-        // flags off (empty profile). replace.txt is loaded only when the file
-        // sits next to the executable (jarPath parity) — the manifest fallback
-        // dir is a dev convenience and must not auto-apply its bundled rules.
+    if preset.is_none() {
+        // Java CLI parity: without -i/--preset the reference CLI runs with an
+        // empty profile, so these flags stay off. An explicit INI always wins —
+        // `--config-dir` only selects where the note assets live and must not
+        // change conversion flags. replace.txt is likewise inert in the
+        // reference distribution (it ships as replace_sample.txt), so the
+        // bundled fallback directory no longer needs special-casing.
         config.auto_yoko = false;
         config.dakuten_type = 0;
         config.print_ivs_bmp = false;
         config.print_ivs_ssp = false;
-        if config_dirs[0] == Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/aozora") {
-            config.character_replacements.clear();
-        }
+        config.title_toc = false;
     }
     apply_ini_defaults(&mut options, &config);
     let vertical = options
@@ -352,7 +352,15 @@ fn convert_input(
             book = book.with_title_page_markup(title_page_markup);
         }
         if let Some(cover) = cover {
-            book = book.with_cover_asset(cover);
+            // Java cover.vm の viewport / viewBox は表紙画像の元寸法を使う。
+            let cover_dimensions = assets
+                .iter()
+                .find(|collected| collected.asset.path == cover)
+                .and_then(|collected| collected.dimensions)
+                .map(|dimensions| (dimensions.width, dimensions.height));
+            book = book
+                .with_cover_asset(cover)
+                .with_cover_dimensions(cover_dimensions);
         }
         let file = File::create(&output)?;
         // 画像は書き出し時に1枚ずつ「読む → 処理 → 書く」して、全画像を

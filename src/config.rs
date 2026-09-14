@@ -371,8 +371,10 @@ impl Default for AozoraConfig {
         config.load_ivs_text(include_str!("../assets/aozora/chuki_ivs.txt"));
         config.load_alt_text(include_str!("../assets/aozora/chuki_alt.txt"));
         config.load_latin_text(include_str!("../assets/aozora/chuki_latin.txt"));
-        // replace.txt is an optional user override. The bundled file documents
-        // rules that are only enabled when the file is explicitly supplied.
+        // replace.txt is an optional user override, loaded only when the file
+        // is present next to the executable or in a --config-dir. The bundled
+        // file ships as replace_sample.txt (inert), matching the reference
+        // distribution, so `-i preset.ini` alone does not change characters.
         config
     }
 }
@@ -420,7 +422,10 @@ impl AozoraConfig {
         let auto_yoko_num1 = ini.get_bool("AutoYokoNum1").unwrap_or(false);
         let auto_yoko_num3 = ini.get_bool("AutoYokoNum3").unwrap_or(false);
         let auto_yoko_eq1 = ini.get_bool("AutoYokoEQ1").unwrap_or(false);
-        let auto_yoko_eq3 = ini.get_bool("AutoYokoEQ3").unwrap_or(false);
+        // Java は `autoYokoEQ3` をフィールド既定 true で持ち、setAutoYoko でも
+        // CLI からも変更しない（対応する INI キーが存在しない）。3文字の `!?`
+        // 縦中横は常に有効なので、既定を true にする。
+        let auto_yoko_eq3 = ini.get_bool("AutoYokoEQ3").unwrap_or(true);
         let dakuten_type = ini
             .get("DakutenType")
             .and_then(|value| value.parse::<u8>().ok())
@@ -857,7 +862,9 @@ mod tests {
         assert!(!config.auto_yoko_num1);
         assert!(!config.auto_yoko_num3);
         assert!(!config.auto_yoko_eq1);
-        assert!(!config.auto_yoko_eq3);
+        // Java の autoYokoEQ3 はフィールド既定 true で、setAutoYoko でも CLI からも
+        // 変更されない（INI キーが存在しない）。3文字の `!?` 縦中横は常に有効。
+        assert!(config.auto_yoko_eq3);
         assert_eq!(config.dakuten_type, 0);
         assert!(!config.print_ivs_ssp);
     }
