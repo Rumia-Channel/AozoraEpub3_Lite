@@ -8,7 +8,8 @@ param(
 
     [string]$Arch = "x64",
 
-    [string]$Version = "0.1.0",
+    [Parameter(Mandatory = $true)]
+    [string]$Version,
 
     [string]$OutputDir = "dist"
 )

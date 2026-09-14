@@ -2577,9 +2577,9 @@ mod tests {
         );
     }
     #[test]
-    #[ignore = "requires the local sample/AozoraEpub3 fixture (gitignored)"]
     fn keeps_separator_blank_from_real_ruby_fixture() {
-        let bytes = std::fs::read("sample/AozoraEpub3/test_data/test_ruby.txt").unwrap();
+        // Java 版 test_data/test_ruby.txt を同梱したもの (Shift_JIS)
+        let bytes = std::fs::read("tests/fixtures/test_ruby.txt").unwrap();
         let text = decode_text(&bytes, None).unwrap();
         let config = AozoraConfig::default();
         let metadata = aozora_epub3_lite::detect_meta_with_gaiji(
