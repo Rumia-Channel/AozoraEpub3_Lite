@@ -946,3 +946,41 @@ fn renders_image_bearing_gaiji_notes_as_gaiji_images() {
     );
     assert!(!output.contains("※"), "{output}");
 }
+
+/// Java は `convertGaijiChuki` を先に通すため、`※［＃…のルビ］` は外字注記として
+/// 消費され前方参照注記にはならない (未解決なら 〓（…） になる)。
+#[test]
+fn keeps_star_prefixed_ruby_notes_out_of_suffix_rewriting() {
+    let output = plain_text_to_xhtml(
+        "表題\n著者\n\n青空文庫※［＃「青空文庫」に「あおぞらぶんこ」のルビ］本文\n",
+    )
+    .unwrap();
+    assert!(output.contains("〓<span class=\"super\">"), "{output}");
+    assert!(!output.contains("<ruby>"), "{output}");
+}
+
+/// `※` の付かない前方参照注記はルビに変換される。
+#[test]
+fn rewrites_plain_ruby_notes_to_ruby() {
+    let output = plain_text_to_xhtml(
+        "表題\n著者\n\n青空文庫［＃「青空文庫」に「あおぞらぶんこ」のルビ］本文\n",
+    )
+    .unwrap();
+    assert!(
+        output.contains("<ruby>青空文庫<rt>あおぞらぶんこ</rt></ruby>"),
+        "{output}"
+    );
+}
+
+/// 前方参照注記の対象が行頭に無い場合、Java は空基底のルビを出力する
+/// (以前はインデックス外で panic していた)。
+#[test]
+fn renders_empty_base_ruby_for_leading_suffix_note() {
+    let output =
+        plain_text_to_xhtml("表題\n著者\n\n［＃「青空文庫」に「あおぞらぶんこ」のルビ］本文\n")
+            .unwrap();
+    assert!(
+        output.contains("<ruby><rt>あおぞらぶんこ</rt></ruby>本文"),
+        "{output}"
+    );
+}

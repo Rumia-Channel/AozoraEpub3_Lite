@@ -262,33 +262,33 @@ fn convert_inline_with_options(
                 java_pos += 1;
                 continue;
             };
+            // Java: ｜《…》 は基底が空でも <ruby><rt>…</rt></ruby> を出力する
+            // (前方参照注記の対象が行頭に無い場合にこの形になる)。
             let base = chars[index + 1..open].iter().collect::<String>();
-            if !base.is_empty() {
-                let reading = chars[open + 1..close].iter().collect::<String>();
-                let continues = has_following_implicit_ruby(&chars, close + 1);
-                if continues {
-                    output.push_str("<ruby>");
-                    push_ruby_part(
-                        &mut output,
-                        &base,
-                        &reading,
-                        config,
-                        auto_yoko && tcy_depth == 0,
-                    );
-                    implicit_ruby_open = true;
-                } else {
-                    push_ruby(
-                        &mut output,
-                        &base,
-                        &reading,
-                        config,
-                        auto_yoko && tcy_depth == 0,
-                    );
-                }
-                java_pos += close + 1 - index;
-                index = close + 1;
-                continue;
+            let reading = chars[open + 1..close].iter().collect::<String>();
+            let continues = has_following_implicit_ruby(&chars, close + 1);
+            if continues {
+                output.push_str("<ruby>");
+                push_ruby_part(
+                    &mut output,
+                    &base,
+                    &reading,
+                    config,
+                    auto_yoko && tcy_depth == 0,
+                );
+                implicit_ruby_open = true;
+            } else {
+                push_ruby(
+                    &mut output,
+                    &base,
+                    &reading,
+                    config,
+                    auto_yoko && tcy_depth == 0,
+                );
             }
+            java_pos += close + 1 - index;
+            index = close + 1;
+            continue;
         }
 
         if chars[index] == '《'
@@ -1016,6 +1016,11 @@ fn suffix_note_at(chars: &[char], start: usize) -> Option<(usize, String, String
     if chars.get(start) != Some(&'［') || chars.get(start + 1) != Some(&'＃') {
         return None;
     }
+    // Java は convertGaijiChuki を先に通すため、`※［＃…］` は外字注記として
+    // 消費され前方参照注記にはならない (解決できなければ 〓（…） になる)。
+    if start > 0 && chars[start - 1] == '※' {
+        return None;
+    }
     let target_start = {
         let mut found = None;
         for (index, character) in chars.iter().enumerate().skip(start + 2) {
@@ -1160,7 +1165,9 @@ fn suffix_target_range_by_len(prefix: &str, target_len: usize) -> Option<(usize,
         }
         idx -= 1;
     }
-    let mut start = indexed[idx].0;
+    // Java getTargetStart は idx を使い切ると 0 を返す (前方に文字が無い場合)。
+    // 空プレフィクスでも panic しないようにする。
+    let mut start = indexed.get(idx).map_or(0, |(offset, _)| *offset);
     // ルビをまたいだら先頭の｜を含める
     if has_ruby && start >= '｜'.len_utf8() && prefix[..start].ends_with('｜') {
         start -= '｜'.len_utf8();
