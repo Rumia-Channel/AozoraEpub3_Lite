@@ -455,17 +455,48 @@ Narou Bridge の `ｌｉｎｋ＿ｓ`/`ｌｉｎｋ＿ｔ`/`ｌｉｎｋ＿ｅ` 
 検証 (配布物の表を正とした状態):
 
 ```text
-tools/note_coverage.py : 601 ケース中 7 件差分、タグ欠落 2 件
+tools/note_coverage.py : 599 ケース中 5 件差分、タグ欠落 0 件
 tools/realistic_cases.py: 31 ケース中 30 件一致 (Narou 注記 9 ケースを含む)
 tools/parity_check.py  : 18/21 (既知 3 件のみ、変化なし)
 cargo test --release   : 全バイナリ green
 ```
 
-タグ欠落 2 件は `［＃ｌｉｎｋ＿ｅ］`/`［＃link_e］` を単独で置いた場合で、
-Java が対応する開きタグ無しに `</a>` を出す (Rust は捨てる)。`地付き` /
-`字下げ省略` / `行内地付き` と同じ「Java が閉じタグを余分に出す」挙動のため
-再現しない。実用法 (`［＃ｌｉｎｋ＿ｓ］URL［＃ｌｉｎｋ＿ｔ］文言［＃ｌｉｎｋ＿ｅ］`)
-は `realistic_cases.py` の `narou-link` で一致を確認している。
+残る 5 件は `ページ左下`/`ページの左下` の kobo id 注入 2 件と、Java が閉じタグを
+二重出力する `地付き`/`字下げ省略`/`行内地付き` 3 件 (いずれも再現しない方針)。
+Narou Bridge のリンク注記は 3 点 1 組 (`［＃ｌｉｎｋ＿ｓ］URL［＃ｌｉｎｋ＿ｔ］
+文言［＃ｌｉｎｋ＿ｅ］`) なので行単位の検証からは外し、`realistic_cases.py` の
+`narou-link` で `<a href="https://example.com">リンク</a>` が Java と一致することを
+確認している (単独の `［＃ｌｉｎｋ＿ｅ］` は Java が裸の `</a>` を出すだけ)。
+
+#### 注意: 上流資産を取り直すとき
+
+`assets/aozora/chuki_tag.txt` は「上流 874 行 + 配布物由来の Narou ブロック 30 行」。
+Narou ブロックは配布物の表の**末尾にしか無く**、上流リポジトリには痕跡が無い
+(`git log -S "ここから柱"` が空)。上流から資産を更新した場合は
+`### Narou.rb embedded custom chuki ###` / `### Narou Bridge embedded custom
+chuki ###` ブロックを再適用すること (`tools/java_reference.py` の `sync_tables()`
+は Java 参照側だけを配布物に合わせるので、Rust 側は手当てが要る)。
+
+#### 注記タグ / CSS の外部注入 (配線状況)
+
+- 注記タグ: ライブラリは `AozoraConfig::load_tag_text` ほかの公開ローダを持ち、
+  `load_from_dirs` は `chuki_tag.txt` に加えて `custom_chuki_tag.txt` を上書き
+  マージする (テスト `loads_standard_and_overlay_directories_in_order`)。CLI は
+  `--config-dir <dir>` でこれを配線済み。実測: `custom_chuki_tag.txt` に
+  `テスト強調<TAB><span class="test-em">` だけ置いたディレクトリを
+  `--config-dir` で渡すと `<span class="test-em">強調</span>` が出力される
+- CSS: ライブラリは `EpubBook::with_assets([EpubAsset::new("style/x.css",
+  "text/css", bytes)])` で追加できる (manifest にも入る)。CLI に CSS を足す口は
+  無い (既定で有効にする必要が出たときのみ検討)
+- 配布物の `template/OPS/css_custom/vertical_font.css` には `/* 柱（もどき） */`
+  として `.running_head` / `.half_em_space` / `.introduction` / `.postscript` /
+  `.custom_parameter_block` の定義があるが、**変換では使われない** (Java ソースに
+  `css_custom` 参照なし、生成 EPUB に `OPS/` も `css_custom/` も含まれない)。
+  README_Changes 1.1.0b8 の名残で、リーダー向けの手動カスタム用サンプル
+- `--config-dir` は既定ディレクトリを置き換える (`main.rs:70-73`)。注記表・CSS・
+  テンプレートはコンパイル埋め込みなので影響しないが、**ディスク上の gaiji
+  フォント** (`<dir>/gaiji/*.ttf`) は指定ディレクトリのものだけになる。注記だけの
+  overlay を渡すと外字フォントを失う点に注意 (加算化は未対応のまま)
 
 ## 作業ツリーとコミット状態
 引き継ぎ後に完了した論理単位は、以下のコミットとして `develop` へ commit / push 済み。
