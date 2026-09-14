@@ -91,13 +91,6 @@ def close_of(note, notes):
     return None
 
 
-# Narou Bridge のリンク注記は 3 点 1 組 (ｌｉｎｋ＿ｓ + URL + ｌｉｎｋ＿ｔ + 文言 +
-# ｌｉｎｋ＿ｅ) で 1 つの `<a>` になる。断片側 (ｓ/ｔ) は不完全タグとして除外されるが、
-# ｅ (`</a>`) は完全タグのため単独ケース化されて「Java は裸の </a> を出す」という
-# 偽ギャップになる。実用法は realistic_cases.py の `narou-link` で検証する。
-LINK_ROW_PATTERN = re.compile("^(ｌｉｎｋ＿[ｓｔｅ]|link_[ste])$")
-
-
 def is_internal_row(fields):
     """利用者が本文に書けない行かどうか。
 
@@ -108,8 +101,6 @@ def is_internal_row(fields):
     note = fields[0].strip()
     tag = fields[1].strip() if len(fields) > 1 else ""
     close_tag = fields[2].strip() if len(fields) > 2 else ""
-    if LINK_ROW_PATTERN.match(note):
-        return True
     if "%" in tag or "%" in close_tag:
         return True
     if tag and not tag.startswith("%"):
