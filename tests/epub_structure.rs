@@ -257,6 +257,61 @@ fn writes_assets_and_manifest_entries() {
     assert!(package.contains("href=\"image/sample.png\" media-type=\"image/png\""));
 }
 
+/// `css_custom` 相当: `style/*.css` アセットは本文からリンクされる。
+/// narou の濁点フォント (`vertical_font.css` + `fonts/DMincho.ttf`) はこの経路で届く。
+#[test]
+fn links_and_writes_extra_stylesheets_and_fonts() {
+    let css = "@font-face { font-family: \"DakutenAokinMincho\"; src: url(../fonts/DMincho.ttf); }";
+    let book = EpubBook::new(
+        EpubMetadata::new("濁点", "urn:test:css"),
+        "<p><span class=\"dakuten\">え\u{3099}</span></p>",
+    )
+    .with_assets([
+        EpubAsset::new("style/vertical_font.css", "text/css", css.as_bytes().to_vec()),
+        EpubAsset::new(
+            "fonts/DMincho.ttf",
+            "application/font-sfnt",
+            b"dummy-font".to_vec(),
+        ),
+    ]);
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+
+    let mut section = String::new();
+    archive
+        .by_name("item/xhtml/0001.xhtml")
+        .unwrap()
+        .read_to_string(&mut section)
+        .unwrap();
+    assert!(
+        section.contains(
+            "<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/vertical_font.css\"/>"
+        ),
+        "extra stylesheet must be linked: {section}"
+    );
+
+    let mut written = String::new();
+    archive
+        .by_name("item/style/vertical_font.css")
+        .unwrap()
+        .read_to_string(&mut written)
+        .unwrap();
+    assert_eq!(written, css);
+    assert!(
+        archive.by_name("item/fonts/DMincho.ttf").is_ok(),
+        "font must be written next to the css"
+    );
+
+    let mut package = String::new();
+    archive
+        .by_name("item/standard.opf")
+        .unwrap()
+        .read_to_string(&mut package)
+        .unwrap();
+    assert!(package.contains("href=\"style/vertical_font.css\" media-type=\"text/css\""));
+    assert!(package.contains("href=\"fonts/DMincho.ttf\" media-type=\"application/font-sfnt\""));
+}
+
 #[test]
 fn writes_gaiji_font_assets_and_dynamic_font_css() {
     let book = EpubBook::new(

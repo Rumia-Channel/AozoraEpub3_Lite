@@ -654,6 +654,13 @@ fn write_epub_body<W: Write + Seek>(
             CompressionMethod::Deflated,
         )?;
     }
+    // `style/*.css` アセット (narou の `css_custom` 相当) を本文へリンクする。
+    let extra_css: Vec<String> = book
+        .assets
+        .iter()
+        .map(|asset| asset.path.clone())
+        .filter(|path| path.starts_with("style/") && path.ends_with(".css"))
+        .collect();
     for (index, section) in book.sections.iter().enumerate() {
         let path = if is_title_page(section) {
             "item/xhtml/title.xhtml".to_owned()
@@ -678,6 +685,7 @@ fn write_epub_body<W: Write + Seek>(
                 book.creator_markup.as_deref(),
                 book.title_page_markup.as_deref(),
                 book.title_page_type,
+                &extra_css,
             )
             .as_bytes(),
             CompressionMethod::Deflated,
