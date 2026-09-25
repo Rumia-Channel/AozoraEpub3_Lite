@@ -1,6 +1,6 @@
 # AozoraEpub3_Lite 引継ぎメモ
 
-更新日: 2026-09-12
+更新日: 2026-09-25
 作業ディレクトリ: `C:/Users/rumia/Desktop/APP/Rust/AozoraEpub3_Lite`
 作業ブランチ: `develop`
 
@@ -526,6 +526,22 @@ Lite はテンプレートを `include_str!` でコンパイル埋め込みし�
   - `scripts/package-release.ps1` の `-Version` 既定 (0.1.0) を廃止して必須化
     (手動実行で誤った名前の成果物が出るため。CI は既に `-Version` を渡している)
   - HANDOFF の「作業ツリーとコミット状態」見出しが 1 行に 2 回並んでいたのを修正
+
+## 2026-09-25: 呼び出し側のスタイルシートを本文へリンク (v0.1.4)
+
+AozoraEpub3 は `template/OPS/css_custom/*.css` (narou の `vertical_font.css` =
+行高 + 濁点用 `@font-face`/`.dakuten`) を EPUB に入れて参照するが、Lite はこの
+ディレクトリを見ていなかった。呼び出し側が `style/*.css` アセットを積めるようにし、
+本文 (`item/xhtml/*.xhtml`) から組み込み `book-style.css` の**後ろ**にリンクする
+(同じ詳細度なら呼び出し側が勝つ)。フォントは CSS の `../fonts/...` 参照のまま
+`item/fonts/` に置ける。
+
+- `src/epub.rs`: `book.assets` の `style/*.css` を集めて `render_section` へ渡す。
+- `src/epub_render.rs`: 本文テンプレートに `{extra_css}` を追加。
+- `tests/epub_structure.rs`: `links_and_writes_extra_stylesheets_and_fonts` を追加
+  (本文の `<link>`・CSS 本体・`item/fonts/DMincho.ttf`・OPF の manifest を確認)。
+- narou.rs 側は `EpubBuildOptions::extra_assets` で濁点フォント一式を渡す
+  (`convert.epub-font = auto | always`)。
 
 ## 2026-09-15: SpaceHyphenation の位置カウント / 改行コード / 画像パイプライン公開
 
