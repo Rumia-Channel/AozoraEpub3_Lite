@@ -8,7 +8,10 @@ pub mod pipeline;
 pub mod text;
 
 pub use config::{AozoraConfig, ConfigError, IniSettings, StyleSettings, SuffixNoteRule};
-pub use epub::{EpubAsset, EpubBook, EpubError, EpubMetadata, EpubSection, NavChapter};
+pub use epub::{
+    EpubAsset, EpubBook, EpubEntry, EpubEntryInfo, EpubEntrySource, EpubError, EpubMetadata,
+    EpubSection, EpubStreamWriter, NavChapter,
+};
 pub use input::{
     FileSource, Input, InputError, TextEntry, decode_text, detect_encoding, normalize_entry_path,
 };
