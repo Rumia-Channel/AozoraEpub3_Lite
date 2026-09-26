@@ -527,6 +527,13 @@ Lite はテンプレートを `include_str!` でコンパイル埋め込みし�
     (手動実行で誤った名前の成果物が出るため。CI は既に `-Version` を渡している)
   - HANDOFF の「作業ツリーとコミット状態」見出しが 1 行に 2 回並んでいたのを修正
 
+## 2026-09-26: エントリ単位 API を crate root へ公開 (v0.1.6)
+
+v0.1.5 で入れた `EpubStreamWriter` / `EpubEntry` / `EpubEntryInfo` / `EpubEntrySource`
+は `aozora_epub3_lite::epub` にしか無く、crate root の再エクスポートから漏れていた。
+利用側 (narou.rs) が `aozora_epub3_lite::EpubStreamWriter` として使えるよう root に追加する。
+本体の挙動変更は無し。
+
 ## 2026-09-26: 呼び出し側が 1 エントリずつ書き出せる API (v0.1.5)
 
 `EpubBook::write_to_stream_with` は seek 無しで全体を書き出せるが、sink が同期の
