@@ -19,4 +19,4 @@ image = { version = "0.25.10", default-features = false, features = ["bmp", "gif
 md5 = "0.8"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-js-sys = "0.3.106"
+js-sys = "0.3"
