@@ -686,6 +686,7 @@ pub(super) fn render_section(
     creator_markup: Option<&str>,
     title_page_markup: Option<&str>,
     title_page_type: usize,
+    extra_css: &[String],
 ) -> String {
     let kindle_class = if kindle { " kindle" } else { "" };
     let trimmed = body_fragment.trim();
@@ -826,6 +827,18 @@ pub(super) fn render_section(
     } else {
         body_class("", kindle)
     };
+    // 呼び出し側が渡した追加スタイル (Java の `template/OPS/css_custom/*.css` 相当)。
+    // 組み込みの book-style.css より後ろに置くので、同じ詳細度ならこちらが勝つ。
+    let extra_css_links = extra_css
+        .iter()
+        .map(|path| {
+            format!(
+                "<link rel=\"stylesheet\" type=\"text/css\" href=\"../{}\"/>\n",
+                xml_escape(path)
+            )
+        })
+        .collect::<String>();
+
     let body = if page_class.contains("p-middle") {
         format!(
             "<div class=\"main vrtl block-align-center\">\n<div class=\"start-2em\">\n{body_fragment}\n</div>\n</div>"
@@ -838,11 +851,12 @@ pub(super) fn render_section(
         format!("<div class=\"main\">\n{body_fragment}\n</div>")
     };
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE html>\n<html\n xmlns=\"http://www.w3.org/1999/xhtml\"\n xmlns:epub=\"http://www.idpf.org/2007/ops\"\n xml:lang=\"{language}\"\n class=\"{layout_class}\"\n>\n<head>\n<meta charset=\"UTF-8\"/>\n<title>{title}</title>\n<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/book-style.css\"/>\n\n</head>\n<body{rendered_page_class}>\n{body}\n</body>\n</html>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE html>\n<html\n xmlns=\"http://www.w3.org/1999/xhtml\"\n xmlns:epub=\"http://www.idpf.org/2007/ops\"\n xml:lang=\"{language}\"\n class=\"{layout_class}\"\n>\n<head>\n<meta charset=\"UTF-8\"/>\n<title>{title}</title>\n<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/book-style.css\"/>\n{extra_css}\n</head>\n<body{rendered_page_class}>\n{body}\n</body>\n</html>\n",
         language = xml_escape(&metadata.language),
         title = xml_escape(&metadata.title),
         layout_class = layout_class,
         rendered_page_class = rendered_page_class,
+        extra_css = extra_css_links,
         body = body,
     )
 }

@@ -1,8 +1,9 @@
 //! `pipeline` モジュールのテスト (`src/text_tests.rs` と同じ配置規則)。
 
 use super::*;
-use crate::{EpubAsset, IniSettings};
-/// 1参照1assetの CollectedAsset を構築（src は `../image/{参照名}` の形式）。
+use crate::{EpubAsset, FileSource, IniSettings, Input, InputError};
+use std::io::{Cursor, Read};
+
 /// 1参照1assetの CollectedAsset を構築（src は `../image/{参照名}` の形式）。
 fn collected(asset: EpubAsset) -> CollectedAsset {
     let reference = asset
@@ -328,5 +329,110 @@ fn keeps_class_carrying_empty_spans_when_images_are_missing() {
     assert_eq!(
         sections[0],
         "<p><span class=\"half_em_space\"></span>\u{300c}\u{305d}\u{3063}\u{3061}\u{ff1f}\u{300d}</p>"
+    );
+}
+
+/// PNG のヘッダのみ (寸法判定用)。ピクセルは読まれない。
+fn png_header(width: u32, height: u32) -> Vec<u8> {
+    let mut png = vec![0; 24];
+    png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    png[16..20].copy_from_slice(&width.to_be_bytes());
+    png[20..24].copy_from_slice(&height.to_be_bytes());
+    png
+}
+
+/// ストリーミング FileSource のテスト用実装。
+#[derive(Debug)]
+struct MemorySource {
+    names: Vec<String>,
+    files: Vec<(String, Vec<u8>)>,
+}
+
+impl MemorySource {
+    fn new(files: &[(&str, Vec<u8>)]) -> Self {
+        Self {
+            names: files.iter().map(|(name, _)| (*name).to_owned()).collect(),
+            files: files
+                .iter()
+                .map(|(name, data)| ((*name).to_owned(), data.clone()))
+                .collect(),
+        }
+    }
+}
+
+impl FileSource for MemorySource {
+    fn list(&self) -> &[String] {
+        &self.names
+    }
+
+    fn open(&self, name: &str) -> Result<Option<Box<dyn Read + Send>>, InputError> {
+        Ok(self
+            .files
+            .iter()
+            .find(|(path, _)| path == name)
+            .map(|(_, data)| Box::new(Cursor::new(data.clone())) as Box<dyn Read + Send>))
+    }
+}
+
+/// FileSource 入力 (narou.rs の Worker 経路) でも挿絵を Input 経由で解決し、
+/// CLI と同じ順 (収集 → 装飾 → 参照名の書き換え → 表紙画像の除外 → 再構成) で
+/// 単ページ画像化・連番・表紙判定まで通ることを確認する。
+#[test]
+fn collects_and_reflows_images_from_a_file_source() {
+    let text = "表題\n著者\n\n［＃区切り線］\n［＃改ページ］\n\
+        ［＃挿絵（cover.png）入る］\n［＃改ページ］\n\
+        ［＃挿絵（fig.png）入る］\n［＃改ページ］\n本文\n";
+    let source = MemorySource::new(&[
+        ("dir/book.txt", text.as_bytes().to_vec()),
+        ("dir/cover.png", png_header(700, 900)),
+        ("dir/fig.png", png_header(700, 900)),
+    ]);
+    let input = Input::from_source(std::sync::Arc::new(source)).expect("source input");
+    assert!(!input.is_archive(), "FileSource 入力はアーカイブではない");
+    assert!(input.has_source());
+    let entry = input.text_entries()[0].clone();
+    let config = AozoraConfig::default();
+    let (mut sections, mut chapters) =
+        crate::aozora_text_to_xhtml_sections_with_chapters(text, &config, true).unwrap();
+
+    // -c 0 (先頭の挿絵を表紙) 相当
+    let (mut assets, cover) = collect_assets(&input, &entry, text, Some("0"), None).unwrap();
+    assert_eq!(assets.len(), 2, "両方の挿絵が解決される");
+    assert_eq!(assets[0].asset.path, "image/0001.png");
+    assert_eq!(assets[0].source, "dir/cover.png", "実ファイル名は source");
+    assert_eq!(assets[0].references, vec!["cover.png".to_owned()]);
+    assert_eq!(assets[0].resolved, "0001.png");
+    assert_eq!(
+        assets[0]
+            .dimensions
+            .map(|value| (value.width, value.height)),
+        Some((700, 900))
+    );
+    assert!(assets[0].is_cover);
+    assert_eq!(cover.as_deref(), Some("image/0001.png"));
+
+    decorate_image_tags(&mut sections, &mut assets, &config, true);
+    for collected in &assets {
+        for reference in &collected.references {
+            if collected.resolved != *reference {
+                rewrite_image_source(&mut sections, reference, &collected.resolved);
+            }
+        }
+    }
+    remove_image_sources(&mut sections, &[cover.clone().unwrap()]);
+    reflow_image_sections(&mut sections, &mut chapters, &assets, &config);
+
+    let body = sections.join("");
+    assert!(
+        !body.contains("0001.png"),
+        "表紙画像は本文から消える: {body}"
+    );
+    assert!(
+        body.contains("../image/0002.png"),
+        "挿絵は連番で残る: {body}"
+    );
+    assert!(
+        body.contains("<span><img class=\"fit\""),
+        "大きい挿絵は単ページ画像になる: {body}"
     );
 }

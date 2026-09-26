@@ -2,7 +2,7 @@ use std::fmt;
 use std::io::{self, Seek, Write};
 use std::path::Path;
 
-use zip::write::{SimpleFileOptions, ZipWriter};
+use zip::write::{SimpleFileOptions, StreamWriter, ZipWriter};
 use zip::{CompressionMethod, result::ZipError};
 #[path = "epub_render.rs"]
 mod render;
@@ -567,34 +567,157 @@ impl EpubBook {
     }
 }
 
-/// Writes every EPUB entry into `archive`. Shared by the seekable and
-/// streaming writers.
-fn write_epub_body<W: Write + Seek>(
-    archive: &mut ZipWriter<W>,
-    book: &EpubBook,
-    provider: &impl Fn(&str) -> Option<Vec<u8>>,
-) -> Result<(), EpubError> {
+/// 1 エントリ分の書き出し内容。
+///
+/// `Inline` は Lite が内容を持っているもの（スタイル・XHTML・OPF など）、
+/// `Asset` は呼び出し側が用意するもの（挿絵など。EPUB 内の名前は `item/{path}`）。
+/// アセットを遅延させることで、挿絵を 1 枚ずつ解決しながら書ける。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EpubEntrySource {
+    Inline(Vec<u8>),
+    Asset(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpubEntry {
+    name: String,
+    method: CompressionMethod,
+    source: EpubEntrySource,
+}
+
+impl EpubEntry {
+    /// EPUB 内のエントリ名。
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// 呼び出し側が用意するアセットのパス（`item/` を含まない）。`Inline` なら `None`。
+    pub fn asset_path(&self) -> Option<&str> {
+        match &self.source {
+            EpubEntrySource::Asset(path) => Some(path),
+            EpubEntrySource::Inline(_) => None,
+        }
+    }
+}
+
+/// 次に書くエントリの情報。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpubEntryInfo {
+    pub name: String,
+    /// アセットのときだけ入る（呼び出し側がバイト列を用意する）。
+    pub asset_path: Option<String>,
+}
+
+/// 1 エントリずつ書き進めるライタ。
+///
+/// ZIP のフレーミング（データディスクリプタ付きのストリーミング）は Lite が持ち、
+/// 呼び出し側は [`EpubStreamWriter::next_entry`] で次に何を書くかを知り、アセットの
+/// ときだけバイト列を用意して [`EpubStreamWriter::write_current`] を呼ぶ。挿絵を
+/// 1 枚ずつ読む用途（メモリ上限のある Cloudflare Workers など）を想定している。
+pub struct EpubStreamWriter<W: Write> {
+    archive: ZipWriter<StreamWriter<W>>,
+    entries: Vec<EpubEntry>,
+    index: usize,
+}
+
+impl EpubBook {
+    /// 書き出すエントリを順序どおりに列挙する（アセットのバイト列は含まない）。
+    pub fn entries(&self) -> Result<Vec<EpubEntry>, EpubError> {
+        entries_for(self)
+    }
+
+    /// `sink` へ 1 エントリずつ書き出すライタを作る。
+    pub fn stream_writer<W: Write>(&self, sink: W) -> Result<EpubStreamWriter<W>, EpubError> {
+        self.validate()?;
+        Ok(EpubStreamWriter {
+            archive: ZipWriter::new_stream(sink),
+            entries: self.entries()?,
+            index: 0,
+        })
+    }
+}
+
+impl<W: Write> EpubStreamWriter<W> {
+    /// 次に書くエントリ（すべて書き終えていれば `None`）。
+    pub fn next_entry(&self) -> Option<EpubEntryInfo> {
+        self.entries.get(self.index).map(|entry| EpubEntryInfo {
+            name: entry.name.clone(),
+            asset_path: entry.asset_path().map(str::to_string),
+        })
+    }
+
+    /// 現在のエントリを書く。アセットのときは `asset` にバイト列を渡す。
+    pub fn write_current(&mut self, asset: Option<&[u8]>) -> Result<(), EpubError> {
+        let Some(entry) = self.entries.get(self.index) else {
+            return Err(EpubError::InvalidMetadata("write past the last EPUB entry"));
+        };
+        let options = SimpleFileOptions::default().compression_method(entry.method);
+        self.archive.start_file(entry.name.as_str(), options)?;
+        match &entry.source {
+            EpubEntrySource::Inline(bytes) => self.archive.write_all(bytes)?,
+            EpubEntrySource::Asset(path) => {
+                let bytes = asset.ok_or_else(|| EpubError::MissingAsset(path.clone()))?;
+                self.archive.write_all(bytes)?;
+            }
+        }
+        self.index += 1;
+        Ok(())
+    }
+
+    /// セントラルディレクトリを書いて sink を返す。
+    pub fn finish(self) -> Result<W, EpubError> {
+        Ok(self.archive.finish()?.into_inner())
+    }
+}
+
+fn push_inline(entries: &mut Vec<EpubEntry>, name: &str, content: &[u8], method: CompressionMethod) {
+    entries.push(EpubEntry {
+        name: name.to_string(),
+        method,
+        source: EpubEntrySource::Inline(content.to_vec()),
+    });
+}
+
+/// アセットをエントリへ積む。既に内容を持っていれば Inline、無ければ呼び出し側が
+/// 用意する `Asset` になる（`write_asset` と同じ解決規則）。
+fn push_asset(entries: &mut Vec<EpubEntry>, asset: &EpubAsset) {
+    let name = format!("item/{}", asset.path);
+    let source = match &asset.data {
+        Some(data) => EpubEntrySource::Inline(data.clone()),
+        None => EpubEntrySource::Asset(asset.path.clone()),
+    };
+    entries.push(EpubEntry {
+        name,
+        method: CompressionMethod::Deflated,
+        source,
+    });
+}
+
+/// 書き出すエントリを順序どおりに組み立てる。`write_epub_body` と
+/// `EpubStreamWriter` はどちらもこの 1 つの計画を消費する（出力はバイト単位で一致する）。
+fn entries_for(book: &EpubBook) -> Result<Vec<EpubEntry>, EpubError> {
+    let mut entries: Vec<EpubEntry> = Vec::new();
     let image_only = is_image_only(&book.sections);
-    write_entry(
-        archive,
+    push_inline(
+        &mut entries,
         "mimetype",
         MIMETYPE.as_bytes(),
         CompressionMethod::Stored,
-    )?;
-    write_entry(
-        archive,
+    );
+    push_inline(
+        &mut entries,
         "META-INF/container.xml",
         CONTAINER_XML.as_bytes(),
         CompressionMethod::Deflated,
-    )?;
+    );
 
     if image_only {
-        write_entry(
-            archive,
+        push_inline(
+            &mut entries,
             "item/style/fixed-layout-jp.css",
             include_str!("../assets/aozora/template/item/style/fixed-layout-jp.css").as_bytes(),
             CompressionMethod::Deflated,
-        )?;
+        );
     } else {
         for (name, content) in [
             (
@@ -623,17 +746,12 @@ fn write_epub_body<W: Write + Seek>(
                 include_str!("../assets/aozora/template/item/style/style-advance.css"),
             ),
         ] {
-            write_entry(
-                archive,
-                name,
-                content.as_bytes(),
-                CompressionMethod::Deflated,
-            )?;
+            push_inline(&mut entries, name, content.as_bytes(), CompressionMethod::Deflated);
         }
     }
     if image_only {
         for asset in &book.assets {
-            write_asset(archive, asset, provider)?;
+            push_asset(&mut entries, asset);
         }
     }
 
@@ -641,8 +759,8 @@ fn write_epub_body<W: Write + Seek>(
         && !image_only
         && book.cover_page_enabled()
     {
-        write_entry(
-            archive,
+        push_inline(
+            &mut entries,
             "item/xhtml/cover.xhtml",
             render_cover(
                 &book.metadata,
@@ -652,8 +770,15 @@ fn write_epub_body<W: Write + Seek>(
             )
             .as_bytes(),
             CompressionMethod::Deflated,
-        )?;
+        );
     }
+    // `style/*.css` アセット (narou の `css_custom` 相当) を本文へリンクする。
+    let extra_css: Vec<String> = book
+        .assets
+        .iter()
+        .map(|asset| asset.path.clone())
+        .filter(|path| path.starts_with("style/") && path.ends_with(".css"))
+        .collect();
     for (index, section) in book.sections.iter().enumerate() {
         let path = if is_title_page(section) {
             "item/xhtml/title.xhtml".to_owned()
@@ -666,8 +791,8 @@ fn write_epub_body<W: Write + Seek>(
                     .count()
             )
         };
-        write_entry(
-            archive,
+        push_inline(
+            &mut entries,
             &path,
             render_section(
                 &book.metadata,
@@ -678,22 +803,23 @@ fn write_epub_body<W: Write + Seek>(
                 book.creator_markup.as_deref(),
                 book.title_page_markup.as_deref(),
                 book.title_page_type,
+                &extra_css,
             )
             .as_bytes(),
             CompressionMethod::Deflated,
-        )?;
+        );
     }
     if !image_only {
         let text_css = render_text_css(&book.assets, &book.style);
-        write_entry(
-            archive,
+        push_inline(
+            &mut entries,
             "item/style/text.css",
             text_css.as_bytes(),
             CompressionMethod::Deflated,
-        )?;
+        );
     }
-    write_entry(
-        archive,
+    push_inline(
+        &mut entries,
         "item/standard.opf",
         render_package(
             &book.metadata,
@@ -706,9 +832,9 @@ fn write_epub_body<W: Write + Seek>(
         )
         .as_bytes(),
         CompressionMethod::Deflated,
-    )?;
-    write_entry(
-        archive,
+    );
+    push_inline(
+        &mut entries,
         "item/nav.xhtml",
         render_nav(
             &book.metadata,
@@ -725,9 +851,9 @@ fn write_epub_body<W: Write + Seek>(
         )
         .as_bytes(),
         CompressionMethod::Deflated,
-    )?;
-    write_entry(
-        archive,
+    );
+    push_inline(
+        &mut entries,
         "item/toc.ncx",
         render_ncx(
             &book.metadata,
@@ -740,30 +866,43 @@ fn write_epub_body<W: Write + Seek>(
         )
         .as_bytes(),
         CompressionMethod::Deflated,
-    )?;
+    );
     if !image_only {
         for asset in &book.assets {
-            write_asset(archive, asset, provider)?;
+            push_asset(&mut entries, asset);
         }
+    }
+    Ok(entries)
+}
+
+/// Writes every EPUB entry into `archive`. Shared by the seekable and
+/// streaming writers.
+fn write_epub_body<W: Write + Seek>(
+    archive: &mut ZipWriter<W>,
+    book: &EpubBook,
+    provider: &impl Fn(&str) -> Option<Vec<u8>>,
+) -> Result<(), EpubError> {
+    for entry in book.entries()? {
+        write_planned_entry(archive, &entry, provider)?;
     }
     Ok(())
 }
 
-/// Writes one asset entry, loading deferred (`data: None`) bytes from
-/// `provider` just before writing.
-fn write_asset<W: Write + Seek>(
+fn write_planned_entry<W: Write + Seek>(
     archive: &mut ZipWriter<W>,
-    asset: &EpubAsset,
+    entry: &EpubEntry,
     provider: &impl Fn(&str) -> Option<Vec<u8>>,
 ) -> Result<(), EpubError> {
-    let path = format!("item/{}", asset.path);
-    let data = match &asset.data {
-        Some(data) => std::borrow::Cow::Borrowed(data.as_slice()),
-        None => std::borrow::Cow::Owned(
-            provider(&asset.path).ok_or_else(|| EpubError::MissingAsset(asset.path.clone()))?,
-        ),
-    };
-    write_entry(archive, &path, &data, CompressionMethod::Deflated)
+    let options = SimpleFileOptions::default().compression_method(entry.method);
+    archive.start_file(entry.name.as_str(), options)?;
+    match &entry.source {
+        EpubEntrySource::Inline(bytes) => archive.write_all(bytes)?,
+        EpubEntrySource::Asset(path) => {
+            let data = provider(path).ok_or_else(|| EpubError::MissingAsset(path.clone()))?;
+            archive.write_all(&data)?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_asset(asset: &EpubAsset) -> Result<(), EpubError> {
@@ -796,18 +935,6 @@ fn validate_metadata(metadata: &EpubMetadata) -> Result<(), EpubError> {
     if metadata.modified.trim().is_empty() {
         return Err(EpubError::InvalidMetadata("modified"));
     }
-    Ok(())
-}
-
-fn write_entry<W: Write + Seek>(
-    archive: &mut ZipWriter<W>,
-    name: &str,
-    content: &[u8],
-    method: CompressionMethod,
-) -> Result<(), EpubError> {
-    let options = SimpleFileOptions::default().compression_method(method);
-    archive.start_file(name, options)?;
-    archive.write_all(content)?;
     Ok(())
 }
 

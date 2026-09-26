@@ -245,7 +245,14 @@ fn convert_input(
         // 装飾を書き換え前に実行: 書き換え前の src（../image/{参照名}）から
         // 参照単位の available（拡張子違いの解決有無）を判定する。Java の
         // getImageWidthRatio(srcFilePath) は元の参照名で引けなければ ratio=0 → fit。
-        decorate_image_tags(&mut sections, &mut assets, config, input.is_archive());
+        // Java の writeArchiveImage 相当 (アーカイブ / FileSource 入力) か。
+        // 素の TXT 入力はファイルシステムの画像を回転させない。
+        decorate_image_tags(
+            &mut sections,
+            &mut assets,
+            config,
+            input.is_archive() || input.has_source(),
+        );
         for collected in &assets {
             for reference in &collected.references {
                 if collected.resolved != *reference {
@@ -399,7 +406,7 @@ fn convert_input(
             .to_path_buf();
         let provider = |epub_path: &str| -> Option<Vec<u8>> {
             let collected = assets.iter().find(|asset| asset.asset.path == epub_path)?;
-            let data = if input.is_archive() {
+            let data = if input.is_archive() || input.has_source() {
                 input.read_image(&collected.source).ok().flatten()?
             } else {
                 fs::read(base.join(collected.source.replace('\\', "/"))).ok()?

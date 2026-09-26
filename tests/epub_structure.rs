@@ -257,6 +257,61 @@ fn writes_assets_and_manifest_entries() {
     assert!(package.contains("href=\"image/sample.png\" media-type=\"image/png\""));
 }
 
+/// `css_custom` 相当: `style/*.css` アセットは本文からリンクされる。
+/// narou の濁点フォント (`vertical_font.css` + `fonts/DMincho.ttf`) はこの経路で届く。
+#[test]
+fn links_and_writes_extra_stylesheets_and_fonts() {
+    let css = "@font-face { font-family: \"DakutenAokinMincho\"; src: url(../fonts/DMincho.ttf); }";
+    let book = EpubBook::new(
+        EpubMetadata::new("濁点", "urn:test:css"),
+        "<p><span class=\"dakuten\">え\u{3099}</span></p>",
+    )
+    .with_assets([
+        EpubAsset::new("style/vertical_font.css", "text/css", css.as_bytes().to_vec()),
+        EpubAsset::new(
+            "fonts/DMincho.ttf",
+            "application/font-sfnt",
+            b"dummy-font".to_vec(),
+        ),
+    ]);
+    let bytes = book.write_to(Cursor::new(Vec::new())).unwrap().into_inner();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+
+    let mut section = String::new();
+    archive
+        .by_name("item/xhtml/0001.xhtml")
+        .unwrap()
+        .read_to_string(&mut section)
+        .unwrap();
+    assert!(
+        section.contains(
+            "<link rel=\"stylesheet\" type=\"text/css\" href=\"../style/vertical_font.css\"/>"
+        ),
+        "extra stylesheet must be linked: {section}"
+    );
+
+    let mut written = String::new();
+    archive
+        .by_name("item/style/vertical_font.css")
+        .unwrap()
+        .read_to_string(&mut written)
+        .unwrap();
+    assert_eq!(written, css);
+    assert!(
+        archive.by_name("item/fonts/DMincho.ttf").is_ok(),
+        "font must be written next to the css"
+    );
+
+    let mut package = String::new();
+    archive
+        .by_name("item/standard.opf")
+        .unwrap()
+        .read_to_string(&mut package)
+        .unwrap();
+    assert!(package.contains("href=\"style/vertical_font.css\" media-type=\"text/css\""));
+    assert!(package.contains("href=\"fonts/DMincho.ttf\" media-type=\"application/font-sfnt\""));
+}
+
 #[test]
 fn writes_gaiji_font_assets_and_dynamic_font_css() {
     let book = EpubBook::new(
@@ -535,4 +590,46 @@ fn renders_middle_and_bottom_pages_with_horizontal_document_class() {
             assert!(section.contains("xml:lang=\"ja\"\n class=\"vrtl\""));
         }
     }
+}
+
+#[test]
+fn stream_writer_matches_the_buffered_writer() {
+    // 遅延アセット (挿絵) を含む作品で、1 エントリずつ書いた結果が
+    // バッファリング版とバイト単位で一致することを固定する。
+    // 挿絵を 1 枚ずつ解決する呼び出し側 (Cloudflare Workers など) が前提にしている。
+    let provider = |path: &str| (path == "image/0001.png").then(|| vec![0x89, b'P', b'N', b'G']);
+
+    let book = EpubBook::new(
+        EpubMetadata::new("差分検証", "urn:test:stream"),
+        "<p>本文</p>",
+    )
+    .with_assets([
+        EpubAsset::lazy("image/0001.png", "image/png"),
+        EpubAsset::new("style/vertical_font.css", "text/css", b"body{}".to_vec()),
+    ]);
+
+    let expected = book
+        .write_to_stream_with(Cursor::new(Vec::new()), provider)
+        .unwrap()
+        .into_inner();
+
+    let mut writer = book.stream_writer(Cursor::new(Vec::new())).unwrap();
+    let mut plan = Vec::new();
+    while let Some(info) = writer.next_entry() {
+        plan.push(info.name.clone());
+        let bytes = info.asset_path.as_deref().and_then(provider);
+        writer.write_current(bytes.as_deref()).unwrap();
+    }
+    let actual = writer.finish().unwrap().into_inner();
+
+    assert_eq!(
+        actual, expected,
+        "1 エントリずつ書いた EPUB がバッファリング版と一致する"
+    );
+
+    let mut archive = ZipArchive::new(Cursor::new(actual)).unwrap();
+    let archive_names: Vec<String> = (0..archive.len())
+        .map(|index| archive.by_index(index).unwrap().name().to_string())
+        .collect();
+    assert_eq!(plan, archive_names, "計画の順序が ZIP のエントリ順と一致する");
 }

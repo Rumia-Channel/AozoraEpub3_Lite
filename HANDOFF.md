@@ -1,6 +1,6 @@
 # AozoraEpub3_Lite 引継ぎメモ
 
-更新日: 2026-09-12
+更新日: 2026-09-25
 作業ディレクトリ: `C:/Users/rumia/Desktop/APP/Rust/AozoraEpub3_Lite`
 作業ブランチ: `develop`
 
@@ -527,6 +527,49 @@ Lite はテンプレートを `include_str!` でコンパイル埋め込みし�
     (手動実行で誤った名前の成果物が出るため。CI は既に `-Version` を渡している)
   - HANDOFF の「作業ツリーとコミット状態」見出しが 1 行に 2 回並んでいたのを修正
 
+## 2026-09-26: 呼び出し側が 1 エントリずつ書き出せる API (v0.1.5)
+
+`EpubBook::write_to_stream_with` は seek 無しで全体を書き出せるが、sink が同期の
+`Write` なので、単一スレッドの実行環境 (Cloudflare Workers) では「書いている間に
+応答側が読む」形にできず、呼び出し側が全体をバッファリングするしかなかった。
+
+そこで、書き出すエントリを列挙して 1 件ずつ進められる API を足した。
+
+- `EpubBook::entries()` — 書き出すエントリを順序どおりに返す。`Inline` は Lite が
+  内容を持つもの (スタイル・XHTML・OPF など)、`Asset` は呼び出し側が用意するもの
+  (挿絵。EPUB 内の名前は `item/{path}`)。
+- `EpubBook::stream_writer(sink)` → `EpubStreamWriter`
+  - `next_entry()` で次に書くエントリ (名前とアセットパス) を知る
+  - `write_current(bytes)` で 1 エントリ書く (アセットのときだけバイト列を渡す)
+  - `finish()` でセントラルディレクトリを書いて sink を返す
+- ZIP のフレーミング (データディスクリプタ付き) は従来どおり Lite が持つ。
+- `write_epub_body` は同じ計画 (`entries()`) を消費する形に整理したため、従来の
+  `write_to_stream_with` の出力はバイト単位で変わらない。
+
+利用側 (narou.rs) は「アセットのエントリに差し掛かったときだけ」非同期で画像を
+1 枚読み、その他のエントリはそのまま流す。これで EPUB 全体をメモリに持たずに
+応答としてストリーミングできる。
+
+**検証**: `tests/epub_structure.rs::stream_writer_matches_the_buffered_writer` が
+「1 エントリずつ書いた結果 == `write_to_stream_with` の結果」をバイト比較で固定する。
+既存の構造・パリティテスト (17 件) も green。
+
+## 2026-09-25: 呼び出し側のスタイルシートを本文へリンク (v0.1.4)
+
+AozoraEpub3 は `template/OPS/css_custom/*.css` (narou の `vertical_font.css` =
+行高 + 濁点用 `@font-face`/`.dakuten`) を EPUB に入れて参照するが、Lite はこの
+ディレクトリを見ていなかった。呼び出し側が `style/*.css` アセットを積めるようにし、
+本文 (`item/xhtml/*.xhtml`) から組み込み `book-style.css` の**後ろ**にリンクする
+(同じ詳細度なら呼び出し側が勝つ)。フォントは CSS の `../fonts/...` 参照のまま
+`item/fonts/` に置ける。
+
+- `src/epub.rs`: `book.assets` の `style/*.css` を集めて `render_section` へ渡す。
+- `src/epub_render.rs`: 本文テンプレートに `{extra_css}` を追加。
+- `tests/epub_structure.rs`: `links_and_writes_extra_stylesheets_and_fonts` を追加
+  (本文の `<link>`・CSS 本体・`item/fonts/DMincho.ttf`・OPF の manifest を確認)。
+- narou.rs 側は `EpubBuildOptions::extra_assets` で濁点フォント一式を渡す
+  (`convert.epub-font = auto | always`)。
+
 ## 2026-09-15: SpaceHyphenation の位置カウント / 改行コード / 画像パイプライン公開
 
 narou.rs 側の実測レポート (全角スペースの取りこぼし 126 箇所、423 ファイル中
@@ -632,6 +675,41 @@ Java の規則は `UUID.nameUUIDFromBytes((title + "-" + creator).getBytes())`
 実データ (n0421du) は 423 エントリ中 422 が byte 一致のまま
 (残りは dcterms:modified のみ)。`tools/parity_check.py` は 19/21。
 
+### 2026-09-15: FileSource 入力の画像解決 (commit `6fe665c`)
+
+narou.rs の Worker 経路 (`Input::from_source`) では挿絵が 1 枚も集まらず、
+画像パイプライン (単ページ画像化・連番・表紙判定) が使えなかった。
+`pipeline::collect_assets` が `Input::is_archive()` だけを見ており、
+FileSource 入力をファイルシステム側 (入力パスの隣) で解決しようとしていたため。
+
+- `Input::has_source()` を追加し、`collect_assets` の 3 箇所 (参照の有無 /
+  パス解決 / バイト読み出し) と、CLI の書き出し時プロバイダ・
+  `decorate_image_tags` の archive フラグを
+  `input.is_archive() || input.has_source()` に変更
+  (`Input::read_image` / `resolve_image_path` は元から FileSource 対応)
+- 回帰テスト `collects_and_reflows_images_from_a_file_source`: FileSource に
+  本文 + 挿絵 2 枚 (700x900) を入れ、収集 → 装飾 → 参照名の書き換え →
+  表紙画像の除外 → 再構成まで CLI と同じ順で通し、`image/0001.png` (表紙) と
+  `image/0002.png` (単ページ) を確認。修正前は assets 0 件で失敗する
+- CLI (.txt / .zip 入力) は不変 (`has_source()` は false)。parity_check 19/21、
+  実データ 422/423 byte 一致、fullsp 1,944 = 1,944
+
+### 2026-09-15: v0.1.3 リリース
+
+- タグ `v0.1.3` / master `5b09168` (develop からの `--no-ff` マージ)。成果物 6 件
+  (win/mac/linux × x64/arm64)。Release ワークフローの検証・ビルド・署名・公開が全て成功
+- リリースノートは `gh release edit v0.1.3 --notes-file` で要約
+  (SpaceHyphenation の位置カウント、改行の固定、残差 4 件、pipeline 公開、検証状況)
+- **v0.1.3 の元コミット `5b09168` は develop の Platform CI が赤**
+  (`text::tests::includes_leading_gaiji_note_in_implicit_ruby_base` が debug ビルドで
+  underflow panic。ルビ基底に外字注記が混ざると `java_pos - phase1_slice_len(...)` が
+  負になる。release ビルドでは panic せず、位置が大きくずれて禁則調整の閾値判定が
+  変わる)。修正は `f6cb2dd` (saturating_sub) で **develop のみ**に入れてあり、
+  CI は緑。**ユーザー判断で v0.1.3 は再公開せず、次回リリース (v0.1.4) に載せる**
+  (master と v0.1.3 タグは `5b09168` のまま)
+- 次回リリース時は `Cargo.toml` を 0.1.4 に上げ、develop → master を `--no-ff` で
+  マージして `v0.1.4` をタグ付けする
+
 ### 残る既知の差分 (いずれも再現しない方針)
 
 - `test_title.txt` 0001: Java は `BookInfo.isImageSectionLine`
@@ -673,6 +751,10 @@ Java の規則は `UUID.nameUUIDFromBytes((title + "-" + creator).getBytes())`
 - `b651141`: HANDOFF を更新する
 - `7a5543d`: 残差 (TOC フォールバック / 空行 / 隠し字下げ / 章 ID) を
   Java 版に一致させる
+- `d997dd8` / `01df448`: HANDOFF の記録
+- `1c3fca6`: バージョンを 0.1.3 にする (v0.1.3 として master へ `--no-ff` マージ)
+- `f6cb2dd`: ルビ基底のフェーズ1位置の underflow 修正 (develop のみ、v0.1.4 に載る)
+- `6fe665c`: FileSource 入力でも挿絵を解決できるようにする (v0.1.4 に載る)
 
 2026-09-14 の修正は以下のコミット。
 
