@@ -209,13 +209,26 @@ impl EpubMetadata {
     }
 }
 
+/// UNIX epoch からの秒数。`std::time` は wasm32-unknown-unknown では
+/// 実装が無く panic するため、そこでは JS の時計を使う。
+#[cfg(not(target_arch = "wasm32"))]
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn unix_seconds() -> u64 {
+    // `Date.now()` はミリ秒精度のエポック時刻を返す。
+    (js_sys::Date::now() / 1000.0) as u64
+}
+
 /// Java: dcterms:modified は変換時刻 (new Date()) を ISO 8601 UTC で出力する。
 /// chrono 等を持たないため UNIX epoch から civil 日付を自前計算する。
 fn current_utc_timestamp() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
+    let secs = unix_seconds();
     let days = (secs / 86400) as i64;
     let rem = secs % 86400;
     let (hour, minute, second) = (rem / 3600, (rem % 3600) / 60, rem % 60);
