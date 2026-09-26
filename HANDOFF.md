@@ -527,6 +527,33 @@ Lite はテンプレートを `include_str!` でコンパイル埋め込みし�
     (手動実行で誤った名前の成果物が出るため。CI は既に `-Version` を渡している)
   - HANDOFF の「作業ツリーとコミット状態」見出しが 1 行に 2 回並んでいたのを修正
 
+## 2026-09-26: 呼び出し側が 1 エントリずつ書き出せる API (v0.1.5)
+
+`EpubBook::write_to_stream_with` は seek 無しで全体を書き出せるが、sink が同期の
+`Write` なので、単一スレッドの実行環境 (Cloudflare Workers) では「書いている間に
+応答側が読む」形にできず、呼び出し側が全体をバッファリングするしかなかった。
+
+そこで、書き出すエントリを列挙して 1 件ずつ進められる API を足した。
+
+- `EpubBook::entries()` — 書き出すエントリを順序どおりに返す。`Inline` は Lite が
+  内容を持つもの (スタイル・XHTML・OPF など)、`Asset` は呼び出し側が用意するもの
+  (挿絵。EPUB 内の名前は `item/{path}`)。
+- `EpubBook::stream_writer(sink)` → `EpubStreamWriter`
+  - `next_entry()` で次に書くエントリ (名前とアセットパス) を知る
+  - `write_current(bytes)` で 1 エントリ書く (アセットのときだけバイト列を渡す)
+  - `finish()` でセントラルディレクトリを書いて sink を返す
+- ZIP のフレーミング (データディスクリプタ付き) は従来どおり Lite が持つ。
+- `write_epub_body` は同じ計画 (`entries()`) を消費する形に整理したため、従来の
+  `write_to_stream_with` の出力はバイト単位で変わらない。
+
+利用側 (narou.rs) は「アセットのエントリに差し掛かったときだけ」非同期で画像を
+1 枚読み、その他のエントリはそのまま流す。これで EPUB 全体をメモリに持たずに
+応答としてストリーミングできる。
+
+**検証**: `tests/epub_structure.rs::stream_writer_matches_the_buffered_writer` が
+「1 エントリずつ書いた結果 == `write_to_stream_with` の結果」をバイト比較で固定する。
+既存の構造・パリティテスト (17 件) も green。
+
 ## 2026-09-25: 呼び出し側のスタイルシートを本文へリンク (v0.1.4)
 
 AozoraEpub3 は `template/OPS/css_custom/*.css` (narou の `vertical_font.css` =

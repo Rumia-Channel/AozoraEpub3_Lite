@@ -591,3 +591,45 @@ fn renders_middle_and_bottom_pages_with_horizontal_document_class() {
         }
     }
 }
+
+#[test]
+fn stream_writer_matches_the_buffered_writer() {
+    // 遅延アセット (挿絵) を含む作品で、1 エントリずつ書いた結果が
+    // バッファリング版とバイト単位で一致することを固定する。
+    // 挿絵を 1 枚ずつ解決する呼び出し側 (Cloudflare Workers など) が前提にしている。
+    let provider = |path: &str| (path == "image/0001.png").then(|| vec![0x89, b'P', b'N', b'G']);
+
+    let book = EpubBook::new(
+        EpubMetadata::new("差分検証", "urn:test:stream"),
+        "<p>本文</p>",
+    )
+    .with_assets([
+        EpubAsset::lazy("image/0001.png", "image/png"),
+        EpubAsset::new("style/vertical_font.css", "text/css", b"body{}".to_vec()),
+    ]);
+
+    let expected = book
+        .write_to_stream_with(Cursor::new(Vec::new()), provider)
+        .unwrap()
+        .into_inner();
+
+    let mut writer = book.stream_writer(Cursor::new(Vec::new())).unwrap();
+    let mut plan = Vec::new();
+    while let Some(info) = writer.next_entry() {
+        plan.push(info.name.clone());
+        let bytes = info.asset_path.as_deref().and_then(provider);
+        writer.write_current(bytes.as_deref()).unwrap();
+    }
+    let actual = writer.finish().unwrap().into_inner();
+
+    assert_eq!(
+        actual, expected,
+        "1 エントリずつ書いた EPUB がバッファリング版と一致する"
+    );
+
+    let mut archive = ZipArchive::new(Cursor::new(actual)).unwrap();
+    let archive_names: Vec<String> = (0..archive.len())
+        .map(|index| archive.by_index(index).unwrap().name().to_string())
+        .collect();
+    assert_eq!(plan, archive_names, "計画の順序が ZIP のエントリ順と一致する");
+}
