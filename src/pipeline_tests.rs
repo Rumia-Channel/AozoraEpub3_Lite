@@ -436,3 +436,46 @@ fn collects_and_reflows_images_from_a_file_source() {
         "大きい挿絵は単ページ画像になる: {body}"
     );
 }
+
+#[test]
+fn incremental_metadata_keeps_pending_asset_and_cover_boundary() {
+    let text = "題名\n著者\n［＃挿絵（small.png）入る］\n［＃挿絵（cover.png）入る］\n";
+    let source = MemorySource::new(&[
+        ("dir/book.txt", text.as_bytes().to_vec()),
+        ("dir/small.png", png_header(64, 80)),
+        ("dir/cover.png", png_header(65, 65)),
+    ]);
+    let input = Input::from_source(std::sync::Arc::new(source)).unwrap();
+    let entry = &input.text_entries()[0];
+    let mut plan = plan_assets(&input, entry, text, Some("0"), None).unwrap();
+    let error = plan.provide_dimensions(None).err().unwrap();
+    assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(plan.next_request().unwrap().unwrap().source, "dir/small.png");
+    let error = plan.next_request().err().unwrap();
+    assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::InvalidInput);
+    plan.provide_dimensions(Some(ImageDimensions { width: 64, height: 80 })).unwrap();
+    assert_eq!(plan.next_request().unwrap().unwrap().source, "dir/cover.png");
+    plan.provide_dimensions(Some(ImageDimensions { width: 65, height: 65 })).unwrap();
+    assert!(plan.next_request().unwrap().is_none());
+    let (assets, cover) = plan.complete().unwrap();
+    assert_eq!(cover.as_deref(), Some("image/0002.png"));
+    assert!(!assets[0].is_cover);
+    assert!(assets[1].is_cover);
+}
+
+#[test]
+fn body_metadata_failure_precedes_later_cover_validation() {
+    let text = "題名\n著者\n［＃挿絵（body.png）入る］\n";
+    let source = MemorySource::new(&[
+        ("dir/book.txt", text.as_bytes().to_vec()),
+        ("dir/body.png", png_header(100, 200)),
+    ]);
+    let input = Input::from_source(std::sync::Arc::new(source)).unwrap();
+    let entry = &input.text_entries()[0];
+    let error = plan_assets(&input, entry, text, Some("../escape.png"), None).unwrap()
+        .finish(|_| Err(io::Error::new(io::ErrorKind::BrokenPipe, "metadata unavailable").into()))
+        .err().unwrap();
+    assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::BrokenPipe);
+    let error = plan_assets(&input, entry, text, None, None).unwrap().complete().err().unwrap();
+    assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::InvalidInput);
+}

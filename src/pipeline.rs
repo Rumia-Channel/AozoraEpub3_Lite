@@ -237,6 +237,289 @@ pub struct CollectedAsset {
     /// 本文中の挿絵で条件を分けて設定する。
     pub rotate: i32,
 }
+
+/// Borrowed metadata request for a planned image, in EPUB asset order.
+#[derive(Clone, Copy)]
+pub struct AssetMetadataRequest<'a> {
+    pub source: &'a str,
+    pub media_type: &'a str,
+    /// Actual filesystem path, or `None` when the image is read through [`Input`].
+    pub filesystem_path: Option<&'a Path>,
+}
+
+/// Incremental image plan that resolves one asset before requesting its metadata.
+pub struct AssetPlan<'a> {
+    input: &'a Input,
+    entry: &'a TextEntry,
+    base: &'a Path,
+    cover: Option<&'a str>,
+    body: Option<&'a str>,
+    references: std::vec::IntoIter<String>,
+    assets: Vec<CollectedAsset>,
+    cover_asset: Option<String>,
+    auto_cover: bool,
+    image_index: usize,
+    pending: Option<AssetOrigin>,
+    phase: AssetPlanPhase,
+}
+
+enum AssetOrigin {
+    Input,
+    Filesystem(PathBuf),
+}
+
+enum AssetPlanPhase {
+    Body,
+    Cover,
+    Complete,
+    Failed,
+}
+
+impl AssetPlan<'_> {
+    /// Resolves the next unique body image, then any explicit cover, without
+    /// reading image data. Commit each request with [`Self::provide_dimensions`]
+    /// before advancing. `None` marks the plan complete.
+    pub fn next_request(
+        &mut self,
+    ) -> Result<Option<AssetMetadataRequest<'_>>, Box<dyn Error>> {
+        if self.pending.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "asset metadata must be provided before requesting the next asset",
+            )
+            .into());
+        }
+        if matches!(self.phase, AssetPlanPhase::Failed) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "asset planning has already failed",
+            )
+            .into());
+        }
+        if let Err(error) = self.plan_next() {
+            self.phase = AssetPlanPhase::Failed;
+            return Err(error);
+        }
+        let Some(origin) = &self.pending else {
+            self.phase = AssetPlanPhase::Complete;
+            return Ok(None);
+        };
+        let asset = self.assets.last().expect("pending asset exists");
+        Ok(Some(AssetMetadataRequest {
+            source: &asset.source,
+            media_type: &asset.asset.media_type,
+            filesystem_path: match origin {
+                AssetOrigin::Input => None,
+                AssetOrigin::Filesystem(path) => Some(path),
+            },
+        }))
+    }
+
+    /// Commits dimensions for the pending request and selects an eligible auto cover.
+    pub fn provide_dimensions(
+        &mut self,
+        dimensions: Option<ImageDimensions>,
+    ) -> Result<(), Box<dyn Error>> {
+        if self.pending.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "no asset metadata request is pending",
+            )
+            .into());
+        }
+        let asset = self.assets.last_mut().expect("pending asset exists");
+        asset.dimensions = dimensions;
+        if self.auto_cover
+            && self.cover_asset.is_none()
+            && dimensions.is_some_and(|dimensions| dimensions.width > 64 && dimensions.height > 64)
+        {
+            asset.is_cover = true;
+        }
+        if asset.is_cover {
+            self.cover_asset = Some(asset.asset.path.clone());
+        }
+        self.pending = None;
+        Ok(())
+    }
+
+    /// Returns the assets only after [`Self::next_request`] has yielded `None`.
+    pub fn complete(
+        self,
+    ) -> Result<(Vec<CollectedAsset>, Option<String>), Box<dyn Error>> {
+        if !matches!(self.phase, AssetPlanPhase::Complete) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "asset planning is not complete",
+            )
+            .into());
+        }
+        Ok((self.assets, self.cover_asset))
+    }
+
+    /// Resolves and reads dimensions one asset at a time, preserving collector ordering.
+    pub fn finish(
+        mut self,
+        mut dimensions: impl FnMut(
+            AssetMetadataRequest<'_>,
+        ) -> Result<Option<ImageDimensions>, Box<dyn Error>>,
+    ) -> Result<(Vec<CollectedAsset>, Option<String>), Box<dyn Error>> {
+        while let Some(request) = self.next_request()? {
+            let metadata = dimensions(request)?;
+            self.provide_dimensions(metadata)?;
+        }
+        self.complete()
+    }
+
+    fn plan_next(&mut self) -> Result<(), Box<dyn Error>> {
+        if !matches!(self.phase, AssetPlanPhase::Body) {
+            return Ok(());
+        }
+        while let Some(reference) = self.references.next() {
+            if let Some(body) = self.body
+                && !body.contains(&format!("../image/{}", escape_html(&reference)))
+            {
+                continue;
+            }
+            self.image_index += 1;
+            // 画像の解決はアーカイブ (ZIP/TXTZ/CBZ) と FileSource 入力では Input
+            // 経由、素の TXT 入力では入力ファイルの隣のファイルシステム経由。
+            let from_input = self.input.is_archive() || self.input.has_source();
+            let original_available = if from_input {
+                self.input.resolve_image_path(self.entry, &reference).is_some()
+            } else {
+                self.base.join(reference.replace('\\', "/")).is_file()
+            };
+            let source_path = if from_input {
+                self.input.resolve_image_path(self.entry, &reference)
+            } else {
+                resolve_fs_image_path(self.base, &reference)?
+            };
+            let Some(source_path) = source_path else {
+                continue;
+            };
+            if let Some(existing) = self
+                .assets
+                .iter_mut()
+                .find(|asset| asset.source == source_path)
+            {
+                existing.references.push(reference);
+                existing.available.push(original_available);
+                continue;
+            }
+            let extension = source_path
+                .rsplit_once('.')
+                .map(|(_, extension)| extension)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let media_type = media_type_for_extension(&extension).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unsupported image type: {reference}"),
+                )
+            })?;
+            let output_name = format!("{:04}.{}", self.image_index, extension.replace("jpeg", "jpg"));
+            let epub_path = format!("image/{output_name}");
+            self.pending = Some(if from_input {
+                AssetOrigin::Input
+            } else {
+                AssetOrigin::Filesystem(self.base.join(source_path.replace('\\', "/")))
+            });
+            self.assets.push(CollectedAsset {
+                asset: EpubAsset::lazy(epub_path, media_type),
+                references: vec![reference],
+                available: vec![original_available],
+                source: source_path,
+                resolved: output_name,
+                dimensions: None,
+                is_cover: false,
+                rotate: 0,
+            });
+            return Ok(());
+        }
+
+        self.phase = AssetPlanPhase::Cover;
+        match self.cover {
+            Some(value) if is_auto_cover(Some(value)) || is_no_cover(value) => {}
+            Some(value) if is_same_name_cover(value) => {
+                let Some((source, extension)) = same_name_image(self.input.path()) else {
+                    eprintln!(
+                        "[WARN] cover image not found next to: {}",
+                        self.input.path().display()
+                    );
+                    return Ok(());
+                };
+                let extension = extension.to_ascii_lowercase();
+                let media_type = media_type_for_extension(&extension).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("unsupported cover image type: {extension}"),
+                    )
+                })?;
+                let output_name = format!(
+                    "{:04}.{}",
+                    self.image_index + 1,
+                    extension.replace("jpeg", "jpg")
+                );
+                let epub_path = format!("image/{output_name}");
+                self.assets.push(CollectedAsset {
+                    asset: EpubAsset::lazy(epub_path, media_type),
+                    references: Vec::new(),
+                    available: Vec::new(),
+                    source: source.to_string_lossy().replace('\\', "/"),
+                    resolved: output_name,
+                    dimensions: None,
+                    is_cover: true,
+                    rotate: 0,
+                });
+                self.pending = Some(AssetOrigin::Filesystem(source));
+            }
+            Some(path) if !is_external_reference(path) => {
+                let normalized = normalize_relative_path(path)?;
+                let source = self.base.join(&normalized);
+                if source.is_file() {
+                    let extension = source
+                        .extension()
+                        .and_then(OsStr::to_str)
+                        .unwrap_or_default()
+                        .to_ascii_lowercase();
+                    let media_type = media_type_for_extension(&extension).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("unsupported cover image type: {extension}"),
+                        )
+                    })?;
+                    let output_name = format!(
+                        "{:04}.{}",
+                        self.image_index + 1,
+                        extension.replace("jpeg", "jpg")
+                    );
+                    let epub_path = format!("image/{output_name}");
+                    self.assets.push(CollectedAsset {
+                        asset: EpubAsset::lazy(epub_path, media_type),
+                        references: Vec::new(),
+                        available: Vec::new(),
+                        source: normalized,
+                        resolved: output_name,
+                        dimensions: None,
+                        is_cover: true,
+                        rotate: 0,
+                    });
+                    self.pending = Some(AssetOrigin::Filesystem(source));
+                } else {
+                    eprintln!("[WARN] cover image file not found: {path}");
+                }
+            }
+            Some(_) => {
+                eprintln!(
+                    "[WARN] external cover references are not supported: {:?}",
+                    self.cover
+                );
+            }
+            None => {}
+        }
+        Ok(())
+    }
+}
 /// Collects EPUB assets for all image references in the text (plus the
 /// cover image), resolving against the filesystem for TXT inputs or against
 /// the archive for ZIP/TXTZ/CBZ inputs. Only dimensions are kept; the image
@@ -252,163 +535,46 @@ pub fn collect_assets(
     cover: Option<&str>,
     body: Option<&str>,
 ) -> Result<(Vec<CollectedAsset>, Option<String>), Box<dyn Error>> {
-    let base = input.path().parent().unwrap_or_else(|| Path::new("."));
-    let mut assets: Vec<CollectedAsset> = Vec::new();
-    let mut cover_asset = None;
-    let mut image_index = 0usize;
-
-    for reference in image_reference_occurrences(text) {
-        if let Some(body) = body
-            && !body.contains(&format!("../image/{}", escape_html(&reference)))
-        {
-            continue;
-        }
-        image_index += 1;
-        // 画像の解決はアーカイブ (ZIP/TXTZ/CBZ) と FileSource 入力では Input
-        // 経由、素の TXT 入力では入力ファイルの隣のファイルシステム経由。
-        let from_input = input.is_archive() || input.has_source();
-        let original_available = if from_input {
-            input.resolve_image_path(entry, &reference).is_some()
+    plan_assets(input, entry, text, cover, body)?.finish(|request| {
+        let data = if let Some(path) = request.filesystem_path {
+            fs::read(path)?
         } else {
-            base.join(reference.replace('\\', "/")).is_file()
-        };
-        let source_path = if from_input {
-            input.resolve_image_path(entry, &reference)
-        } else {
-            resolve_fs_image_path(base, &reference)?
-        };
-        let Some(source_path) = source_path else {
-            continue;
-        };
-        if let Some(existing) = assets.iter_mut().find(|asset| asset.source == source_path) {
-            existing.references.push(reference);
-            existing.available.push(original_available);
-            continue;
-        }
-        let extension = source_path
-            .rsplit_once('.')
-            .map(|(_, extension)| extension)
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let media_type = media_type_for_extension(&extension).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("unsupported image type: {reference}"),
-            )
-        })?;
-        // 寸法と表紙判定のためだけに1枚だけ読み、バイトは保持しない
-        let data = if from_input {
-            input.read_image(&source_path)?.ok_or_else(|| {
+            input.read_image(request.source)?.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
-                    format!("image entry not found: {source_path}"),
+                    format!("image entry not found: {}", request.source),
                 )
             })?
-        } else {
-            fs::read(base.join(source_path.replace('\\', "/")))?
         };
-        let dimensions = image_dimensions(&data, media_type);
-        let output_name = format!("{:04}.{}", image_index, extension.replace("jpeg", "jpg"));
-        let epub_path = format!("image/{output_name}");
-        let is_cover = is_auto_cover(cover)
-            && cover_asset.is_none()
-            && dimensions.is_some_and(|dimensions| dimensions.width > 64 && dimensions.height > 64);
-        if is_cover {
-            cover_asset = Some(epub_path.clone());
-        }
-        assets.push(CollectedAsset {
-            asset: EpubAsset::lazy(epub_path, media_type),
-            references: vec![reference],
-            available: vec![original_available],
-            source: source_path,
-            resolved: output_name,
-            dimensions,
-            is_cover,
-            rotate: 0,
-        });
-    }
+        Ok(image_dimensions(&data, request.media_type))
+    })
+}
 
-    match cover {
-        Some(value) if is_auto_cover(Some(value)) || is_no_cover(value) => {}
-        Some(value) if is_same_name_cover(value) => {
-            let Some((source, extension)) = same_name_image(input.path()) else {
-                eprintln!(
-                    "[WARN] cover image not found next to: {}",
-                    input.path().display()
-                );
-                return Ok((assets, cover_asset));
-            };
-            let extension = extension.to_ascii_lowercase();
-            let media_type = media_type_for_extension(&extension).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("unsupported cover image type: {extension}"),
-                )
-            })?;
-            let data = fs::read(&source)?;
-            let dimensions = image_dimensions(&data, media_type);
-            let output_name = format!(
-                "{:04}.{}",
-                image_index + 1,
-                extension.replace("jpeg", "jpg")
-            );
-            let epub_path = format!("image/{output_name}");
-            assets.push(CollectedAsset {
-                asset: EpubAsset::lazy(epub_path.clone(), media_type),
-                references: Vec::new(),
-                available: Vec::new(),
-                source: source.to_string_lossy().replace('\\', "/"),
-                resolved: output_name,
-                dimensions,
-                is_cover: true,
-                rotate: 0,
-            });
-            cover_asset = Some(epub_path);
-        }
-        Some(path) if !is_external_reference(path) => {
-            let normalized = normalize_relative_path(path)?;
-            let source = base.join(&normalized);
-            if source.is_file() {
-                let extension = source
-                    .extension()
-                    .and_then(OsStr::to_str)
-                    .unwrap_or_default()
-                    .to_ascii_lowercase();
-                let media_type = media_type_for_extension(&extension).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("unsupported cover image type: {extension}"),
-                    )
-                })?;
-                let data = fs::read(&source)?;
-                let dimensions = image_dimensions(&data, media_type);
-                let output_name = format!(
-                    "{:04}.{}",
-                    image_index + 1,
-                    extension.replace("jpeg", "jpg")
-                );
-                let epub_path = format!("image/{output_name}");
-                assets.push(CollectedAsset {
-                    asset: EpubAsset::lazy(epub_path.clone(), media_type),
-                    references: Vec::new(),
-                    available: Vec::new(),
-                    source: normalized,
-                    resolved: output_name,
-                    dimensions,
-                    is_cover: true,
-                    rotate: 0,
-                });
-                cover_asset = Some(epub_path);
-            } else {
-                eprintln!("[WARN] cover image file not found: {path}");
-            }
-        }
-        Some(_) => {
-            eprintln!("[WARN] external cover references are not supported: {cover:?}");
-        }
-        None => {}
-    }
-    Ok((assets, cover_asset))
+/// Starts the same image collection as [`collect_assets`], without resolving
+/// sources or reading image data ahead of their metadata requests. Use
+/// [`AssetPlan::next_request`] / [`AssetPlan::provide_dimensions`] for asynchronous
+/// metadata reads, or [`AssetPlan::finish`] for a synchronous callback.
+pub fn plan_assets<'a>(
+    input: &'a Input,
+    entry: &'a TextEntry,
+    text: &str,
+    cover: Option<&'a str>,
+    body: Option<&'a str>,
+) -> Result<AssetPlan<'a>, Box<dyn Error>> {
+    Ok(AssetPlan {
+        input,
+        entry,
+        base: input.path().parent().unwrap_or_else(|| Path::new(".")),
+        cover,
+        body,
+        references: image_reference_occurrences(text).into_iter(),
+        assets: Vec::new(),
+        cover_asset: None,
+        auto_cover: is_auto_cover(cover),
+        image_index: 0,
+        pending: None,
+        phase: AssetPlanPhase::Body,
+    })
 }
 /// Resolves an image reference against the filesystem, mirroring the
 /// previous behavior: exact file, then same-stem candidates with a
