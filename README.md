@@ -294,6 +294,10 @@ book.write_to_stream_with(response_body, |epub_path| {
 
 入力側もローカル ZIP ではなくオブジェクトストレージなどから読みたい場合は、`FileSource` を実装して `Input::from_source` に渡せます。
 
+挿絵の寸法を非同期ストレージから取得する場合は `pipeline::plan_assets` を使います。`AssetPlan::next_request` は元の画像パス・MIME 型・ローカル入力の場合の実パスを返し、画像バイトを読みません。寸法を `provide_dimensions` で渡してから次の画像へ進み、`next_request` が `None` を返したら `complete` で `CollectedAsset` と表紙パスを受け取ります。画像は 1 枚ずつ取得して寸法を読んだ後に解放でき、画素処理は書き出し時まで延期できます。
+
+同期入力の `collect_assets` も同じプランを使うため、連番・重複参照・表紙選択・エラーの順序は共通です。同期の独自寸法プロバイダーには `AssetPlan::finish` を使えます。寸法不明は `provide_dimensions(None)` で表しますが、画像の読み取り失敗は別途呼び出し側で扱ってください。未完了プランの `complete`、寸法待ちのままの次の要求、要求なしの寸法登録はエラーになります。
+
 ## Java 版 AozoraEpub3 との関係
 
 このプロジェクトは、次の実装を参照・移植しています。
