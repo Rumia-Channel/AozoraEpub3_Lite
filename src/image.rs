@@ -1,11 +1,17 @@
 use crate::config::IniSettings;
 use image::codecs::jpeg::JpegEncoder;
-use image::imageops::{self, FilterType};
+use image::Pixel;
 use image::{
     DynamicImage, ExtendedColorType, GenericImageView, ImageEncoder, ImageFormat, ImageReader,
 };
 use std::fmt;
 use std::io::Cursor;
+
+#[path = "image_animation.rs"]
+mod animation;
+#[path = "image_pixels.rs"]
+mod pixels;
+pub use pixels::{RgbaRows, RowDepth, SourceRows};
 
 #[derive(Debug)]
 pub enum ImageError {
@@ -179,77 +185,282 @@ pub fn process(
     if !options.changes_pixels() {
         return Ok(data.to_vec());
     }
-    let source = image::load_from_memory_with_format(data, format)
-        .map_err(|error| ImageError::Decode(error.to_string()))?;
-    let (source_width, source_height) = source.dimensions();
-    if source_width == 0 || source_height == 0 {
-        return Err(ImageError::InvalidDimensions);
-    }
-
-    let margins = if options.auto_margin_limit_h > 0 || options.auto_margin_limit_v > 0 {
-        plain_margin(&source, options)
-    } else {
-        None
-    };
-    let margins = margins.map(|mut margins| {
-        adjust_margin_for_display(
-            &mut margins,
-            source_width,
-            source_height,
-            options.display_width,
-            options.display_height,
-        );
-        margins
-    });
-    let has_margins = margins.is_some();
-    let (mut image, width, height) = if let Some(margins) = margins {
-        let width = source_width.saturating_sub(margins.left.saturating_add(margins.right));
-        let height = source_height.saturating_sub(margins.top.saturating_add(margins.bottom));
-        if width == 0 || height == 0 {
-            (source, source_width, source_height)
-        } else {
-            (
-                source.crop_imm(margins.left, margins.top, width, height),
-                width,
-                height,
-            )
-        }
-    } else {
-        (source, source_width, source_height)
-    };
-
-    let mut scale = 1.0_f64;
-    if options.max_width > 0 {
-        scale = scale.min(options.max_width as f64 / width as f64);
-    }
-    if options.max_height > 0 {
-        scale = scale.min(options.max_height as f64 / height as f64);
-    }
-    if !scale.is_finite() || scale <= 0.0 {
-        return Err(ImageError::InvalidDimensions);
-    }
-    if scale >= 1.0 && !has_margins && options.rotate == 0 && options.gamma.is_none() {
+    if options.rotate == 0 && options.gamma.is_none()
+        && options.auto_margin_limit_h == 0 && options.auto_margin_limit_v == 0
+        && dimensions(data, media_type).is_some_and(|(width, height)| {
+            (options.max_width == 0 || width <= options.max_width)
+                && (options.max_height == 0 || height <= options.max_height)
+        })
+    {
         return Ok(data.to_vec());
     }
-    if options.rotate == 90 {
-        image = image::DynamicImage::ImageRgba8(imageops::rotate90(&image));
-    } else if options.rotate == -90 {
-        image = image::DynamicImage::ImageRgba8(imageops::rotate270(&image));
+    if let Some(output) = animation::process(data, format, options)? {
+        return Ok(output);
     }
-    if scale < 1.0 {
-        let scaled_width = ((width as f64 * scale) + 0.5).floor().max(1.0) as u32;
-        let scaled_height = ((height as f64 * scale) + 0.5).floor().max(1.0) as u32;
-        let (scaled_width, scaled_height) = if options.rotate != 0 {
-            (scaled_height, scaled_width)
+    let source = image::load_from_memory_with_format(data, format)
+        .map_err(|error| ImageError::Decode(error.to_string()))?;
+    let (image, changed) = transform(source, options)?;
+    if changed {
+        encode(&image, format, options.jpeg_quality)
+    } else {
+        Ok(data.to_vec())
+    }
+}
+
+/// Whether the configured operation needs pixels. A resize that already fits is
+/// a byte-preserving transfer, including every APNG/GIF/WebP frame and ancillary chunk.
+pub fn needs_pixel_transform(
+    ini: &IniSettings,
+    cover: bool,
+    rotate: i32,
+    dimensions: (u32, u32),
+) -> bool {
+    let options = ImageOptions::from_ini(ini, cover, rotate);
+    options.rotate != 0 || options.gamma.is_some()
+        || options.auto_margin_limit_h > 0 || options.auto_margin_limit_v > 0
+        || (options.max_width > 0 && dimensions.0 > options.max_width)
+        || (options.max_height > 0 && dimensions.1 > options.max_height)
+}
+
+/// Transforms one composited frame. Ownership is transferred to avoid a decoded
+/// pixel copy; animation consumers retain timing/disposal metadata themselves.
+pub fn transform_frame(
+    source: DynamicImage,
+    ini: &IniSettings,
+    cover: bool,
+    rotate: i32,
+) -> Result<DynamicImage, ImageError> {
+    transform(source, ImageOptions::from_ini(ini, cover, rotate)).map(|(image, _)| image)
+}
+
+/// Metadata-only geometry pass for an animation. Auto-margin cropping uses the
+/// intersection of safe margins across frames, not independent moving canvases.
+pub struct AnimationTransform {
+    options: ImageOptions,
+    dimensions: Option<(u32, u32)>,
+    margins: Option<Margins>,
+    frames: u32,
+}
+
+impl AnimationTransform {
+    pub fn new(ini: &IniSettings, cover: bool, rotate: i32) -> Self {
+        Self::with_options(ImageOptions::from_ini(ini, cover, rotate))
+    }
+
+    fn with_options(options: ImageOptions) -> Self {
+        Self { options, dimensions: None, margins: None, frames: 0 }
+    }
+
+    /// Initializes a fixed-canvas transform without decoding or copying pixels.
+    /// Auto-margin requires `observe` instead, because its geometry depends on content.
+    pub fn from_dimensions(
+        ini: &IniSettings, cover: bool, rotate: i32, dimensions: (u32, u32),
+    ) -> Result<Self, ImageError> {
+        let options = ImageOptions::from_ini(ini, cover, rotate);
+        if dimensions.0 == 0 || dimensions.1 == 0 {
+            return Err(ImageError::InvalidDimensions);
+        }
+        if options.auto_margin_limit_h > 0 || options.auto_margin_limit_v > 0 {
+            return Err(ImageError::Decode("automatic margins require a frame geometry pass".to_owned()));
+        }
+        Ok(Self { options, dimensions: Some(dimensions), margins: None, frames: 0 })
+    }
+
+    pub fn observe(&mut self, source: &DynamicImage) -> Result<(), ImageError> {
+        let dimensions = source.dimensions();
+        if dimensions.0 == 0 || dimensions.1 == 0
+            || self.dimensions.is_some_and(|expected| expected != dimensions) {
+            return Err(ImageError::InvalidDimensions);
+        }
+        let margins = frame_margins(source, self.options);
+        self.margins = if self.frames == 0 {
+            margins
         } else {
-            (scaled_width, scaled_height)
+            self.margins.zip(margins).map(|(left, right)| Margins {
+                left: left.left.min(right.left),
+                top: left.top.min(right.top),
+                right: left.right.min(right.right),
+                bottom: left.bottom.min(right.bottom),
+            })
         };
-        image = image.resize_exact(scaled_width, scaled_height, FilterType::CatmullRom);
+        self.dimensions = Some(dimensions);
+        self.frames = self.frames.checked_add(1).ok_or(ImageError::InvalidDimensions)?;
+        Ok(())
     }
+
+    pub fn frame_count(&self) -> u32 {
+        self.frames
+    }
+
+    pub fn apply(&self, source: DynamicImage) -> Result<DynamicImage, ImageError> {
+        if self.dimensions != Some(source.dimensions()) {
+            return Err(ImageError::InvalidDimensions);
+        }
+        transform_with_margins(source, self.options, self.margins).map(|(image, _)| image)
+    }
+
+    /// Samples a retained compositing canvas without cloning it. Only the target
+    /// image and row-sized Catmull-Rom scratch are allocated.
+    pub fn apply_ref(&self, source: &DynamicImage) -> Result<DynamicImage, ImageError> {
+        if self.dimensions != Some(source.dimensions()) {
+            return Err(ImageError::InvalidDimensions);
+        }
+        let geometry = TransformGeometry::new(source.dimensions(), self.options, self.margins)?;
+        let mut output = pixels::borrowed(source, geometry)?;
+        if let Some(gamma) = self.options.gamma {
+            apply_gamma(&mut output, gamma)?;
+        }
+        Ok(output)
+    }
+
+    /// Streams transformed RGBA8 rows while preserving the caller's compositing
+    /// canvas. Pull and encode one row before requesting the next.
+    pub fn rgba_rows<'a>(&self, source: &'a image::RgbaImage) -> Result<RgbaRows<'a>, ImageError> {
+        if self.dimensions != Some(source.dimensions()) {
+            return Err(ImageError::InvalidDimensions);
+        }
+        let geometry = TransformGeometry::new(source.dimensions(), self.options, self.margins)?;
+        RgbaRows::new(source, geometry, self.options.gamma)
+    }
+
+    /// Owned-source variant for asynchronous state machines. RGB/gray sources
+    /// are expanded one row at a time, never into another full RGBA canvas.
+    pub fn rgba_rows_owned(
+        &self, source: std::sync::Arc<DynamicImage>,
+    ) -> Result<RgbaRows<'static>, ImageError> {
+        if self.dimensions != Some(source.dimensions()) {
+            return Err(ImageError::InvalidDimensions);
+        }
+        let geometry = TransformGeometry::new(source.dimensions(), self.options, self.margins)?;
+        RgbaRows::new_owned(source, geometry, self.options.gamma)
+    }
+
+    /// Conservative requested Rust storage for a transformed-row iterator,
+    /// excluding its source, codec buffers, and allocator/runtime overhead.
+    /// This performs no allocation and may be used for memory admission.
+    pub fn row_memory_bytes(&self) -> Result<u64, ImageError> {
+        let dimensions = self.dimensions.ok_or(ImageError::InvalidDimensions)?;
+        let geometry = TransformGeometry::new(dimensions, self.options, self.margins)?;
+        pixels::row_memory_bytes(geometry)
+    }
+
+    /// Converts ascending RGBA source rows without allocating a source canvas.
+    /// Crop/rotation require the replayable or retained-canvas APIs instead.
+    pub fn source_rows(&self, depth: RowDepth) -> Result<SourceRows, ImageError> {
+        let dimensions = self.dimensions.ok_or(ImageError::InvalidDimensions)?;
+        let geometry = TransformGeometry::new(dimensions, self.options, self.margins)?;
+        SourceRows::new(dimensions, geometry, depth, self.options.gamma)
+    }
+
+    /// Allocation-free bound for `source_rows`, excluding caller-owned input
+    /// rows, codec buffers, and allocator/runtime overhead.
+    pub fn source_row_memory_bytes(&self, depth: RowDepth) -> Result<u64, ImageError> {
+        let dimensions = self.dimensions.ok_or(ImageError::InvalidDimensions)?;
+        let geometry = TransformGeometry::new(dimensions, self.options, self.margins)?;
+        pixels::source_row_memory_bytes(dimensions, geometry, depth)
+    }
+}
+
+fn transform(source: DynamicImage, options: ImageOptions) -> Result<(DynamicImage, bool), ImageError> {
+    let margins = frame_margins(&source, options);
+    transform_with_margins(source, options, margins)
+}
+
+fn frame_margins(source: &DynamicImage, options: ImageOptions) -> Option<Margins> {
+    if options.auto_margin_limit_h > 0 || options.auto_margin_limit_v > 0 {
+        plain_margin(source, options)
+    } else {
+        None
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TransformGeometry {
+    left: u32,
+    top: u32,
+    width: u32,
+    height: u32,
+    rotate: i32,
+    output_width: u32,
+    output_height: u32,
+}
+
+impl TransformGeometry {
+    fn new(dimensions: (u32, u32), options: ImageOptions, margins: Option<Margins>) -> Result<Self, ImageError> {
+        let (source_width, source_height) = dimensions;
+        if source_width == 0 || source_height == 0 {
+            return Err(ImageError::InvalidDimensions);
+        }
+        let mut geometry = Self {
+            left: 0, top: 0, width: source_width, height: source_height,
+            rotate: options.rotate, output_width: source_width, output_height: source_height,
+        };
+        if let Some(mut margins) = margins {
+            adjust_margin_for_display(&mut margins, source_width, source_height,
+                options.display_width, options.display_height);
+            let width = source_width.saturating_sub(margins.left.saturating_add(margins.right));
+            let height = source_height.saturating_sub(margins.top.saturating_add(margins.bottom));
+            if width != 0 && height != 0 {
+                geometry.left = margins.left;
+                geometry.top = margins.top;
+                geometry.width = width;
+                geometry.height = height;
+            }
+        }
+        let mut scale = 1.0_f64;
+        if options.max_width > 0 {
+            scale = scale.min(options.max_width as f64 / geometry.width as f64);
+        }
+        if options.max_height > 0 {
+            scale = scale.min(options.max_height as f64 / geometry.height as f64);
+        }
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(ImageError::InvalidDimensions);
+        }
+        geometry.output_width = ((geometry.width as f64 * scale) + 0.5).floor().max(1.0) as u32;
+        geometry.output_height = ((geometry.height as f64 * scale) + 0.5).floor().max(1.0) as u32;
+        if options.rotate == 90 || options.rotate == -90 {
+            std::mem::swap(&mut geometry.output_width, &mut geometry.output_height);
+        }
+        Ok(geometry)
+    }
+
+    fn rotated_dimensions(self) -> (u32, u32) {
+        if self.rotate == 90 || self.rotate == -90 {
+            (self.height, self.width)
+        } else {
+            (self.width, self.height)
+        }
+    }
+
+    fn source_coordinates(self, x: u32, y: u32) -> (u32, u32) {
+        let (x, y) = match self.rotate {
+            90 => (y, self.height - 1 - x),
+            -90 => (self.width - 1 - y, x),
+            _ => (x, y),
+        };
+        (x + self.left, y + self.top)
+    }
+}
+
+fn transform_with_margins(
+    source: DynamicImage,
+    options: ImageOptions,
+    margins: Option<Margins>,
+) -> Result<(DynamicImage, bool), ImageError> {
+    let dimensions = source.dimensions();
+    let geometry = TransformGeometry::new(dimensions, options, margins)?;
+    let changed = geometry.left != 0 || geometry.top != 0
+        || (geometry.width, geometry.height) != dimensions || geometry.rotate != 0
+        || (geometry.output_width, geometry.output_height) != dimensions || options.gamma.is_some();
+    if !changed {
+        return Ok((source, false));
+    }
+    let mut output = pixels::owned(source, geometry)?;
     if let Some(gamma) = options.gamma {
-        apply_gamma(&mut image, gamma);
+        apply_gamma(&mut output, gamma)?;
     }
-    encode(&image, format, options.jpeg_quality)
+    Ok((output, true))
 }
 
 fn encode(
@@ -276,16 +487,54 @@ fn encode(
     Ok(output.into_inner())
 }
 
-fn apply_gamma(image: &mut DynamicImage, gamma: f32) {
+fn apply_gamma(image: &mut DynamicImage, gamma: f32) -> Result<(), ImageError> {
     let exponent = 1.0 / gamma;
-    let mut rgba = image.to_rgba8();
-    for pixel in rgba.pixels_mut() {
-        for channel in &mut pixel.0[..3] {
-            let value = f32::from(*channel) / 255.0;
-            *channel = (255.0 * value.powf(exponent)).round().clamp(0.0, 255.0) as u8;
-        }
+    let mut table = [0u8; 256];
+    for (value, mapped) in table.iter_mut().enumerate() {
+        *mapped = (255.0 * (value as f32 / 255.0).powf(exponent)).round().clamp(0.0, 255.0) as u8;
     }
-    *image = DynamicImage::ImageRgba8(rgba);
+    macro_rules! gamma8 {
+        ($buffer:expr, $colors:expr) => {
+            for pixel in $buffer.pixels_mut() {
+                for channel in &mut pixel.channels_mut()[..$colors] {
+                    *channel = table[usize::from(*channel)];
+                }
+            }
+        };
+    }
+    macro_rules! gamma16 {
+        ($buffer:expr, $colors:expr) => {
+            for pixel in $buffer.pixels_mut() {
+                for channel in &mut pixel.channels_mut()[..$colors] {
+                    *channel = (65535.0 * (f32::from(*channel) / 65535.0).powf(exponent))
+                        .round().clamp(0.0, 65535.0) as u16;
+                }
+            }
+        };
+    }
+    macro_rules! gamma_float {
+        ($buffer:expr) => {
+            for pixel in $buffer.pixels_mut() {
+                for channel in &mut pixel.channels_mut()[..3] {
+                    *channel = (*channel).clamp(0.0, 1.0).powf(exponent);
+                }
+            }
+        };
+    }
+    match image {
+        DynamicImage::ImageLuma8(buffer) => gamma8!(buffer, 1),
+        DynamicImage::ImageLumaA8(buffer) => gamma8!(buffer, 1),
+        DynamicImage::ImageRgb8(buffer) => gamma8!(buffer, 3),
+        DynamicImage::ImageRgba8(buffer) => gamma8!(buffer, 3),
+        DynamicImage::ImageLuma16(buffer) => gamma16!(buffer, 1),
+        DynamicImage::ImageLumaA16(buffer) => gamma16!(buffer, 1),
+        DynamicImage::ImageRgb16(buffer) => gamma16!(buffer, 3),
+        DynamicImage::ImageRgba16(buffer) => gamma16!(buffer, 3),
+        DynamicImage::ImageRgb32F(buffer) => gamma_float!(buffer),
+        DynamicImage::ImageRgba32F(buffer) => gamma_float!(buffer),
+        other => return Err(ImageError::UnsupportedFormat(format!("pixel format {:?}", other.color()))),
+    }
+    Ok(())
 }
 
 fn plain_margin(image: &DynamicImage, options: ImageOptions) -> Option<Margins> {

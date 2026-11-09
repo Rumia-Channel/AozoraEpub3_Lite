@@ -561,13 +561,25 @@ pub fn plan_assets<'a>(
     cover: Option<&'a str>,
     body: Option<&'a str>,
 ) -> Result<AssetPlan<'a>, Box<dyn Error>> {
+    plan_assets_from_references(input, entry, image_reference_occurrences(text), cover, body)
+}
+
+/// Starts asset planning from occurrence metadata collected while streaming text.
+/// Keep duplicate occurrences: their order determines the Java image numbering.
+pub fn plan_assets_from_references<'a>(
+    input: &'a Input,
+    entry: &'a TextEntry,
+    references: Vec<String>,
+    cover: Option<&'a str>,
+    body: Option<&'a str>,
+) -> Result<AssetPlan<'a>, Box<dyn Error>> {
     Ok(AssetPlan {
         input,
         entry,
         base: input.path().parent().unwrap_or_else(|| Path::new(".")),
         cover,
         body,
-        references: image_reference_occurrences(text).into_iter(),
+        references: references.into_iter(),
         assets: Vec::new(),
         cover_asset: None,
         auto_cover: is_auto_cover(cover),

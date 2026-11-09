@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt;
 use std::io::{self, Seek, Write};
 use std::path::Path;
@@ -249,12 +250,26 @@ fn current_utc_timestamp() -> String {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EpubSection {
     pub body_fragment: String,
+    deferred: bool,
+    image_only: bool,
 }
 
 impl EpubSection {
     pub fn new(body_fragment: impl Into<String>) -> Self {
         Self {
             body_fragment: body_fragment.into(),
+            deferred: false,
+            image_only: false,
+        }
+    }
+
+    /// A body whose XHTML is replayed at write time. No chapter text is retained.
+    /// `image_only` records the fixed-layout SVG classification from the first pass.
+    pub fn deferred(image_only: bool) -> Self {
+        Self {
+            body_fragment: String::new(),
+            deferred: true,
+            image_only,
         }
     }
 }
@@ -580,15 +595,18 @@ impl EpubBook {
     }
 }
 
-/// 1 エントリ分の書き出し内容。
-///
-/// `Inline` は Lite が内容を持っているもの（スタイル・XHTML・OPF など）、
-/// `Asset` は呼び出し側が用意するもの（挿絵など。EPUB 内の名前は `item/{path}`）。
-/// アセットを遅延させることで、挿絵を 1 枚ずつ解決しながら書ける。
+/// An entry plan contains only names and references, never rendered book bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EpubEntrySource {
-    Inline(Vec<u8>),
-    Asset(String),
+    Static(&'static [u8]),
+    Asset(usize),
+    EmbeddedAsset(usize),
+    Section(usize),
+    Cover,
+    TextStyle,
+    Package,
+    Navigation,
+    Ncx,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -599,321 +617,290 @@ pub struct EpubEntry {
 }
 
 impl EpubEntry {
-    /// EPUB 内のエントリ名。
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// 呼び出し側が用意するアセットのパス（`item/` を含まない）。`Inline` なら `None`。
     pub fn asset_path(&self) -> Option<&str> {
         match &self.source {
-            EpubEntrySource::Asset(path) => Some(path),
-            EpubEntrySource::Inline(_) => None,
+            EpubEntrySource::Asset(_) => self.name.strip_prefix("item/"),
+            _ => None,
         }
     }
 }
 
-/// 次に書くエントリの情報。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EpubEntryInfo {
     pub name: String,
-    /// アセットのときだけ入る（呼び出し側がバイト列を用意する）。
+    /// Present only when asset bytes must be supplied by the caller.
     pub asset_path: Option<String>,
+    /// The book section index when its body must be replayed by the caller.
+    pub section_index: Option<usize>,
 }
 
-/// 1 エントリずつ書き進めるライタ。
-///
-/// ZIP のフレーミング（データディスクリプタ付きのストリーミング）は Lite が持ち、
-/// 呼び出し側は [`EpubStreamWriter::next_entry`] で次に何を書くかを知り、アセットの
-/// ときだけバイト列を用意して [`EpubStreamWriter::write_current`] を呼ぶ。挿絵を
-/// 1 枚ずつ読む用途（メモリ上限のある Cloudflare Workers など）を想定している。
+/// A pull-driven ZIP writer. Start an entry, supply bounded chunks, then end it.
+/// The sink is called synchronously for each chunk; callers using an asynchronous
+/// transport must drain that sink before supplying another chunk.
 pub struct EpubStreamWriter<W: Write> {
     archive: ZipWriter<StreamWriter<W>>,
+    book: EpubBook,
     entries: Vec<EpubEntry>,
     index: usize,
+    open: bool,
+    failed: bool,
 }
 
 impl EpubBook {
-    /// 書き出すエントリを順序どおりに列挙する（アセットのバイト列は含まない）。
     pub fn entries(&self) -> Result<Vec<EpubEntry>, EpubError> {
-        entries_for(self)
+        self.validate()?;
+        Ok(entries_for(self))
     }
 
-    /// `sink` へ 1 エントリずつ書き出すライタを作る。
-    pub fn stream_writer<W: Write>(&self, sink: W) -> Result<EpubStreamWriter<W>, EpubError> {
-        self.validate()?;
+    /// Takes ownership so neither chapter fragments nor embedded assets are cloned.
+    pub fn stream_writer<W: Write>(self, sink: W) -> Result<EpubStreamWriter<W>, EpubError> {
+        let entries = self.entries()?;
         Ok(EpubStreamWriter {
             archive: ZipWriter::new_stream(sink),
-            entries: self.entries()?,
+            book: self,
+            entries,
             index: 0,
+            open: false,
+            failed: false,
         })
     }
 }
 
 impl<W: Write> EpubStreamWriter<W> {
-    /// 次に書くエントリ（すべて書き終えていれば `None`）。
     pub fn next_entry(&self) -> Option<EpubEntryInfo> {
         self.entries.get(self.index).map(|entry| EpubEntryInfo {
             name: entry.name.clone(),
-            asset_path: entry.asset_path().map(str::to_string),
+            asset_path: entry.asset_path().map(str::to_owned),
+            section_index: match entry.source {
+                EpubEntrySource::Section(index) if self.book.sections[index].deferred => Some(index),
+                _ => None,
+            },
         })
     }
 
-    /// 現在のエントリを書く。アセットのときは `asset` にバイト列を渡す。
-    pub fn write_current(&mut self, asset: Option<&[u8]>) -> Result<(), EpubError> {
-        let Some(entry) = self.entries.get(self.index) else {
-            return Err(EpubError::InvalidMetadata("write past the last EPUB entry"));
-        };
+    /// Renders only the current generated entry. Deferred sections require the
+    /// replayed fragment; external assets are written directly with `write_chunk`.
+    /// Embedded asset buffers are moved out, so each current entry is rendered once.
+    pub fn render_current(&mut self, section: Option<&str>) -> Result<Vec<u8>, EpubError> {
+        self.check_active()?;
+        let entry = self.entries.get(self.index)
+            .ok_or(EpubError::InvalidMetadata("write past the last EPUB entry"))?;
+        if let EpubEntrySource::EmbeddedAsset(index) = entry.source {
+            let asset = &mut self.book.assets[index];
+            return asset.data.take().ok_or_else(|| EpubError::MissingAsset(asset.path.clone()));
+        }
+        Ok(render_entry(&self.book, entry, section)?.into_owned())
+    }
+
+    pub fn begin_current(&mut self) -> Result<(), EpubError> {
+        self.check_active()?;
+        if self.open {
+            return Err(EpubError::InvalidMetadata("EPUB entry already open"));
+        }
+        let entry = self.entries.get(self.index)
+            .ok_or(EpubError::InvalidMetadata("write past the last EPUB entry"))?;
         let options = SimpleFileOptions::default().compression_method(entry.method);
-        self.archive.start_file(entry.name.as_str(), options)?;
-        match &entry.source {
-            EpubEntrySource::Inline(bytes) => self.archive.write_all(bytes)?,
-            EpubEntrySource::Asset(path) => {
-                let bytes = asset.ok_or_else(|| EpubError::MissingAsset(path.clone()))?;
-                self.archive.write_all(bytes)?;
+        if let Err(error) = self.archive.start_file(entry.name.as_str(), options) {
+            self.failed = true;
+            return Err(error.into());
+        }
+        self.open = true;
+        Ok(())
+    }
+
+    pub fn write_chunk(&mut self, bytes: &[u8]) -> Result<(), EpubError> {
+        self.check_active()?;
+        if !self.open {
+            return Err(EpubError::InvalidMetadata("EPUB entry is not open"));
+        }
+        for chunk in bytes.chunks(64 * 1024) {
+            if let Err(error) = self.archive.write_all(chunk) {
+                self.failed = true;
+                return Err(error.into());
             }
         }
+        Ok(())
+    }
+
+    pub fn end_current(&mut self) -> Result<(), EpubError> {
+        self.check_active()?;
+        if !self.open {
+            return Err(EpubError::InvalidMetadata("EPUB entry is not open"));
+        }
+        // zip finalizes the descriptor at the next start_file (or finish).
+        // Flushing here delivers compressed data before the producer reads ahead.
+        if let Err(error) = self.archive.flush() {
+            self.failed = true;
+            return Err(error.into());
+        }
+        self.open = false;
         self.index += 1;
         Ok(())
     }
 
-    /// セントラルディレクトリを書いて sink を返す。
+    /// Native whole-entry convenience boundary. Streaming consumers use the
+    /// begin/write_chunk/end methods instead.
+    pub fn write_current(&mut self, asset: Option<&[u8]>) -> Result<(), EpubError> {
+        let rendered;
+        let bytes = if let Some(path) = self.next_entry().and_then(|info| info.asset_path) {
+            asset.ok_or(EpubError::MissingAsset(path))?
+        } else {
+            rendered = self.render_current(None)?;
+            &rendered
+        };
+        self.begin_current()?;
+        self.write_chunk(bytes)?;
+        self.end_current()
+    }
+
+    fn check_active(&self) -> Result<(), EpubError> {
+        if self.failed {
+            return Err(EpubError::InvalidMetadata("EPUB writer failed"));
+        }
+        Ok(())
+    }
+
+    /// Incomplete or failed archives are errors, never successful partial books.
     pub fn finish(self) -> Result<W, EpubError> {
+        self.check_active()?;
+        if self.open || self.index != self.entries.len() {
+            return Err(EpubError::InvalidMetadata("EPUB entries are incomplete"));
+        }
         Ok(self.archive.finish()?.into_inner())
     }
 }
 
-fn push_inline(entries: &mut Vec<EpubEntry>, name: &str, content: &[u8], method: CompressionMethod) {
+fn push_static(entries: &mut Vec<EpubEntry>, name: &str, content: &'static [u8], method: CompressionMethod) {
     entries.push(EpubEntry {
-        name: name.to_string(),
+        name: name.to_owned(),
         method,
-        source: EpubEntrySource::Inline(content.to_vec()),
+        source: EpubEntrySource::Static(content),
     });
 }
 
-/// アセットをエントリへ積む。既に内容を持っていれば Inline、無ければ呼び出し側が
-/// 用意する `Asset` になる（`write_asset` と同じ解決規則）。
-fn push_asset(entries: &mut Vec<EpubEntry>, asset: &EpubAsset) {
-    let name = format!("item/{}", asset.path);
-    let source = match &asset.data {
-        Some(data) => EpubEntrySource::Inline(data.clone()),
-        None => EpubEntrySource::Asset(asset.path.clone()),
+fn push_generated(entries: &mut Vec<EpubEntry>, name: String, source: EpubEntrySource) {
+    entries.push(EpubEntry { name, method: CompressionMethod::Deflated, source });
+}
+
+fn push_asset(entries: &mut Vec<EpubEntry>, index: usize, asset: &EpubAsset) {
+    let source = if asset.data.is_some() {
+        EpubEntrySource::EmbeddedAsset(index)
+    } else {
+        EpubEntrySource::Asset(index)
     };
-    entries.push(EpubEntry {
-        name,
-        method: CompressionMethod::Deflated,
-        source,
-    });
+    push_generated(entries, format!("item/{}", asset.path), source);
 }
 
-/// 書き出すエントリを順序どおりに組み立てる。`write_epub_body` と
-/// `EpubStreamWriter` はどちらもこの 1 つの計画を消費する（出力はバイト単位で一致する）。
-fn entries_for(book: &EpubBook) -> Result<Vec<EpubEntry>, EpubError> {
-    let mut entries: Vec<EpubEntry> = Vec::new();
+fn entries_for(book: &EpubBook) -> Vec<EpubEntry> {
+    let mut entries = Vec::new();
     let image_only = is_image_only(&book.sections);
-    push_inline(
-        &mut entries,
-        "mimetype",
-        MIMETYPE.as_bytes(),
-        CompressionMethod::Stored,
-    );
-    push_inline(
-        &mut entries,
-        "META-INF/container.xml",
-        CONTAINER_XML.as_bytes(),
-        CompressionMethod::Deflated,
-    );
-
+    push_static(&mut entries, "mimetype", MIMETYPE.as_bytes(), CompressionMethod::Stored);
+    push_static(&mut entries, "META-INF/container.xml", CONTAINER_XML.as_bytes(), CompressionMethod::Deflated);
     if image_only {
-        push_inline(
-            &mut entries,
-            "item/style/fixed-layout-jp.css",
-            include_str!("../assets/aozora/template/item/style/fixed-layout-jp.css").as_bytes(),
-            CompressionMethod::Deflated,
-        );
+        push_static(&mut entries, "item/style/fixed-layout-jp.css",
+            include_bytes!("../assets/aozora/template/item/style/fixed-layout-jp.css"), CompressionMethod::Deflated);
     } else {
         for (name, content) in [
-            (
-                "item/style/font.css",
-                include_str!("../assets/aozora/template/item/style/font.css"),
-            ),
-            (
-                "item/style/aozora.css",
-                include_str!("../assets/aozora/template/item/style/aozora.css"),
-            ),
-            (
-                "item/style/fixed-layout-jp.css",
-                include_str!("../assets/aozora/template/item/style/fixed-layout-jp.css"),
-            ),
+            ("item/style/font.css", include_str!("../assets/aozora/template/item/style/font.css")),
+            ("item/style/aozora.css", include_str!("../assets/aozora/template/item/style/aozora.css")),
+            ("item/style/fixed-layout-jp.css", include_str!("../assets/aozora/template/item/style/fixed-layout-jp.css")),
             ("item/style/book-style.css", BOOK_STYLE_CSS),
-            (
-                "item/style/style-reset.css",
-                include_str!("../assets/aozora/template/item/style/style-reset.css"),
-            ),
-            (
-                "item/style/style-standard.css",
-                include_str!("../assets/aozora/template/item/style/style-standard.css"),
-            ),
-            (
-                "item/style/style-advance.css",
-                include_str!("../assets/aozora/template/item/style/style-advance.css"),
-            ),
+            ("item/style/style-reset.css", include_str!("../assets/aozora/template/item/style/style-reset.css")),
+            ("item/style/style-standard.css", include_str!("../assets/aozora/template/item/style/style-standard.css")),
+            ("item/style/style-advance.css", include_str!("../assets/aozora/template/item/style/style-advance.css")),
         ] {
-            push_inline(&mut entries, name, content.as_bytes(), CompressionMethod::Deflated);
+            push_static(&mut entries, name, content.as_bytes(), CompressionMethod::Deflated);
         }
     }
     if image_only {
-        for asset in &book.assets {
-            push_asset(&mut entries, asset);
+        for (index, asset) in book.assets.iter().enumerate() {
+            push_asset(&mut entries, index, asset);
         }
     }
-
-    if let Some(cover_asset) = &book.cover_asset
-        && !image_only
-        && book.cover_page_enabled()
-    {
-        push_inline(
-            &mut entries,
-            "item/xhtml/cover.xhtml",
-            render_cover(
-                &book.metadata,
-                cover_asset,
-                book.cover_dimensions,
-                book.kindle,
-            )
-            .as_bytes(),
-            CompressionMethod::Deflated,
-        );
+    if !image_only && book.cover_page_enabled() {
+        push_generated(&mut entries, "item/xhtml/cover.xhtml".to_owned(), EpubEntrySource::Cover);
     }
-    // `style/*.css` アセット (narou の `css_custom` 相当) を本文へリンクする。
-    let extra_css: Vec<String> = book
-        .assets
-        .iter()
-        .map(|asset| asset.path.clone())
-        .filter(|path| path.starts_with("style/") && path.ends_with(".css"))
-        .collect();
+    let mut body_number = 0;
     for (index, section) in book.sections.iter().enumerate() {
-        let path = if is_title_page(section) {
+        let name = if is_title_page(section) {
             "item/xhtml/title.xhtml".to_owned()
         } else {
-            format!(
-                "item/xhtml/{:04}.xhtml",
-                book.sections[..=index]
-                    .iter()
-                    .filter(|section| !is_title_page(section))
-                    .count()
-            )
+            body_number += 1;
+            format!("item/xhtml/{body_number:04}.xhtml")
         };
-        push_inline(
-            &mut entries,
-            &path,
-            render_section(
-                &book.metadata,
-                &section.body_fragment,
-                book.vertical,
-                book.kindle,
-                book.title_markup.as_deref(),
-                book.creator_markup.as_deref(),
-                book.title_page_markup.as_deref(),
-                book.title_page_type,
-                &extra_css,
-            )
-            .as_bytes(),
-            CompressionMethod::Deflated,
-        );
+        push_generated(&mut entries, name, EpubEntrySource::Section(index));
     }
     if !image_only {
-        let text_css = render_text_css(&book.assets, &book.style);
-        push_inline(
-            &mut entries,
-            "item/style/text.css",
-            text_css.as_bytes(),
-            CompressionMethod::Deflated,
-        );
+        push_generated(&mut entries, "item/style/text.css".to_owned(), EpubEntrySource::TextStyle);
     }
-    push_inline(
-        &mut entries,
-        "item/standard.opf",
-        render_package(
-            &book.metadata,
-            &book.sections,
-            &book.assets,
-            book.cover_asset.as_deref(),
-            book.vertical,
-            book.toc_page,
-            book.cover_page_enabled(),
-        )
-        .as_bytes(),
-        CompressionMethod::Deflated,
-    );
-    push_inline(
-        &mut entries,
-        "item/nav.xhtml",
-        render_nav(
-            &book.metadata,
-            &book.sections,
-            book.vertical,
-            &book.metadata.title,
-            &book.chapters,
-            book.toc_vertical,
-            book.toc_page,
-            book.nav_nest,
-            book.title_toc,
-            book.cover_page_enabled(),
-            book.cover_page_enabled() && book.cover_page_toc,
-        )
-        .as_bytes(),
-        CompressionMethod::Deflated,
-    );
-    push_inline(
-        &mut entries,
-        "item/toc.ncx",
-        render_ncx(
-            &book.metadata,
-            &book.sections,
-            &book.metadata.title,
-            &book.chapters,
-            book.ncx_nest,
-            book.title_toc,
-            book.cover_page_enabled() && book.cover_page_toc,
-        )
-        .as_bytes(),
-        CompressionMethod::Deflated,
-    );
+    push_generated(&mut entries, "item/standard.opf".to_owned(), EpubEntrySource::Package);
+    push_generated(&mut entries, "item/nav.xhtml".to_owned(), EpubEntrySource::Navigation);
+    push_generated(&mut entries, "item/toc.ncx".to_owned(), EpubEntrySource::Ncx);
     if !image_only {
-        for asset in &book.assets {
-            push_asset(&mut entries, asset);
+        for (index, asset) in book.assets.iter().enumerate() {
+            push_asset(&mut entries, index, asset);
         }
     }
-    Ok(entries)
+    entries
 }
 
-/// Writes every EPUB entry into `archive`. Shared by the seekable and
-/// streaming writers.
+fn render_entry<'a>(book: &'a EpubBook, entry: &EpubEntry, body: Option<&str>) -> Result<Cow<'a, [u8]>, EpubError> {
+    let text = match &entry.source {
+        EpubEntrySource::Static(bytes) => return Ok(Cow::Borrowed(bytes)),
+        EpubEntrySource::Asset(index) | EpubEntrySource::EmbeddedAsset(index) => {
+            let asset = &book.assets[*index];
+            let data = asset.data.as_deref()
+                .ok_or_else(|| EpubError::MissingAsset(asset.path.clone()))?;
+            return Ok(Cow::Borrowed(data));
+        }
+        EpubEntrySource::Section(index) => {
+            let section = &book.sections[*index];
+            let body = if section.deferred {
+                body.ok_or(EpubError::InvalidMetadata("deferred EPUB section body missing"))?
+            } else {
+                &section.body_fragment
+            };
+            let extra_css = book.assets.iter().map(|asset| &asset.path)
+                .filter(|path| path.starts_with("style/") && path.ends_with(".css"))
+                .cloned().collect::<Vec<_>>();
+            render_section(&book.metadata, body, book.vertical, book.kindle,
+                book.title_markup.as_deref(), book.creator_markup.as_deref(),
+                book.title_page_markup.as_deref(), book.title_page_type, &extra_css)
+        }
+        EpubEntrySource::Cover => render_cover(&book.metadata,
+            book.cover_asset.as_deref().ok_or(EpubError::InvalidMetadata("cover asset"))?,
+            book.cover_dimensions, book.kindle),
+        EpubEntrySource::TextStyle => render_text_css(&book.assets, &book.style),
+        EpubEntrySource::Package => render_package(&book.metadata, &book.sections, &book.assets,
+            book.cover_asset.as_deref(), book.vertical, book.toc_page, book.cover_page_enabled()),
+        EpubEntrySource::Navigation => render_nav(&book.metadata, &book.sections, book.vertical,
+            &book.metadata.title, &book.chapters, book.toc_vertical, book.toc_page, book.nav_nest,
+            book.title_toc, book.cover_page_enabled(), book.cover_page_enabled() && book.cover_page_toc),
+        EpubEntrySource::Ncx => render_ncx(&book.metadata, &book.sections, &book.metadata.title,
+            &book.chapters, book.ncx_nest, book.title_toc, book.cover_page_enabled() && book.cover_page_toc),
+    };
+    Ok(Cow::Owned(text.into_bytes()))
+}
+
 fn write_epub_body<W: Write + Seek>(
     archive: &mut ZipWriter<W>,
     book: &EpubBook,
     provider: &impl Fn(&str) -> Option<Vec<u8>>,
 ) -> Result<(), EpubError> {
-    for entry in book.entries()? {
-        write_planned_entry(archive, &entry, provider)?;
-    }
-    Ok(())
-}
-
-fn write_planned_entry<W: Write + Seek>(
-    archive: &mut ZipWriter<W>,
-    entry: &EpubEntry,
-    provider: &impl Fn(&str) -> Option<Vec<u8>>,
-) -> Result<(), EpubError> {
-    let options = SimpleFileOptions::default().compression_method(entry.method);
-    archive.start_file(entry.name.as_str(), options)?;
-    match &entry.source {
-        EpubEntrySource::Inline(bytes) => archive.write_all(bytes)?,
-        EpubEntrySource::Asset(path) => {
-            let data = provider(path).ok_or_else(|| EpubError::MissingAsset(path.clone()))?;
-            archive.write_all(&data)?;
-        }
+    for entry in entries_for(book) {
+        let options = SimpleFileOptions::default().compression_method(entry.method);
+        let bytes = match render_entry(book, &entry, None) {
+            Err(EpubError::MissingAsset(path)) => Cow::Owned(
+                provider(&path).ok_or(EpubError::MissingAsset(path))?),
+            result => result?,
+        };
+        archive.start_file(entry.name.as_str(), options)?;
+        archive.write_all(&bytes)?;
+        archive.flush()?;
     }
     Ok(())
 }

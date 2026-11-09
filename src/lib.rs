@@ -16,7 +16,7 @@ pub use input::{
     FileSource, Input, InputError, TextEntry, decode_text, detect_encoding, normalize_entry_path,
 };
 pub use metadata::{
-    BookMeta, TitleType, detect_meta, detect_meta_with_gaiji, file_title_creator,
+    BookMeta, MetadataScanner, TitleType, detect_meta, detect_meta_with_gaiji, file_title_creator,
     remove_metadata_lines,
 };
 pub use pipeline::{
@@ -27,7 +27,7 @@ pub use pipeline::{
     split_image_page_sections, svg_image_fragment,
 };
 pub use text::{
-    ChapterRecord, TextError, aozora_text_to_xhtml_sections,
+    ChapterRecord, SectionStream, TextError, aozora_text_to_xhtml_sections,
     aozora_text_to_xhtml_sections_with_chapters, aozora_text_to_xhtml_sections_with_config,
     apply_alt_upright, collect_image_alts, decode_input, escape_html, image_reference_occurrences,
     image_references, inline_to_xhtml, plain_text_to_xhtml, plain_text_to_xhtml_with_config,

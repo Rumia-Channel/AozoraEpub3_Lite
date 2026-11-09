@@ -281,9 +281,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### ストリーミング出力
 
-`EpubBook::write_to_stream` / `write_to_stream_with` は `Seek` を要求せず、`Write` のみで EPUB を出力できます。HTTP レスポンスや Cloudflare Workers など、シークできない出力先に向いています。
+`EpubBook::write_to_stream` / `write_to_stream_with` は `Seek` を要求せず、同期の `Write` へ EPUB を出力する便宜 API です。
 
-`EpubAsset::lazy` と `write_to_stream_with` を組み合わせると、画像をすべてメモリに保持せず、書き出し時に 1 枚ずつ取得できます。
+`EpubAsset::lazy` と `write_to_stream_with` を組み合わせると画像を 1 枚ずつ取得できます。ただし取得コールバックは 1 枚分のバイト列を返すため、大きな画像や非同期 HTTP 出力には、後述のチャンク API を使ってください。
 
 ```rust
 book.write_to_stream_with(response_body, |epub_path| {
@@ -297,6 +297,14 @@ book.write_to_stream_with(response_body, |epub_path| {
 挿絵の寸法を非同期ストレージから取得する場合は `pipeline::plan_assets` を使います。`AssetPlan::next_request` は元の画像パス・MIME 型・ローカル入力の場合の実パスを返し、画像バイトを読みません。寸法を `provide_dimensions` で渡してから次の画像へ進み、`next_request` が `None` を返したら `complete` で `CollectedAsset` と表紙パスを受け取ります。画像は 1 枚ずつ取得して寸法を読んだ後に解放でき、画素処理は書き出し時まで延期できます。
 
 同期入力の `collect_assets` も同じプランを使うため、連番・重複参照・表紙選択・エラーの順序は共通です。同期の独自寸法プロバイダーには `AssetPlan::finish` を使えます。寸法不明は `provide_dimensions(None)` で表しますが、画像の読み取り失敗は別途呼び出し側で扱ってください。未完了プランの `complete`、寸法待ちのままの次の要求、要求なしの寸法登録はエラーになります。
+
+### 入力・エントリ単位のチャンク処理
+
+`EpubBook::stream_writer` は book の所有権を受け取り、全エントリの内容ではなく出力計画を保持します。`next_entry` で対象を選び、`begin_current` → `write_chunk` → `end_current` で 1 エントリを分割して書けます。静的エントリ・遅延 XHTML の描画には `render_current` を使い、最後に `finish` で ZIP を確定します。出力先が受け取るまで次の入力を読まない制御は呼び出し側で行ってください。
+
+本文も、`MetadataScanner` と `SectionStream` に行を順に渡すことで、既に処理した本文・XHTML を保持せず進められます。画像参照だけを集めた場合は `pipeline::plan_assets_from_references` を使えます。複数回読む入力の固定、非同期ストレージへの一時保存、キャンセル時の回収は呼び出し側の責務です。
+
+画素処理は `AnimationTransform` の所有権を使う経路で既存バッファを再利用し、リサイズの中間領域を行単位に制限します。`source_rows` は増分復号した RGBA 行を受け取るため、大きな元画像の全画素配列を作らずにリサイズできます。画像形式の復号器によっては 1 フレーム分の画素が必要です。フレーム・透過・表示時間を省略してメモリを節約する実装にはしていません。
 
 ## Java 版 AozoraEpub3 との関係
 

@@ -16,6 +16,7 @@ dependencies = [
  "image",
  "js-sys",
  "md5",
+ "png",
  "zip",
 ]
 

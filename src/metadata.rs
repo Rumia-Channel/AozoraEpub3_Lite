@@ -136,8 +136,14 @@ pub fn detect_meta_with_gaiji(
     publisher_first: bool,
     gaiji: &std::collections::BTreeMap<String, String>,
 ) -> BookMeta {
-    let converted = convert_gaiji_notes(input, gaiji);
-    detect_meta(&converted, title_type, publisher_first)
+    let mut scanner = MetadataScanner::new(title_type, publisher_first);
+    for line in input.lines() {
+        scanner.push_line(line, gaiji);
+        if scanner.is_complete() {
+            break;
+        }
+    }
+    scanner.finish()
 }
 
 fn convert_gaiji_notes(input: &str, gaiji: &std::collections::BTreeMap<String, String>) -> String {
@@ -226,70 +232,98 @@ pub fn detect_meta_with_page_breaks(
     publisher_first: bool,
     page_breaks: &BTreeSet<String>,
 ) -> BookMeta {
-    let (meta_lines, start, first_comment_line) = collect_meta_lines(input, page_breaks);
-    let Some(start) = start else {
-        return BookMeta::default();
-    };
-    set_meta_info(
-        title_type,
-        publisher_first,
-        &meta_lines,
-        start,
-        first_comment_line,
-    )
+    let mut scanner = MetadataScanner::with_page_breaks(title_type, publisher_first, page_breaks.clone());
+    for line in input.lines() {
+        scanner.push_converted_line(line);
+        if scanner.is_complete() {
+            break;
+        }
+    }
+    scanner.finish()
 }
 
-/// Collects the leading non-empty lines used for metadata detection,
-/// mirroring `AozoraEpub3Converter.getBookInfo`:
-///
-/// * collection stops at a comment block (50+ dashes), at a page-break
-///   chuki, or after 10 collected lines,
-/// * blank lines and lines whose text is entirely chuki are skipped but
-///   still advance the offset, so gaps are preserved (the `case 2` and
-///   `case 1` layouts depend on them).
-///
-/// Returns (up to 10 line slots, first line index, first comment line index).
-fn collect_meta_lines(
-    input: &str,
-    page_breaks: &BTreeSet<String>,
-) -> (Vec<Option<String>>, Option<usize>, Option<usize>) {
-    const BUFFER: usize = 10;
-    let mut slots = vec![None; BUFFER];
-    let mut start = None;
-    let mut first_comment_line = None;
+/// Metadata pre-read retaining ten leading line slots, not a copy of the book.
+pub struct MetadataScanner {
+    title_type: TitleType,
+    publisher_first: bool,
+    page_breaks: BTreeSet<String>,
+    slots: [Option<String>; 10],
+    start: Option<usize>,
+    first_comment_line: Option<usize>,
+    line_index: usize,
+    complete: bool,
+}
 
-    for (line_index, raw_line) in input.lines().enumerate() {
+impl MetadataScanner {
+    pub fn new(title_type: TitleType, publisher_first: bool) -> Self {
+        Self::with_page_breaks(title_type, publisher_first,
+            DEFAULT_PAGE_BREAK_NOTES.iter().map(|note| (*note).to_owned()).collect())
+    }
+
+    pub fn with_page_breaks(title_type: TitleType, publisher_first: bool, page_breaks: BTreeSet<String>) -> Self {
+        Self {
+            title_type, publisher_first, page_breaks,
+            slots: Default::default(),
+            start: None,
+            first_comment_line: None,
+            line_index: 0,
+            complete: false,
+        }
+    }
+
+    pub fn push_line(&mut self, line: &str, gaiji: &std::collections::BTreeMap<String, String>) {
+        if !self.complete {
+            self.push_converted_line(&convert_gaiji_notes(line, gaiji));
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    fn push_converted_line(&mut self, raw_line: &str) {
+        if self.complete {
+            return;
+        }
+        let line_index = self.line_index;
+        self.line_index += 1;
         let line = remove_space(raw_line);
         let no_ruby = remove_ruby(&line);
         if no_ruby.starts_with(COMMENT_MARKER) {
-            first_comment_line = Some(line_index);
-            break;
+            self.first_comment_line = Some(line_index);
+            self.complete = true;
+            return;
         }
         if no_ruby.is_empty() {
-            continue;
+            return;
         }
-        match start {
+        match self.start {
             None => {
                 if !chapter_name(&no_ruby, 0, true).is_empty() {
-                    start = Some(line_index);
-                    slots[0] = Some(line);
+                    self.start = Some(line_index);
+                    self.slots[0] = Some(line);
                 }
             }
             Some(first_line) => {
-                if is_page_break_line(&no_ruby, page_breaks) {
-                    break;
-                }
                 let offset = line_index - first_line;
-                if offset > BUFFER - 1 {
-                    break;
+                if is_page_break_line(&no_ruby, &self.page_breaks) || offset >= self.slots.len() {
+                    self.complete = true;
+                    return;
                 }
                 if !chapter_name(&no_ruby, 0, true).is_empty() {
-                    slots[offset] = Some(line);
+                    self.slots[offset] = Some(line);
                 }
             }
         }
     }
-    (slots, start, first_comment_line)
+
+    pub fn finish(self) -> BookMeta {
+        match self.start {
+            Some(start) => set_meta_info(self.title_type, self.publisher_first, &self.slots,
+                start, self.first_comment_line),
+            None => BookMeta::default(),
+        }
+    }
 }
 
 /// True when the line contains a page-break chuki such as ［＃改ページ］.

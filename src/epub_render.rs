@@ -948,7 +948,11 @@ pub(super) fn is_image_only(sections: &[EpubSection]) -> bool {
     !sections.is_empty()
         && sections
             .iter()
-            .all(|section| svg_image_body(section.body_fragment.trim()).is_some())
+            .all(|section| if section.deferred {
+                section.image_only
+            } else {
+                svg_image_body(section.body_fragment.trim()).is_some()
+            })
 }
 
 fn svg_view_box(svg: &str) -> Option<(u32, u32)> {
